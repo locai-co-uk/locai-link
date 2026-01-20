@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+SPDX-License-Identifier: BUSL-1.1
+-->
+
 # Loc.ai:Link
 **The distributed edge runtime for the Loc.ai platform** <br>
 Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a Raspberry Pi to an industrial GPU cluster—into a managed node within your Loc.ai fleet. It handles secure connectivity, model deployment, and local inference orchestration without relying on cloud dependency.

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+SPDX-License-Identifier: BUSL-1.1
+-->
+
 # Contributing to Loc.ai:Link
 First off, thank you for considering contributing to Loc.ai! We believe that the best infrastructure is built together, and we value every bug report, feature request, and pull request.
 ## How to Contribute

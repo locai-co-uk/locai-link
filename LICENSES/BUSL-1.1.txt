@@ -1,0 +1,1 @@
+To reduce duplication this file is empty and the licence text is held in the root of the project
