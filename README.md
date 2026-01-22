@@ -1,7 +1,6 @@
+# Loc.ai:Link
 ![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)
 ![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)
-
-# Loc.ai:Link
 
 **The distributed edge runtime for the Loc.ai platform** <br>
 Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a Raspberry Pi to an industrial GPU cluster—into a managed node within your Loc.ai fleet. It handles secure connectivity, model deployment, and local inference orchestration without relying on cloud dependency.
