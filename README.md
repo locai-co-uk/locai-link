@@ -1,6 +1,5 @@
 # Loc.ai:Link
-
-![Build Status](https://github.com/locai/agent/actions/workflows/ci.yml/badge.svg)
+![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)
 ![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)
 
 **The distributed edge runtime for the Loc.ai platform** <br>
