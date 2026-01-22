@@ -24,7 +24,7 @@ from link.logger import link_logger
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "configs"
 CONFIG_FILE = CONFIG_DIR / "agent_config.json"
-BASE_URL = "https://api.locai.co.uk/api/v1"
+BASE_URL = None
 
 METRICS_INTERVAL_SECONDS = 30  # Interval for sending metrics
 COMMAND_POLL_INTERVAL_SECONDS = 10  # Interval for polling for commands
@@ -43,17 +43,23 @@ def load_config() -> dict | None:
     return None
 
 
-def save_config(device_id, api_key):
+def save_config(device_id, api_key, api_url=None):
     """Saves the agent's configuration to a local file.
 
     Args:
         device_id (str): The ID of the device.
         api_key (str): The API key for the device.
+        api_url (str, optional): The API URL to persist.
     """
     # Ensure the config directory exists
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     config_data = {"device_id": device_id, "api_key": api_key}
+
+    # Store the API URL if provided
+    if api_url:
+        config_data["api_url"] = api_url
+
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=4)
     print(f"Agent configuration saved to {CONFIG_FILE}")
@@ -105,7 +111,8 @@ def activate_agent(device_id, user_token) -> bool:
                 )
                 sys.exit(1)
 
-            save_config(device_id, api_key)
+            # Persist the URL used for activation
+            save_config(device_id, api_key, BASE_URL)
             print("Device activated successfully.")
             return True
 
@@ -165,7 +172,9 @@ def register_new_device_with_key(device_name, device_type, username, registratio
                 )
                 return None, None
             print(f"Device '{device_name}' registered successfully with ID: {device_id}")
-            save_config(device_id, api_key)
+
+            # Persist the URL used for registration
+            save_config(device_id, api_key, BASE_URL)
             return device_id, api_key
         else:
             print(
@@ -301,11 +310,6 @@ def send_metrics(device_id, api_key):
 def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
     """Downloads and saves a model file and its runtime config from a given URL.
 
-    Uses the Link log handling system for:
-    - Payload validation
-    - Model download with retry
-    - File save operations
-
     Args:
         payload (dict): The payload containing model information.
         api_key (str): The API key for the device.
@@ -348,7 +352,7 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
 
         link_logger.progress(f"Starting download for {model_name}...", 0, "downloading")
 
-        def download_model_file():
+        def download_model_file() -> requests.Response:
             """Inner function for retry wrapper.
 
             Returns:
@@ -796,81 +800,74 @@ def main():
 
     print("Agent starting...")
 
+    # We define all possible arguments here so we can detect intent (Register vs Run)
+    parser = argparse.ArgumentParser(description="LocAI Agent")
+
+    # Setup Arguments
+    device_group = parser.add_mutually_exclusive_group()
+    device_group.add_argument("--device-id", help="Device ID")
+    device_group.add_argument("--device-name", help="Device Name (for new registration)")
+
+    parser.add_argument("--device-type", default="edge_device")
+    parser.add_argument("--username", help="Platform username")
+    parser.add_argument("--registration-key", help="One-time registration key")
+    parser.add_argument("--api-key", help="Existing API Key")
+
+    # Runtime Arguments
+    parser.add_argument("--api-url", help="Override the API URL")
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Priority: CLI Arg > Config File > Default (None)
     config = load_config()
 
-    if not config:
-        print("Agent is not configured. Starting registration/activation process.")
-        parser = argparse.ArgumentParser(description="Register and activate the ML Edge Device Agent.")
+    if args.api_url:
+        BASE_URL = args.api_url
+        print(f"Using provided API URL: {BASE_URL}")
+        # If we have a config, update the persisted URL immediately
+        if config:
+            save_config(config["device_id"], config["api_key"], BASE_URL)
+    elif config and "api_url" in config:
+        BASE_URL = config["api_url"]
 
-        # Create mutually exclusive group for device registration vs activation
-        device_group = parser.add_mutually_exclusive_group(required=True)
-        device_group.add_argument(
-            "--device-id",
-            help="The device ID (if device is already registered in the platform UI).",
-        )
-        device_group.add_argument(
-            "--device-name",
-            help="A descriptive name for the new device (for first-time registration).",
-        )
+    # Check if we have a URL before proceeding
+    if not BASE_URL:
+        # Note: In a fresh install, manager.py usually injects the default, so this catches rare edge cases.
+        print("Error: No API URL provided or configured. Exiting.", file=sys.stderr)
+        sys.exit(1)
 
-        parser.add_argument(
-            "--device-type",
-            default="edge_device",
-            help="The type of the device (e.g., 'edge_device', 'camera'). Only used with --device-name.",
-        )
-        parser.add_argument("--username", help="Your platform username (for key validation).")
-        parser.add_argument(
-            "--registration-key",
-            help="The one-time registration key obtained from the platform.",
-        )
-        parser.add_argument(
-            "--api-key",
-            help="Use with --device-id if the device was activated in the UI to configure the agent without a token.",
-        )
-        parser.add_argument(
-            "--api-url",
-            help="Override the API URL (e.g., http://34.39.122.54:8001/api/v1)",
-        )
+    # We detect setup mode if specific flags are present, REGARDLESS of existing config.
+    is_setup_mode = bool(args.device_name or args.registration_key or (args.device_id and args.api_key))
 
-        args = parser.parse_args()
-
-        if args.api_url:
-            BASE_URL = args.api_url
-            print(f"Using provided API URL: {BASE_URL}")
-        else:
-            print(f"Using default API URL: {BASE_URL}")
-
-        device_id_to_use = None
-
-        # Handle device registration flow (first-time setup) via key
+    if is_setup_mode:
+        # A. New Device Registration
         if args.device_name:
             if not args.username or not args.registration_key:
-                print(
-                    "--username and --registration-key are required with --device-name for key-based registration.",
-                    file=sys.stderr,
-                )
+                print("Error: --username and --registration-key required with --device-name.", file=sys.stderr)
                 sys.exit(1)
-            print("First-time setup: Registering new device with registration key...")
+
+            # Pass BASE_URL to ensure it gets saved in the new config
             device_id, api_key = register_new_device_with_key(
                 args.device_name, args.device_type, args.username, args.registration_key
             )
             if not device_id or not api_key:
-                print("Device registration failed. Exiting.", file=sys.stderr)
                 sys.exit(1)
-            device_id_to_use = device_id  # noqa: F841
-            # Reload config after one-step registration
-            config = load_config()
-        # Handle existing device pre-activated in UI: configure with provided api key
+
+            print("✔ Registration complete. Configuration saved.")
+            sys.exit(0)  # STOP HERE
+
+        # B. Existing Device Activation / Re-configuration
         elif args.device_id:
-            # Two options: (1) device was activated in UI → pass --api-key
-            #              (2) device was registered in UI but needs activation → pass --registration-key
+            # B1. Manual Configuration (User provides ID + Key)
             if args.api_key:
-                print("Configuring agent with provided device ID and API key...")
-                save_config(args.device_id, args.api_key)
-                config = load_config()
+                save_config(args.device_id, args.api_key, BASE_URL)
+                print("✔ Configuration saved.")
+                sys.exit(0)  # STOP HERE
+
+            # B2. Activation via Key
             elif args.registration_key:
                 print("Activating existing device with registration key...")
-                # Call backend to activate using key and persist config
                 payload = {
                     "device_id": args.device_id,
                     "registration_key": args.registration_key,
@@ -882,59 +879,34 @@ def main():
                         data = response.json()
                         api_key = data.get("api_key")
                         if not api_key:
-                            print(
-                                "Error: Activation successful but no API key received.",
-                                file=sys.stderr,
-                            )
+                            print("Error: Activation successful but no API key received.", file=sys.stderr)
                             sys.exit(1)
-                        save_config(args.device_id, api_key)
-                        config = load_config()
+                        save_config(args.device_id, api_key, BASE_URL)
+                        print("✔ Activation complete. Configuration saved.")
+                        sys.exit(0)  # STOP HERE
                     else:
-                        print(
-                            f"Error activating device with key: {response.status_code}",
-                            file=sys.stderr,
-                        )
-                        try:
-                            error_details = response.json().get("detail", "No details provided.")
-                            print(f"Details: {error_details}", file=sys.stderr)
-                        except json.JSONDecodeError:
-                            print(f"Raw Response: {response.text}", file=sys.stderr)
+                        print(f"Error activating device: {response.status_code} - {response.text}", file=sys.stderr)
                         sys.exit(1)
                 except requests.exceptions.RequestException as e:
-                    print(
-                        f"A network error occurred during device activation with key: {e}",
-                        file=sys.stderr,
-                    )
+                    print(f"Network error during activation: {e}", file=sys.stderr)
                     sys.exit(1)
             else:
-                print(
-                    "Provide either --api-key (if the device was activated in the UI) or "
-                    + "--registration-key (if UI provided a key for terminal activation).",
-                    file=sys.stderr,
-                )
+                print("Error: Provide --api-key or --registration-key with --device-id.", file=sys.stderr)
                 sys.exit(1)
 
-    # Handle standard run args (outside of config setup)
-    # We still need to parse args for --api-url even if config exists
-    else:
-        # Create a simple parser just for runtime flags
-        parser = argparse.ArgumentParser(description="LocAI Agent Runtime")
-        parser.add_argument("--api-url", help="Override the API URL")
-        # We need to use parse_known_args because manager.py might pass other things
-        # or simply because we want to ignore unknown args that might be left over
-        args, _ = parser.parse_known_args()
-
-        if args.api_url:
-            BASE_URL = args.api_url
-            print(f"Using provided API URL: {BASE_URL}")
-        else:
-            print(f"Using default API URL: {BASE_URL}")
+    # If we reached here, no setup arguments were passed. We must have a config to run.
+    if not config:
+        print("Agent is not configured.", file=sys.stderr)
+        print("Please run 'manager.py register' or 'manager.py activate' first.", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Agent configured for device ID: {config['device_id']}")
+    print(f"Using API URL: {BASE_URL}")
+
     device_id = config["device_id"]
     api_key = config["api_key"]
 
-    # Initialise LogClient for backend reporting
+    # Initialise LogClient
     try:
         agent_version = version("locai-link")
     except PackageNotFoundError:
@@ -947,69 +919,42 @@ def main():
         agent_version=agent_version,
     )
 
-    # Set device status to online at startup
     set_device_status(device_id, api_key, "online")
 
     stop_event = threading.Event()
 
     def shutdown_gracefully(signum, frame):
-        """Handles graceful shutdown of the agent.
-
-        Args:
-            signum (int): The signal number.
-            frame (frame): The current stack frame.
-        """
-        print(f"\nShutdown signal received (Signal {signum}). Cleaning up...")
-
-        # 1. Stop the loops
+        print("\nShutdown signal received. Cleaning up...")
         stop_event.set()
 
-        # 2. Terminate any running model inference processes
+        # Stop subprocesses
         for model_name, process_info in list(running_processes.items()):
-            print(f"Stopping inference for model '{model_name}'...")
-            process = process_info["process"]
             try:
-                if os.name == "nt":
-                    process.terminate()
-                else:
-                    # Kill the inference subprocess group started with start_new_session
-                    os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                process.kill()  # Force kill if necessary
-            except Exception as e:
-                print(f"Error stopping process for {model_name}: {e}")
-            del running_processes[model_name]
+                process_info["process"].terminate()
+            except Exception:
+                pass
 
-        # 3. Set device status to offline
         set_device_status(device_id, api_key, "offline")
-
-        print("Cleanup complete. Agent shutting down.")
         sys.exit(0)
 
-    # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, shutdown_gracefully)
     signal.signal(signal.SIGTERM, shutdown_gracefully)
 
-    # Start metrics and command loops in separate threads
+    # Start Threads
     metrics_thread = threading.Thread(target=metrics_loop, args=(device_id, api_key, stop_event), daemon=True)
     command_thread = threading.Thread(target=command_loop, args=(device_id, api_key, config, stop_event), daemon=True)
     monitoring_thread = threading.Thread(
-        target=monitor_inference_processes,
-        args=(device_id, api_key, stop_event),
-        daemon=True,
+        target=monitor_inference_processes, args=(device_id, api_key, stop_event), daemon=True
     )
 
     metrics_thread.start()
     command_thread.start()
     monitoring_thread.start()
 
-    # Keep the main thread alive to catch signals
     try:
         while not stop_event.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
-        # This is another way to catch Ctrl+C, redundancy is fine.
         shutdown_gracefully(signal.SIGINT, None)
 
 

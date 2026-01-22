@@ -14,8 +14,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.resolve()
 VENV_NAME = ".venv"
 VENV_PATH = PROJECT_ROOT / VENV_NAME
-AGENT_SCRIPT = PROJECT_ROOT / "src" / "link" / "agent.py"
 PYTHON_VERSION = os.environ.get("PYTHON_VERSION", "3.11")
+AGENT_SCRIPT = PROJECT_ROOT / "src" / "link" / "agent.py"
+DEFAULTS_FILE = PROJECT_ROOT / "defaults.env"
+CONFIG_FILE = PROJECT_ROOT / "configs" / "agent_config.json"
 
 # --- Helper Functions ---
 
@@ -141,6 +143,20 @@ def ensure_venv_execution():
         # For other commands, we warn.
         if "setup" not in sys.argv:
             print("⚠ Warning: .venv not found. Run 'python manager.py setup' first.")
+
+
+def load_defaults():
+    """Reads defaults.env and returns a dict."""
+    defaults = {}
+    if DEFAULTS_FILE.exists():
+        with open(DEFAULTS_FILE, "r") as f:
+            for line in f:
+                # Ignore comments and empty lines
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    defaults[key.strip()] = value.strip()
+    return defaults
 
 
 # --- Command Implementations ---
@@ -293,9 +309,9 @@ def main():
 
     # --- REGISTER COMMAND ---
     reg_parser = subparsers.add_parser("register", help="Register a new device")
-    reg_parser.add_argument("--device-name", required=True, help="Name for the new device")
-    reg_parser.add_argument("--username", required=True, help="Platform username")
-    reg_parser.add_argument("--registration-key", required=True, help="Registration key")
+    reg_parser.add_argument("--device-name", required=False, help="Name for the new device")
+    reg_parser.add_argument("--username", required=False, help="Platform username")
+    reg_parser.add_argument("--registration-key", required=False, help="Registration key")
     reg_parser.add_argument(
         "--device-type",
         default="edge_device",
@@ -327,35 +343,60 @@ def main():
         return
 
     # --- AUTO-SETUP CHECK ---
-    # If the virtual environment (or python executable) is missing, run setup automatically.
     if not VENV_PATH.exists() or not get_venv_python().exists():
         print_step("Environment Not Found")
         print("⚠ The virtual environment is not set up yet.")
         print("  initiating automatic setup (Core Dependencies)...")
 
-        setup()  # Run the setup function defined above
-
-        # Verify setup actually worked before proceeding
+        setup()
         if not get_venv_python().exists():
             print("❌ Automatic setup failed. Please run 'python manager.py setup' manually to debug.")
             sys.exit(1)
 
-    # For register, activate, and run, we MUST be in the venv.
-    # Now that we've run auto-setup, this will successfully switch contexts.
     ensure_venv_execution()
+
+    # Load defaults for API URL
+    env_vars = load_defaults()
+    default_api = env_vars.get("DEFAULT_API_URL", "https://api.locai.co.uk/api/v1")
 
     # Construct arguments for agent.py
     agent_cmd_args = []
 
-    if hasattr(args, "api_url") and args.api_url:
+    # If user explicitly provided --api-url, always pass it.
+    if args.api_url:
         agent_cmd_args.extend(["--api-url", args.api_url])
 
-    # Device type not yet implemented
-    if args.device_type and args.device_type != "edge_device":
+    # If running setup commands (register/activate) and NO url provided, force the default.
+    elif args.command in ["register", "activate"]:
+        agent_cmd_args.extend(["--api-url", default_api])
+
+    if not hasattr(args, "device_type"):
+        args.device_type = "edge_device"
+
+    elif args.device_type and args.device_type != "edge_device":
         print(f"⚠ Warning: --device-type '{args.device_type}' is currently not implemented.")
         print("  Proceeding with standard behavior.")
 
     if args.command == "register":
+        # Manual Validation for Better Feedback
+        missing_args = []
+        if not args.device_name:
+            missing_args.append("--device-name")
+        if not args.username:
+            missing_args.append("--username")
+        if not args.registration_key:
+            missing_args.append("--registration-key")
+
+        if missing_args:
+            print("\n❌ Error: Missing required arguments for registration:")
+            for arg in missing_args:
+                print(f"   - {arg}")
+            print("\nUsage example:")
+            print(
+                "   python manager.py register --device-name MyDevice --username user@loc.ai --registration-key XYZ-123"
+            )
+            sys.exit(1)
+
         agent_cmd_args.extend(
             [
                 "--device-name",
@@ -383,7 +424,14 @@ def main():
             agent_cmd_args.extend(["--device-type", args.device_type])
 
     elif args.command == "run":
-        pass  # No specific args needed for standard run
+        if not CONFIG_FILE.exists():
+            print("\n❌ Error: Device is not configured.")
+            print("You must register or activate the device before running it.")
+            print("\nTo register a new device:")
+            print("  python manager.py register --device-name <NAME> --username <USER> ...")
+            print("\nTo activate an existing device:")
+            print("  python manager.py activate --device-id <ID> --api-key <KEY>")
+            sys.exit(1)
 
     # Execute agent
     run_agent_process(agent_cmd_args)
