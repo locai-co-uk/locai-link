@@ -82,7 +82,7 @@ else
 fi
 
 # 4. Run Setup via uv
-echo -e "${BLUE}Initializing Environment...${NC}"
+echo -e "${BLUE}Initialising Environment...${NC}"
 uv run manager.py setup
 
 # 5. Register Device
