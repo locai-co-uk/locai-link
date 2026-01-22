@@ -14,66 +14,17 @@ from pathlib import Path
 
 import psutil
 import requests
-from dotenv import load_dotenv
 from rich import print
 
 import link.logger as logger
 from link.logger import link_logger
 
 # --- Configuration ---
-CONFIG_FILE = "agent_config.json"
-ENV_FILE = ".env"
-
-# Try to load the .env file if it exists in the current directory
-if os.path.exists(ENV_FILE):
-    load_dotenv(ENV_FILE)
-
-try:
-    # Get the DEVICE_MODE OF THE API from the .env file
-    device_mode = os.environ.get("DEVICE_MODE")
-    if device_mode:
-        # Sanitize: remove comments and surrounding quotes/whitespace
-        device_mode = device_mode.split("#")[0].strip().strip("'").strip('"')
-
-    if not device_mode:
-        raise KeyError("DEVICE_MODE string is empty or missing")
-except KeyError:
-    raise KeyError(
-        "DEVICE_MODE is not set in the .env file. Please set it to either 'LOCAI' or 'LOCAL'."
-        + " Set it to 'CUSTOM' if you're a third party developer and want a custom solution."
-    )
-
-if device_mode == "LOCAI":
-    # IF Device Mode is LOCAI, we ignore the port in the BASE_URL, and use the API URL by itself
-    # Also if API_URL is not set, set it to the default API URL, which is api.locai.co.uk
-    host = os.environ.get("API_URL", "api.locai.co.uk")
-
-    # Allow explicit protocol override via environment variable
-    protocol_override = os.environ.get("API_PROTOCOL", "").lower()
-    if protocol_override in ["http", "https"]:
-        protocol = protocol_override
-    elif host and (
-        "localhost" in host.lower() or "127.0.0.1" in host or host.startswith("192.168.") or host.startswith("10.")
-    ):
-        protocol = "http"  # Use HTTP for localhost/private IPs
-    else:
-        protocol = "https"  # Default to HTTPS for production domains (e.g., api.locai.co.uk)
-
-    BASE_URL = f"{protocol}://{host}/api/v1"
-
-
-elif device_mode == "LOCAL":
-    # IF Device Mode is LOCAL, we use the port in the BASE_URL
-    host = os.environ.get("API_URL", "localhost")
-    port = os.environ.get("API_PORT", "8001")
-    BASE_URL = f"http://{host}:{port}/api/v1"
-
-else:
-    # If Device Mode is not LOCAI or LOCAL, we raise an error,
-    # this is for custom solutions by third party developers.
-    raise NotImplementedError(
-        f"Device Mode {device_mode} is not supported, requires a custom solution to be implemented."
-    )
+# Assuming agent.py is in src/link/agent.py, root is 3 levels up
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = PROJECT_ROOT / "configs"
+CONFIG_FILE = CONFIG_DIR / "agent_config.json"
+BASE_URL = "https://api.locai.co.uk/api/v1"
 
 METRICS_INTERVAL_SECONDS = 30  # Interval for sending metrics
 COMMAND_POLL_INTERVAL_SECONDS = 10  # Interval for polling for commands
@@ -86,7 +37,7 @@ def load_config() -> dict | None:
     Returns:
         dict | None: The configuration data, or None if the file does not exist.
     """
-    if os.path.exists(CONFIG_FILE):
+    if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "r") as f:
             return json.load(f)
     return None
@@ -99,6 +50,9 @@ def save_config(device_id, api_key):
         device_id (str): The ID of the device.
         api_key (str): The API key for the device.
     """
+    # Ensure the config directory exists
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
     config_data = {"device_id": device_id, "api_key": api_key}
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=4)
@@ -308,7 +262,7 @@ def send_metrics(device_id, api_key):
                 f"  Redirect to: {redirect_location}\n"
                 f"  This usually means the API requires HTTPS instead of HTTP.\n"
                 f"  Current BASE_URL: {BASE_URL}\n"
-                f"  Try updating your API_URL to use HTTPS or check your .env file."
+                f"  Try updating your API_URL to use HTTPS."
             )
             print(error_msg, file=sys.stderr)
 
@@ -384,10 +338,9 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         device_id = config["device_id"]
 
         # Create directories
-        project_root = Path(__file__).resolve().parent.parent.parent
-        models_dir = project_root / "models"
+        models_dir = PROJECT_ROOT / "models"
         models_dir.mkdir(exist_ok=True)
-        configs_dir = project_root / "configs"
+        configs_dir = PROJECT_ROOT / "configs"
         configs_dir.mkdir(exist_ok=True)
 
         # Download model with automatic retry on transient failures
@@ -618,8 +571,7 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
 
         print(f"Updating runtime config for model {model_id} (variant: {variant_name})...")
 
-        project_root = Path(__file__).resolve().parent.parent.parent
-        configs_dir = project_root / "configs"
+        configs_dir = PROJECT_ROOT / "configs"
         configs_dir.mkdir(exist_ok=True)
         config_file = configs_dir / f"{model_id}.json"
 
@@ -842,7 +794,7 @@ def main():
     """Main function to run the agent."""
     global BASE_URL
 
-    print(f"Agent starting with API URL: {BASE_URL}")
+    print("Agent starting...")
 
     config = load_config()
 
@@ -885,6 +837,8 @@ def main():
         if args.api_url:
             BASE_URL = args.api_url
             print(f"Using provided API URL: {BASE_URL}")
+        else:
+            print(f"Using default API URL: {BASE_URL}")
 
         device_id_to_use = None
 
@@ -959,6 +913,22 @@ def main():
                     file=sys.stderr,
                 )
                 sys.exit(1)
+
+    # Handle standard run args (outside of config setup)
+    # We still need to parse args for --api-url even if config exists
+    else:
+        # Create a simple parser just for runtime flags
+        parser = argparse.ArgumentParser(description="LocAI Agent Runtime")
+        parser.add_argument("--api-url", help="Override the API URL")
+        # We need to use parse_known_args because manager.py might pass other things
+        # or simply because we want to ignore unknown args that might be left over
+        args, _ = parser.parse_known_args()
+
+        if args.api_url:
+            BASE_URL = args.api_url
+            print(f"Using provided API URL: {BASE_URL}")
+        else:
+            print(f"Using default API URL: {BASE_URL}")
 
     print(f"Agent configured for device ID: {config['device_id']}")
     device_id = config["device_id"]
@@ -1077,8 +1047,7 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
         return link_logger.fail(f"Inference for model '{model_name}' is already running (PID {pid})")
 
     # Construct the full path to the model file
-    project_root = Path(__file__).resolve().parent.parent.parent
-    model_path = project_root / "models" / model_name
+    model_path = PROJECT_ROOT / "models" / model_name
     if not model_path.exists():
         return link_logger.fail(f"Model file not found: {model_path}")
 
@@ -1102,7 +1071,7 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
                 else:
                     local_cfg = co
             else:
-                cfg_dir = project_root / "configs"
+                cfg_dir = PROJECT_ROOT / "configs"
                 if model_id:
                     cfg_file = cfg_dir / f"{model_id}.json"
                 else:
@@ -1203,7 +1172,7 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
         cfg_override = payload.get("config_override")
         cfg_path = None
         if cfg_url or cfg_override is not None:
-            configs_dir = project_root / "configs"
+            configs_dir = PROJECT_ROOT / "configs"
             configs_dir.mkdir(exist_ok=True)
             model_id_for_cfg = payload.get("model_id") or Path(model_name).stem
             cfg_filename = f"{model_id_for_cfg}.json"

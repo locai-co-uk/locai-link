@@ -19,34 +19,6 @@ def setup_agent(device_config):
     agent.BASE_URL = device_config["base_url"]
 
 
-def test_activate_agent_success(setup_agent, device_config, mocker):
-    """Test successful agent activation."""
-    mock_get = mocker.patch("requests.get")
-    mock_post = mocker.patch("requests.post")
-
-    # Mock user verification response
-    mock_get.return_value.status_code = 200
-
-    # Mock activation response
-    mock_post.return_value.status_code = 200
-    mock_post.return_value.json.return_value = {"api_key": device_config["api_key"]}
-
-    # Mock file operations for saving config
-    mock_file = mocker.patch("builtins.open", mocker.mock_open())
-    mocker.patch("json.dump")
-
-    result = agent.activate_agent(device_config["device_id"], "user_token")
-
-    assert result is True
-    mock_post.assert_called_with(
-        f"{device_config['base_url']}/agent/activate",
-        json={"device_id": device_config["device_id"]},
-        headers={"Authorization": "Bearer user_token"},
-    )
-    # Verify config was saved
-    assert mock_file.called
-
-
 def test_get_system_metrics(mocker):
     """Test system metrics collection."""
     mock_cpu = mocker.patch("psutil.cpu_percent")

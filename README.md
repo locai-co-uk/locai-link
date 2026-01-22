@@ -9,7 +9,7 @@ For production deployment on edge devices, use our one-line installer to setup, 
 ### Linux / macOS
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "cam-01" --username "admin" --registration-key "YOUR_KEY"
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --api-url "https://api.locai.co.uk/api/v1"
 ```
 
 ### Windows
@@ -19,7 +19,7 @@ curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.
 powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1 | iex"
 
 # 2. Register the device (if not done interactively)
-uv run manager.py register --device-name "cam-01" --username "admin" --registration-key "YOUR_KEY"
+uv run manager.py register --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --api-url "https://api.locai.co.uk/api/v1"
 ```
 
 ## Architecture Information
@@ -113,6 +113,8 @@ To develop locally, you need to install the dev dependencies (testing tools, lin
 # Install with 'dev' extras
 ./run_agent.sh setup --extras dev
 ```
+
+You can pass `--api-url "<your local url>"` to the register.
 
 ### Directory Structure
 manager.py: The entry point. Handles setup, venv management, and launching the agent.
