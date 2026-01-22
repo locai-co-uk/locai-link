@@ -1,0 +1,426 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import psutil
+
+AUDIO_KEYWORDS = ["yamnet", "audio", "sound", "speech", "voice"]
+LLM_KEYWORDS = ["llama", "gguf", "mistral", "deepseek", "phi", "qwen", "language"]
+
+child_process = None
+llm_detached_mode = False  # Indicates if LLM was launched in a new terminal
+llm_model_path = None  # Used to find detached LLM process
+
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent.parent
+configs_dir = project_root / "configs"
+models_dir = project_root / "models"
+
+
+def determine_inference_script_by_name(name: str) -> Path:
+    """Return script path based on audio-vs-image keywords in the name."""
+    lower = (name or "").lower()
+    if any(k in lower for k in AUDIO_KEYWORDS):
+        return script_dir / "audio_classification_yamnet_tflite.py"
+    if any(k in lower for k in LLM_KEYWORDS):
+        return script_dir / "language_model_gguf.py"
+    # Default to image detection/classification script
+    return script_dir / "image_detection_cpy_tflite.py"
+
+
+def find_runtime_config_file(model_id: str) -> Path | None:
+    """Find the runtime config file for the model.
+
+    Searches in order:
+    1. configs/{model_id}.json (preferred location)
+    2. models/{model_id}.json (legacy location)
+
+    Returns None if no config file is found.
+    """
+    configs_dir.mkdir(exist_ok=True)
+
+    # First check configs directory (preferred)
+    config_file_path = configs_dir / f"{model_id}.json"
+    if config_file_path.exists():
+        return config_file_path
+
+    # Fallback to models directory (legacy)
+    legacy_config_path = models_dir / f"{model_id}.json"
+    if legacy_config_path.exists():
+        print(f"Warning: Using legacy config location {legacy_config_path}")
+        return legacy_config_path
+
+    # No config file found
+    return None
+
+
+def read_config_file(config_file_path: Path) -> dict:
+    """Read the config file and return the config as a dictionary."""
+    with open(config_file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def determine_inference_script_by_config(config: dict) -> Path:
+    """Return script path based on the config file.
+
+    Uses the process.impl.runner or process.impl.entrypoint fields.
+    """
+    impl = (config.get("process") or {}).get("impl") or {}
+    runner = impl.get("runner")
+    entrypoint = impl.get("entrypoint")
+
+    # Prefer explicit entrypoint if present and exists
+    if entrypoint:
+        candidate = script_dir / entrypoint
+        if candidate.exists():
+            return candidate
+        else:
+            print(f"Warning: Entrypoint '{entrypoint}' not found, falling back to runner mapping")
+
+    # Map runner to script path
+    runner_to_script_path = {
+        "tflite_audio_classification": "audio_classification_yamnet_tflite.py",
+        "tflite_image_detection": "image_detection_cpy_tflite.py",
+        "gguf_language_model": "language_model_gguf.py",
+    }
+
+    if runner and runner in runner_to_script_path:
+        return script_dir / runner_to_script_path[runner]
+
+    # If no valid runner found, raise an error
+    raise ValueError(
+        f"Invalid or missing runner '{runner}' in config file. Expected one of: {list(runner_to_script_path.keys())}"
+    )
+
+
+def find_llm_process_by_model(model_path_str: str) -> int | None:
+    """Find the PID of a running LLM inference process by model path.
+
+    Searches for a Python process running language_model_gguf.py with the given model path.
+    Returns the PID if found, None otherwise.
+    """
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+            cmdline_str = " ".join(cmdline)
+            # Check if this is the LLM script with our model
+            if "language_model_gguf.py" in cmdline_str and model_path_str in cmdline_str:
+                return proc.info["pid"]
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return None
+
+
+def run_inference_script(script_path: Path, model_path: Path, device_id: str, api_key: str, extra_args=None):
+    """Execute the selected inference script with the provided arguments.
+
+    Returns the subprocess.Popen object for the running process.
+    """
+    command = [
+        sys.executable,
+        str(script_path),
+        "--model",
+        str(model_path),
+        "--device-id",
+        device_id,
+        "--api-key",
+        api_key,
+    ]
+    if extra_args:
+        command.extend(extra_args)
+
+    print(f"Executing: {' '.join(command)}")
+
+    try:
+        # For interactive scripts like the LLM, we try to open a new terminal window
+        if "language_model_gguf.py" in str(script_path):
+            # Declare globals for detached mode tracking (all LLM launches use this)
+            global llm_detached_mode, llm_model_path
+            llm_detached_mode = True
+            llm_model_path = str(model_path)
+
+            if os.name == "nt":
+                # Windows: Use native console creation flag
+                # (CREATE_NEW_CONSOLE causes wait() to return immediately, so we use psutil tracking)
+                return subprocess.Popen(
+                    command,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                    text=True,
+                )
+            elif sys.platform == "darwin":
+                # macOS: Use AppleScript to open Terminal.app
+                import shlex
+
+                # Properly quote each argument for the shell
+                shell_command = " ".join(shlex.quote(c) for c in command)
+                # Combine cd and the command
+                full_cmd = f"cd {shlex.quote(os.getcwd())} && {shell_command}"
+                # Escape double quotes for the AppleScript string literal
+                applescript_cmd = full_cmd.replace('"', '\\"')
+                applescript = (
+                    'tell application "Terminal" to activate\ntell application "Terminal" to do script '
+                    f'"{applescript_cmd}"'
+                )
+                return subprocess.Popen(["osascript", "-e", applescript])
+            else:
+                # Linux: Try common terminal emulators
+                for term in [
+                    "x-terminal-emulator",
+                    "gnome-terminal",
+                    "konsole",
+                    "xterm",
+                ]:
+                    if subprocess.run(["which", term], capture_output=True, text=True).returncode == 0:
+                        if term in ["gnome-terminal", "konsole"]:
+                            return subprocess.Popen([term, "--", *command])
+                        return subprocess.Popen([term, "-e", " ".join(command)])
+
+        # Default behavior: run in the current terminal window
+        process = subprocess.Popen(command, stdout=None, stderr=None, text=True)
+        return process
+    except Exception as e:
+        print(f"Error starting inference script: {e}", file=sys.stderr)
+        return None
+
+
+def main():
+    """Main entry point for the model inference dispatcher."""
+    parser = argparse.ArgumentParser(description="ML Edge Platform - Model Inference Wrapper")
+    parser.add_argument("--model", required=True, help="Path to the model file")
+    parser.add_argument("--device-id", required=True, help="Device ID")
+    parser.add_argument("--api-key", required=True, help="API key for authentication")
+    parser.add_argument(
+        "--model-name",
+        required=False,
+        help="Original model filename on server (used for selecting the proper runner)",
+    )
+    parser.add_argument("--model-id", required=False, help="Model ID (informational; not required)")
+    parser.add_argument(
+        "--config",
+        required=False,
+        help="Path to v2 runtime config JSON to drive runner and flags",
+    )
+
+    args = parser.parse_args()
+
+    model_path = Path(args.model)
+    if not model_path.exists():
+        print(f"Error: Model file not found at {model_path}", file=sys.stderr)
+        sys.exit(1)
+
+    extra_child_args = []
+    script_path = None
+    config_path = None
+
+    # Determine config file to use
+    if args.config:
+        # Explicit config provided via command line
+        config_path = Path(args.config)
+        if not config_path.exists():
+            print(f"Error: Config file not found at {config_path}", file=sys.stderr)
+            sys.exit(1)
+    elif args.model_id:
+        # Try to find config automatically using model_id
+        found_config = find_runtime_config_file(args.model_id)
+        if found_config:
+            config_path = found_config
+            print(f"Found runtime config: {config_path}")
+        else:
+            print(f"No runtime config found for model_id '{args.model_id}', using heuristics")
+
+    # If a config is available, use it to choose runner and flags
+    if config_path:
+        try:
+            cfg = read_config_file(config_path)
+            print(f"Loaded runtime config from {config_path}")
+        except Exception as e:
+            print(f"Error reading config file {config_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Determine script path from config
+        try:
+            script_path = determine_inference_script_by_config(cfg)
+            print(f"Selected script from config: {script_path.name}")
+        except ValueError as e:
+            print(f"Error determining script from config: {e}", file=sys.stderr)
+            # Fallback to heuristics
+            name_for_heuristics = args.model_name or model_path.name
+            script_path = determine_inference_script_by_name(name_for_heuristics)
+            print(f"Falling back to heuristic-based script: {script_path.name}")
+
+        # Translate config inputs/parameters to child flags
+        inputs = cfg.get("inputs") or []
+        parameters = ((cfg.get("process") or {}).get("parameters")) or {}
+
+        # Extract all parameters and convert to command-line flags
+        if isinstance(parameters, dict):
+            # Confidence threshold
+            if "confidence_threshold" in parameters:
+                extra_child_args.extend(["--confidence-threshold", str(parameters["confidence_threshold"])])
+
+            # Event duration and interval parameters
+            if "min_event_duration_sec" in parameters:
+                extra_child_args.extend(["--min-event-duration", str(parameters["min_event_duration_sec"])])
+
+            if "min_event_interval_sec" in parameters:
+                extra_child_args.extend(["--min-event-interval", str(parameters["min_event_interval_sec"])])
+
+            # LLM parameters
+            llm_params = {
+                "n_ctx": "--n-ctx",
+                "n_gpu_layers": "--n-gpu-layers",
+                "temperature": "--temperature",
+                "max_tokens": "--max-tokens",
+                "top_p": "--top-p",
+                "top_k": "--top-k",
+                "repeat_penalty": "--repeat-penalty",
+                "system_prompt": "--system-prompt",
+            }
+            for key, flag in llm_params.items():
+                if key in parameters:
+                    extra_child_args.extend([flag, str(parameters[key])])
+
+            # Streaming toggle
+            if "stream" in parameters:
+                if parameters["stream"]:
+                    extra_child_args.append("--stream")
+                else:
+                    extra_child_args.append("--no-stream")
+
+        # Camera inputs
+        camera = next(
+            (i for i in inputs if isinstance(i, dict) and i.get("type") == "camera"),
+            None,
+        )
+        if camera:
+            if "index" in camera:
+                extra_child_args.extend(["--camera-index", str(camera["index"])])
+            res = camera.get("resolution")
+            if isinstance(res, (list, tuple)) and len(res) == 2:
+                extra_child_args.extend(["--width", str(res[0]), "--height", str(res[1])])
+            if "fps" in camera:
+                extra_child_args.extend(["--fps", str(camera["fps"])])
+
+        # Microphone inputs
+        mic = next(
+            (i for i in inputs if isinstance(i, dict) and i.get("type") == "microphone"),
+            None,
+        )
+        if mic:
+            if "sample_rate" in mic:
+                extra_child_args.extend(["--sample-rate", str(mic["sample_rate"])])
+            if "channels" in mic:
+                extra_child_args.extend(["--channels", str(mic["channels"])])
+
+        # Reporting settings (for future use - can be passed to child scripts)
+        reporting = cfg.get("reporting") or {}
+        if "send_results" in reporting:
+            # This could be used to control whether results are sent to backend
+            # For now, just log it
+            print(f"Reporting config: send_results={reporting['send_results']}")
+    else:
+        # Decide which script to run using heuristics
+        if args.model_name:
+            script_path = determine_inference_script_by_name(args.model_name)
+            print(f"Selected script from model_name: {script_path.name}")
+        else:
+            script_path = determine_inference_script_by_name(model_path.name)
+            print(f"Selected script from local filename: {script_path.name}")
+
+    if not script_path.exists():
+        print(f"Error: Inference script not found at {script_path}", file=sys.stderr)
+        sys.exit(1)
+
+    global child_process
+    child_process = run_inference_script(script_path, model_path, args.device_id, args.api_key, extra_child_args)
+    if not child_process:
+        print("Failed to start inference script", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Inference process started with PID {child_process.pid}")
+
+    # Ensure child is terminated when wrapper receives termination signals
+    def _handle_term(signum, frame):
+        try:
+            # For detached mode, find and kill the actual LLM process
+            if llm_detached_mode and llm_model_path:
+                llm_pid = find_llm_process_by_model(llm_model_path)
+                if llm_pid:
+                    print(f"Received signal {signum}, terminating detached LLM process PID {llm_pid}...")
+                    try:
+                        llm_proc = psutil.Process(llm_pid)
+                        llm_proc.terminate()
+                        llm_proc.wait(timeout=10)
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                        try:
+                            llm_proc.kill()
+                        except psutil.NoSuchProcess:
+                            pass
+
+            # Also terminate the launcher process (osascript, terminal emulator, etc.)
+            if child_process and child_process.poll() is None:
+                print(f"Received signal {signum}, terminating child PID {child_process.pid}...")
+                child_process.terminate()
+                try:
+                    child_process.wait(timeout=10)
+                except Exception:
+                    child_process.kill()
+        finally:
+            sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_term)
+    signal.signal(signal.SIGINT, _handle_term)
+
+    try:
+        # For LLM processes launched in detached/new terminals
+        if llm_detached_mode:
+            if os.name == "nt":
+                # Windows: child_process.pid IS the actual LLM process PID (CREATE_NEW_CONSOLE)
+                # We can use psutil to wait on it directly since subprocess.wait() doesn't block
+                print(f"LLM launched in new console (Windows). Using psutil to track PID {child_process.pid}...")
+                try:
+                    llm_proc = psutil.Process(child_process.pid)
+                    llm_proc.wait()  # Block until LLM exits
+                except psutil.NoSuchProcess:
+                    print("LLM process already exited.")
+            else:
+                # macOS/Linux: The launcher (osascript/terminal emulator) returns immediately
+                # We need to find and track the actual LLM python process
+                print("LLM launched in detached terminal. Polling for actual process...")
+                # Give the terminal time to start the python process
+                time.sleep(3)
+
+                # Find and wait on the actual LLM process
+                llm_pid = find_llm_process_by_model(llm_model_path)
+                if llm_pid:
+                    print(f"Found LLM process with PID {llm_pid}. Waiting...")
+                    try:
+                        llm_proc = psutil.Process(llm_pid)
+                        llm_proc.wait()  # Block until LLM exits
+                    except psutil.NoSuchProcess:
+                        print("LLM process already exited.")
+                else:
+                    print("Could not find LLM process. Waiting on launcher process instead.")
+                    child_process.wait()
+        else:
+            child_process.wait()
+    except KeyboardInterrupt:
+        print("\nReceived interrupt signal, terminating inference process...")
+        child_process.terminate()
+        try:
+            child_process.wait(timeout=10)
+        except Exception:
+            child_process.kill()
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: CC0-1.0
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "locai-link"
+version = "0.1.1"
+description = "Locai edge device inference agent"
+readme = "README.md"
+requires-python = ">=3.11.8"
+authors = [{ name = "MVP Platform Team" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+]
+
+# Core dependencies for device scripts. TensorFlow handled per-OS.
+dependencies = [
+  "requests>=2.32.4",
+  "python-dotenv>=1.0.0",
+  "psutil>=7.0.0",
+  "rich>=13.0.0",
+  "numpy>=1.21.0",
+  "Pillow>=10.0.0",
+  "opencv-python>=4.7.0",
+  "sounddevice>=0.4.6",
+  # TensorFlow variants
+  "tensorflow-cpu>=2.0.0; sys_platform != 'darwin'",
+  "tensorflow-macos; sys_platform == 'darwin'",
+  "tensorflow-metal; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "tensorflow-io-gcs-filesystem==0.31.0; sys_platform == 'win32'",
+  "tensorflow-io-gcs-filesystem==0.37.1; sys_platform == 'darwin'",
+]
+
+
+[project.optional-dependencies]
+dev = ["black>=24.0.0", "ruff>=0.1.0", "pytest>=7.0.0", "pytest-mock>=3.10.0"]
+
+[tool.setuptools]
+include-package-data = true
+package-dir = { "" = "src" }
+packages = ["link"]
+
+[tool.setuptools.package-data]
+link = ["models/**", "*.json"]
+
+# --- Tool Configuration ---
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Select rules:
+# E, F: Standard Python errors/flakes
+# D: Pydocstyle (Enforces docstrings)
+# I: Isort (Import sorting)
+select = ["E", "F", "D", "I"]
+
+# Ignore specific docstring rules if they are too noisy
+# D100: Missing docstring in public module
+# D104: Missing docstring in public package
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+# Use Google style docstrings
+convention = "google"
+
+[tool.ruff.lint.isort]
+# Ensure isort is compatible with black
+known-first-party = ["device_scripts"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
