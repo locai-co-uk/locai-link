@@ -1,11 +1,61 @@
-# SPDX-FileCopyrightText: 2026 Loc.ai Ltd
-# SPDX-License-Identifier: BUSL-1.1
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: CC0-1.0
 
+# Python virtual environment
 .venv/
-# .vscode/
+venv/
+env/
+ENV/
+
+# Caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.ruff_cache/
+.coverage
+.benchmarks/
 
+# Environment variables
+.env
+.env.local
 
+# Device-specific runtime files (generated at runtime)
+agent_config.json
+configs/
+models/
+!models/README.md
+**/*.tflite
+**/*.h5
+**/*.onnx
+**/*.pt
+**/*.pth
 
+# Logs
+*.log
+logs/
 
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+uv.lock
+
+# TODO
+.todo
+
+# Pyrefly
+pyrefly.toml
