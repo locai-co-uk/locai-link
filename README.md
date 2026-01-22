@@ -1,4 +1,8 @@
 # Loc.ai:Link
+
+![Build Status](https://github.com/locai/agent/actions/workflows/ci.yml/badge.svg)
+![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)
+
 **The distributed edge runtime for the Loc.ai platform** <br>
 Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a Raspberry Pi to an industrial GPU cluster—into a managed node within your Loc.ai fleet. It handles secure connectivity, model deployment, and local inference orchestration without relying on cloud dependency.
 
@@ -168,18 +172,6 @@ Loc.ai:Link is designed on a "Zero Data Egress" principle.
 
 By installing and using this software, you agree to the transmission of this Operational Metadata for the purpose of device health monitoring and fleet management.
 
-# HARD reset (removes configuration and secrets too)
-./run_agent.sh reset --hard
-
-## ⚠️ Data Privacy & Telemetry Notice
-Loc.ai:Link is designed on a "Zero Data Egress" principle.
-- **User Content:** No inference data, images, video feeds, or model inputs/outputs are ever transmitted to Loc.ai servers without your explicit configuration. Your data stays on your device.
-- **Operational Metadata:** To function, this software transmits minimal heartbeat data to the Loc.ai:Control plane. This includes:
-    - Device ID & IP Address (for connectivity)
-    - Loc.ai:Link Version
-    - System Health Status (CPU/RAM usage, Uptime)
-
-By installing and using this software, you agree to the transmission of this Operational Metadata for the purpose of device health monitoring and fleet management.
 ## 📄 Licensing
 Loc.ai:Link is licensed under the Business Source License 1.1 (BSL) see **licence.md** for details.<br>
 What this means for you:
@@ -190,6 +182,7 @@ What this means for you:
 
 On January 17, 2030, this restriction lifts, and the code automatically becomes Apache 2.0.
 For full legal details, see LICENSE.md.
+
 ## 🤝 Contributing
 We welcome community contributions! Whether it's a bug fix, a new feature, or a documentation improvement.<br>
 Please read **CONTRIBUTING.md** for details on our code of conduct and the Contributor License Agreement (CLA) process.
