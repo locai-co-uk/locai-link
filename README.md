@@ -1,4 +1,7 @@
 # Loc.ai:Link
+![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)
+![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)
+
 **The distributed edge runtime for the Loc.ai platform** <br>
 Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a Raspberry Pi to an industrial GPU cluster—into a managed node within your Loc.ai fleet. It handles secure connectivity, model deployment, and local inference orchestration without relying on cloud dependency.
 
@@ -9,17 +12,13 @@ For production deployment on edge devices, use our one-line installer to setup, 
 ### Linux / macOS
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "cam-01" --username "admin" --registration-key "YOUR_KEY"
+curl -sSL [https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh](https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh) | bash -s -- --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --api-url "[https://api.locai.co.uk/api/v1](https://api.locai.co.uk/api/v1)" --start-running
 ```
 
 ### Windows
 
 ```powershell
-# 1. Download and run the installer
-powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1 | iex"
-
-# 2. Register the device (if not done interactively)
-uv run manager.py register --device-name "cam-01" --username "admin" --registration-key "YOUR_KEY"
+powershell -ExecutionPolicy ByPass -c "irm [https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1](https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1) | iex"
 ```
 
 ## Architecture Information
@@ -114,6 +113,8 @@ To develop locally, you need to install the dev dependencies (testing tools, lin
 ./run_agent.sh setup --extras dev
 ```
 
+You can pass `--api-url "<your local url>"` to the register.
+
 ### Directory Structure
 manager.py: The entry point. Handles setup, venv management, and launching the agent.
 
@@ -166,18 +167,6 @@ Loc.ai:Link is designed on a "Zero Data Egress" principle.
 
 By installing and using this software, you agree to the transmission of this Operational Metadata for the purpose of device health monitoring and fleet management.
 
-# HARD reset (removes configuration and secrets too)
-./run_agent.sh reset --hard
-
-## ⚠️ Data Privacy & Telemetry Notice
-Loc.ai:Link is designed on a "Zero Data Egress" principle.
-- **User Content:** No inference data, images, video feeds, or model inputs/outputs are ever transmitted to Loc.ai servers without your explicit configuration. Your data stays on your device.
-- **Operational Metadata:** To function, this software transmits minimal heartbeat data to the Loc.ai:Control plane. This includes:
-    - Device ID & IP Address (for connectivity)
-    - Loc.ai:Link Version
-    - System Health Status (CPU/RAM usage, Uptime)
-
-By installing and using this software, you agree to the transmission of this Operational Metadata for the purpose of device health monitoring and fleet management.
 ## 📄 Licensing
 Loc.ai:Link is licensed under the Business Source License 1.1 (BSL) see **licence.md** for details.<br>
 What this means for you:
@@ -188,6 +177,7 @@ What this means for you:
 
 On January 17, 2030, this restriction lifts, and the code automatically becomes Apache 2.0.
 For full legal details, see LICENSE.md.
+
 ## 🤝 Contributing
 We welcome community contributions! Whether it's a bug fix, a new feature, or a documentation improvement.<br>
 Please read **CONTRIBUTING.md** for details on our code of conduct and the Contributor License Agreement (CLA) process.
