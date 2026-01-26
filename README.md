@@ -12,13 +12,13 @@ For production deployment on edge devices, use our one-line installer to setup, 
 ### Linux / macOS
 
 ```bash
-curl -sSL [https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh](https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh) | bash -s -- --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --api-url "https://api.locai.co.uk/api/v1" --start-running
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --api-url "https://api.locai.co.uk/api/v1" --start-running
 ```
 
 ### Windows
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm [https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1](https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1) | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1 | iex"
 ```
 
 ## Architecture Information
