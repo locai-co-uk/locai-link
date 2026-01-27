@@ -370,13 +370,6 @@ def main():
     elif args.command in ["register", "activate"]:
         agent_cmd_args.extend(["--api-url", default_api])
 
-    if not hasattr(args, "device_type"):
-        args.device_type = "edge_device"
-
-    elif args.device_type and args.device_type != "edge_device":
-        print(f"⚠ Warning: --device-type '{args.device_type}' is currently not implemented.")
-        print("  Proceeding with standard behavior.")
-
     if args.command == "register":
         # Manual Validation for Better Feedback
         missing_args = []
@@ -397,18 +390,16 @@ def main():
             )
             sys.exit(1)
 
-        agent_cmd_args.extend(
-            [
-                "--device-name",
-                args.device_name,
-                "--username",
-                args.username,
-                "--registration-key",
-                args.registration_key,
-                "--device-type",
-                args.device_type,
-            ]
-        )
+        agent_cmd_args.extend([
+            "--device-name",
+            args.device_name,
+            "--username",
+            args.username,
+            "--registration-key",
+            args.registration_key,
+            "--device-type",
+            args.device_type,
+        ])
 
     elif args.command == "activate":
         agent_cmd_args.extend(["--device-id", args.device_id])
