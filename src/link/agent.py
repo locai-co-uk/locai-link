@@ -152,6 +152,15 @@ def register_new_device_with_key(device_name, device_type, username, registratio
     print(f"Attempting to register new device '{device_name}' of type '{device_type}' using registration key...")
     print(f"Using API URL: {BASE_URL}")
 
+    if not device_type:
+        print("⚠ Warning: No device type provided. Defaulting to 'other'.")
+        device_type = "other"
+    else:
+        valid_types = ["other"]
+        if device_type not in valid_types:
+            print(f"⚠ Warning: Device type '{device_type}' is not natively supported. Defaulting to 'other'.")
+            device_type = "other"
+
     payload = {
         "username": username,
         "registration_key": registration_key,
