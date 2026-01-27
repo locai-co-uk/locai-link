@@ -99,9 +99,10 @@ if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://localhost:8001/api/v1"
 if "%API_URL%"=="" (
     echo.
     echo Select API Environment:
-    echo 1) Production (%DEFAULT_API_URL%)
-    echo 2) Localhost (%LOCAL_API_URL%)
-    echo 3) Custom URL
+    :: FIXED: Parentheses are now escaped with ^ to prevent breaking the IF block
+    echo 1^) Production ^(%DEFAULT_API_URL%^)
+    echo 2^) Localhost ^(%LOCAL_API_URL%^)
+    echo 3^) Custom URL
     set /p "API_CHOICE=Choice [1]: "
     
     if "!API_CHOICE!"=="2" (
