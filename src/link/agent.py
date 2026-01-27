@@ -158,9 +158,7 @@ def register_new_device_with_key(device_name, device_type, username, registratio
     else:
         valid_types = ["other"]
         if device_type not in valid_types:
-            print(
-                f"⚠ Warning: Device type '{device_type}' is not natively supported by the server. Defaulting to 'other'."
-            )
+            print(f"⚠ Warning: Device type '{device_type}' is not natively supported. Defaulting to 'other'.")
             device_type = "other"
 
     payload = {

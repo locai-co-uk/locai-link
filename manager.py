@@ -390,16 +390,18 @@ def main():
             )
             sys.exit(1)
 
-        agent_cmd_args.extend([
-            "--device-name",
-            args.device_name,
-            "--username",
-            args.username,
-            "--registration-key",
-            args.registration_key,
-            "--device-type",
-            args.device_type,
-        ])
+        agent_cmd_args.extend(
+            [
+                "--device-name",
+                args.device_name,
+                "--username",
+                args.username,
+                "--registration-key",
+                args.registration_key,
+                "--device-type",
+                args.device_type,
+            ]
+        )
 
     elif args.command == "activate":
         agent_cmd_args.extend(["--device-id", args.device_id])
