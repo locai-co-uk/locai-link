@@ -269,6 +269,20 @@ def reset(hard=False):
     print("Reset complete.")
 
 
+def start_serving():
+    """Starts the serving process."""
+    print_step("Starting Serving Process")
+    print("... placeholder logic for start_serving ...")
+    # TODO: Implement start serving logic here
+
+
+def stop_serving():
+    """Stops the serving process."""
+    print_step("Stopping Serving Process")
+    print("... placeholder logic for stop_serving ...")
+    # TODO: Implement stop serving logic here
+
+
 def run_agent_process(agent_args):
     """Runs the agent.py script.
 
@@ -307,6 +321,10 @@ def main():
     reset_parser = subparsers.add_parser("reset", help="Clean up artifacts")
     reset_parser.add_argument("--hard", action="store_true", help="Also remove config files")
 
+    # --- SERVING COMMANDS ---
+    subparsers.add_parser("start-serving", help="Start the serving process")
+    subparsers.add_parser("stop-serving", help="Stop the serving process")
+
     # --- REGISTER COMMAND ---
     reg_parser = subparsers.add_parser("register", help="Register a new device")
     reg_parser.add_argument("--device-name", required=False, help="Name for the new device")
@@ -340,6 +358,14 @@ def main():
 
     if args.command == "reset":
         reset(hard=args.hard)
+        return
+
+    if args.command == "start-serving":
+        start_serving()
+        return
+
+    if args.command == "stop-serving":
+        stop_serving()
         return
 
     # --- AUTO-SETUP CHECK ---

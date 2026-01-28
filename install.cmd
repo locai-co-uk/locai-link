@@ -9,6 +9,7 @@ echo === LocAI Edge Agent Installer ===
 :: --- Configuration ---
 set "REPO_URL=https://github.com/locai-co-uk/locai-link.git"
 set "BRANCH=main"
+set "PYTHON_VERSION=3.11.8"
 
 :: --- Defaults ---
 set "DEVICE_TYPE=edge_device"
@@ -36,7 +37,6 @@ if "%~1"=="--device-type" set "DEVICE_TYPE=%~2" & shift & shift & goto :parse_ar
 if "%~1"=="--api-url" set "API_URL=%~2" & shift & shift & goto :parse_args
 if "%~1"=="--branch" set "BRANCH=%~2" & shift & shift & goto :parse_args
 if "%~1"=="--start-running" set "START_RUNNING=true" & shift & goto :parse_args
-:: Skip unknown args
 shift
 goto :parse_args
 
@@ -63,7 +63,6 @@ where uv >nul 2>nul
 if errorlevel 1 (
     echo uv not found. Installing...
     powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-    :: Add uv to PATH for the current session (standard install locations)
     set "PATH=%USERPROFILE%\.cargo\bin;%USERPROFILE%\.local\bin;%PATH%"
 ) else (
     echo uv is already installed.
@@ -90,8 +89,6 @@ if exist "defaults.env" (
         set "%%i=%%j"
     )
 )
-
-:: Fallback defaults if not set in file
 if "%DEFAULT_API_URL%"=="" set "DEFAULT_API_URL=https://api.locai.co.uk/api/v1"
 if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://localhost:8001/api/v1"
 
@@ -99,7 +96,6 @@ if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://localhost:8001/api/v1"
 if "%API_URL%"=="" (
     echo.
     echo Select API Environment:
-    :: FIXED: Parentheses are now escaped with ^ to prevent breaking the IF block
     echo 1^) Production ^(%DEFAULT_API_URL%^)
     echo 2^) Localhost ^(%LOCAL_API_URL%^)
     echo 3^) Custom URL
@@ -119,9 +115,37 @@ if "%DEVICE_NAME%"=="" ( echo Error: Device Name is required. & exit /b 1 )
 if "%USERNAME%"=="" ( echo Error: Username is required. & exit /b 1 )
 if "%REG_KEY%"=="" ( echo Error: Registration Key is required. & exit /b 1 )
 
-:: --- Setup ---
+:: --- Setup Environment ---
 echo.
-echo Initializing Environment...
+echo Initializing Environment (Python %PYTHON_VERSION%)...
+
+:: Ensure python version and clean venv
+uv python install %PYTHON_VERSION%
+if exist ".venv" rmdir /s /q ".venv"
+uv venv --python %PYTHON_VERSION%
+
+:: --- Install Llama-CPP-Python ---
+echo.
+echo Checking for GPU...
+where nvidia-smi >nul 2>nul
+if %errorlevel% equ 0 (
+    echo NVIDIA GPU detected. Installing CUDA support...
+    set "LLAMA_URL=https://abetlen.github.io/llama-cpp-python/whl/cu121"
+) else (
+    echo No GPU detected. Installing CPU support...
+    set "LLAMA_URL=https://abetlen.github.io/llama-cpp-python/whl/cpu"
+)
+
+echo Installing llama-cpp-python...
+uv pip install llama-cpp-python --extra-index-url %LLAMA_URL%
+
+:: --- Install Project Deps ---
+echo Installing project dependencies...
+uv pip install -e .
+
+:: --- Internal Setup ---
+echo.
+echo Running internal setup...
 uv run manager.py setup
 
 :: --- Register ---
