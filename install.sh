@@ -5,6 +5,7 @@
 # --- Configuration ---
 REPO_URL="https://github.com/locai-co-uk/locai-link.git"
 BRANCH="main"
+PYTHON_VERSION="3.11.8"
 
 # --- Colors ---
 GREEN='\033[0;32m'
@@ -47,23 +48,14 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-# --- Interactive Prompts if Missing Args ---
-if [[ -z "$DEVICE_NAME" ]]; then
-    read -p "Enter Device Name: " DEVICE_NAME
-fi
-
-if [[ -z "$USERNAME" ]]; then
-    read -p "Enter Username: " USERNAME
-fi
-
-if [[ -z "$REG_KEY" ]]; then
-    read -p "Enter Registration Key: " REG_KEY
-fi
+# --- Interactive Prompts ---
+if [[ -z "$DEVICE_NAME" ]]; then read -p "Enter Device Name: " DEVICE_NAME; fi
+if [[ -z "$USERNAME" ]]; then read -p "Enter Username: " USERNAME; fi
+if [[ -z "$REG_KEY" ]]; then read -p "Enter Registration Key: " REG_KEY; fi
 
 # 2. Check Prerequisites (Git & Python/uv)
 echo -e "\n${BLUE}Checking system prerequisites...${NC}"
 
-# Only check for Git if we are supposed to use it
 if [ "$SKIP_GIT" = false ]; then
     if ! command -v git &> /dev/null; then
         echo -e "${RED}Error: git is not installed.${NC}"
@@ -81,7 +73,7 @@ else
     echo "✔ uv is already installed."
 fi
 
-# 3. Clone/Update Repository (Only if not already inside)
+# 3. Clone/Update Repository
 if [ "$SKIP_GIT" = false ]; then
     if [ -d "$INSTALL_DIR" ]; then
         echo "Updating repository in $INSTALL_DIR..."
@@ -93,29 +85,23 @@ if [ "$SKIP_GIT" = false ]; then
         cd "$INSTALL_DIR" || exit
     fi
 else
-    # Just ensure we are in the dir
     cd "$INSTALL_DIR" || exit
 fi
 
 # --- Load Defaults from Repo ---
 if [ -f "defaults.env" ]; then
-    set -a
-    source "defaults.env"
-    set +a
+    set -a; source "defaults.env"; set +a
 fi
-
-# Fallback defaults if file is missing/empty
 DEFAULT_API_URL=${DEFAULT_API_URL:-"https://api.locai.co.uk/api/v1"}
 LOCAL_API_URL=${LOCAL_API_URL:-"http://localhost:8001/api/v1"}
 
-# --- API URL Selection (After loading defaults) ---
+# --- API URL Selection ---
 if [[ -z "$API_URL" ]]; then
     echo -e "\n${BLUE}Select API Environment:${NC}"
     echo "1) Production ($DEFAULT_API_URL)"
     echo "2) Localhost ($LOCAL_API_URL)"
     echo "3) Custom URL"
     read -p "Choice [1]: " API_CHOICE
-
     case $API_CHOICE in
         2) API_URL="$LOCAL_API_URL" ;;
         3) read -p "Enter Custom API URL: " API_URL ;;
@@ -123,29 +109,74 @@ if [[ -z "$API_URL" ]]; then
     esac
 fi
 
-# Final Check
-if [[ -z "$DEVICE_NAME" || -z "$USERNAME" || -z "$REG_KEY" ]]; then
-    echo -e "${RED}Error: Missing required arguments (Device Name, Username, or Key).${NC}"
-    exit 1
+# 4. Environment Setup (Python 3.11.8 & LlamaCPP)
+echo -e "\n${BLUE}Initializing Environment (Python $PYTHON_VERSION)...${NC}"
+
+# Ensure specific python version
+uv python install "$PYTHON_VERSION"
+# Create/Recreate Virtual Environment explicitly
+rm -rf .venv
+uv venv --python "$PYTHON_VERSION"
+
+# --- Install Llama-CPP-Python ---
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+echo -e "${BLUE}Installing AI Inference Engine for $OS...${NC}"
+
+# Install Cmake if missing (required for source builds on Mac/Linux)
+if ! command -v cmake >/dev/null 2>&1; then
+    echo "Installing cmake..."
+    uv pip install cmake
+    export PATH="$INSTALL_DIR/.venv/bin:$PATH"
 fi
 
-# 4. Run Setup via uv
-echo -e "\n${BLUE}Initialising Environment...${NC}"
+if [ "$OS" = "Darwin" ]; then
+    # macOS: Build from source with Metal support
+    echo "Building with Metal (Apple Silicon) support..."
+    export FORCE_CMAKE=1
+    export CMAKE_ARGS="-DGGML_METAL=ON -DGGML_NATIVE=OFF"
+    
+    if [ "$ARCH" = "arm64" ]; then
+        export CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_OSX_ARCHITECTURES=arm64"
+    fi
+    
+    uv pip install --no-binary llama-cpp-python llama-cpp-python
+
+elif [ "$OS" = "Linux" ]; then
+    # Linux: Check for CUDA
+    echo "Checking for NVIDIA GPU..."
+    if command -v nvidia-smi &> /dev/null && command -v nvcc &> /dev/null; then
+        echo "NVIDIA GPU and CUDA Toolkit detected. Building with CUDA support."
+        export CMAKE_ARGS="-DGGML_CUDA=ON"
+    else
+        echo "No NVIDIA/CUDA detected. Building for CPU."
+        export CMAKE_ARGS=""
+    fi
+    export FORCE_CMAKE=1
+    uv pip install --no-binary llama-cpp-python llama-cpp-python
+else
+    # Fallback
+    uv pip install llama-cpp-python
+fi
+
+# 5. Install Project Dependencies
+echo -e "${BLUE}Installing Project Dependencies...${NC}"
+uv pip install -e .
+
+# 6. Run Setup Logic (Database init etc)
+echo -e "\n${BLUE}Running internal setup...${NC}"
 uv run manager.py setup
 
-# 5. Register Device
+# 7. Register Device
 echo -e "\n${BLUE}Registering device...${NC}"
 CMD_ARGS=("register" "--device-name" "$DEVICE_NAME" "--username" "$USERNAME" "--registration-key" "$REG_KEY" "--device-type" "$DEVICE_TYPE" "--api-url" "$API_URL")
-
 uv run manager.py "${CMD_ARGS[@]}"
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✔ Device Registered Successfully!${NC}"
     
-    # 6. Start Agent Logic
     SHOULD_START=$START_RUNNING
-    
-    # If flag not provided, ask interactively
     if [ "$START_RUNNING" = false ]; then
         echo ""
         read -p "Do you want to start the agent now? [Y/n] " START_CONFIRM
