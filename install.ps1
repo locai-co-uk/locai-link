@@ -76,23 +76,26 @@ if (Test-Path $DefaultsPath) {
     }
 }
 $DefaultProdUrl = if ($EnvDefaults["DEFAULT_API_URL"]) { $EnvDefaults["DEFAULT_API_URL"] } else { "https://api.locai.co.uk/api/v1" }
+$DefaultDevUrl = if ($EnvDefaults["DEV_API_URL"]) { $EnvDefaults["DEV_API_URL"] } else { "https://dev-api.locai.co.uk/api/v1" }
 $DefaultLocalUrl = if ($EnvDefaults["LOCAL_API_URL"]) { $EnvDefaults["LOCAL_API_URL"] } else { "http://localhost:8001/api/v1" }
 
 # --- API URL Selection ---
 if ([string]::IsNullOrWhiteSpace($ApiUrl)) {
     Write-Host "`nSelect API Environment:" -ForegroundColor Cyan
     Write-Host "1) Production ($DefaultProdUrl)"
-    Write-Host "2) Localhost ($DefaultLocalUrl)"
-    Write-Host "3) Custom URL"
+    Write-Host "2) Dev        ($DefaultDevUrl)"
+    Write-Host "3) Localhost  ($DefaultLocalUrl)"
+    Write-Host "4) Custom URL"
     $ApiChoice = Read-Host "Choice [1]"
     switch ($ApiChoice) {
-        "2" { $ApiUrl = $DefaultLocalUrl }
-        "3" { $ApiUrl = Read-Host "Enter Custom API URL" }
+        "2" { $ApiUrl = $DefaultDevUrl }
+        "3" { $ApiUrl = $DefaultLocalUrl }
+        "4" { $ApiUrl = Read-Host "Enter Custom API URL" }
         Default { $ApiUrl = $DefaultProdUrl }
     }
 }
 
-# 4. Environment Setup (Python 3.11.8 & LlamaCPP)
+# 4. Environment Setup (Python 3.11.8)
 Write-Host "`nInitializing Environment (Python $PythonVersion)..." -ForegroundColor Cyan
 
 # Install specific python version
@@ -101,29 +104,11 @@ uv python install $PythonVersion
 if (Test-Path ".venv") { Remove-Item ".venv" -Recurse -Force }
 uv venv --python $PythonVersion
 
-# --- Install Llama-CPP-Python (Windows Logic) ---
-Write-Host "Checking GPU availability..."
-if (Get-Command "nvidia-smi" -ErrorAction SilentlyContinue) {
-    Write-Host "✔ NVIDIA GPU detected. Installing CUDA-enabled inference engine." -ForegroundColor Green
-    # Using pre-built wheels for Windows + CUDA 12.1 compatibility
-    $LlamaUrl = "https://abetlen.github.io/llama-cpp-python/whl/cu121"
-} else {
-    Write-Host "⚠ No NVIDIA GPU detected. Installing CPU inference engine." -ForegroundColor Yellow
-    $LlamaUrl = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-}
-
-Write-Host "Installing llama-cpp-python from $LlamaUrl..."
-uv pip install llama-cpp-python --extra-index-url $LlamaUrl
-
-# 5. Install Project Dependencies
-Write-Host "Installing project dependencies..."
-uv pip install -e .
-
-# 6. Run Internal Setup
+# 5. Run Manager Setup (Installs Inference Engine + Dependencies)
 Write-Host "`nRunning internal setup..." -ForegroundColor Cyan
 uv run manager.py setup
 
-# 7. Register
+# 6. Register
 Write-Host "`nRegistering device..." -ForegroundColor Cyan
 $ArgsList = @("register", "--device-name", $DeviceName, "--username", $Username, "--registration-key", $RegistrationKey, "--device-type", $DeviceType, "--api-url", $ApiUrl)
 uv run manager.py $ArgsList

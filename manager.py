@@ -122,8 +122,6 @@ def ensure_venv_execution():
 
     if venv_python.exists():
         # We found the venv, but we aren't using it. Re-exec.
-        # print(f"🔄 Switching to virtual environment: {venv_python}")
-
         # Construct the command: [path/to/venv/python, manager.py, arg1, arg2...]
         args = [str(venv_python), str(Path(__file__).resolve())] + sys.argv[1:]
 
@@ -139,8 +137,6 @@ def ensure_venv_execution():
             print(f"❌ Failed to switch to venv: {e}")
             sys.exit(1)
     else:
-        # If running 'setup', we don't expect the venv to exist yet.
-        # For other commands, we warn.
         if "setup" not in sys.argv:
             print("⚠ Warning: .venv not found. Run 'python manager.py setup' first.")
 
@@ -151,12 +147,111 @@ def load_defaults():
     if DEFAULTS_FILE.exists():
         with open(DEFAULTS_FILE, "r") as f:
             for line in f:
-                # Ignore comments and empty lines
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, value = line.split("=", 1)
                     defaults[key.strip()] = value.strip()
     return defaults
+
+
+def command_exists(cmd: str) -> bool:
+    """Check if a command exists in the system path."""
+    return shutil.which(cmd) is not None
+
+
+def install_inference_engine():
+    """Installs llama-cpp-python with hardware acceleration support."""
+    print_step("Installing AI Inference Engine")
+
+    system = platform.system()
+    machine = platform.machine()
+
+    # Prepare environment for uv pip
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(VENV_PATH)
+
+    # Helper wrapper for uv pip install
+    def uv_pip_install(args, extra_env=None):
+        run_env = env.copy()
+        if extra_env:
+            run_env.update(extra_env)
+        subprocess.run(
+            ["uv", "pip", "install"] + args,
+            cwd=PROJECT_ROOT,
+            env=run_env,
+            check=True,
+        )
+
+    try:
+        if system == "Darwin":
+            print(f"Detected macOS ({machine})")
+
+            # Ensure cmake is available
+            if not command_exists("cmake"):
+                print("cmake not found. Installing via pip...")
+                uv_pip_install(["cmake"])
+                # Update PATH to include venv/bin where cmake might be
+                env["PATH"] = str(VENV_PATH / "bin") + os.pathsep + env.get("PATH", "")
+
+            print("Building with Metal (Apple Silicon) support...")
+
+            # Build flags for Metal
+            cmake_args = "-DGGML_METAL=ON -DGGML_NATIVE=OFF"
+            if machine == "arm64":
+                cmake_args += " -DCMAKE_OSX_ARCHITECTURES=arm64"
+
+            build_env = {"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args}
+
+            uv_pip_install(["--no-binary", "llama-cpp-python", "llama-cpp-python"], extra_env=build_env)
+
+        elif system == "Linux":
+            print("Detected Linux")
+
+            # Ensure cmake
+            if not command_exists("cmake"):
+                print("cmake not found. Installing via pip...")
+                uv_pip_install(["cmake"])
+                env["PATH"] = str(VENV_PATH / "bin") + os.pathsep + env.get("PATH", "")
+
+            # Check for NVIDIA GPU / CUDA
+            has_gpu = command_exists("nvidia-smi") and command_exists("nvcc")
+
+            cmake_args = ""
+            if has_gpu:
+                print("✔ NVIDIA GPU and CUDA Toolkit detected. Building with CUDA support.")
+                cmake_args = "-DGGML_CUDA=ON"
+            else:
+                print("⚠ No NVIDIA/CUDA detected. Building for CPU.")
+
+            build_env = {"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args}
+
+            uv_pip_install(["--no-binary", "llama-cpp-python", "llama-cpp-python"], extra_env=build_env)
+
+        elif system == "Windows":
+            print("Detected Windows")
+
+            # Check for NVIDIA GPU
+            has_gpu = command_exists("nvidia-smi")
+
+            if has_gpu:
+                print("✔ NVIDIA GPU detected. Installing CUDA-enabled wheel.")
+                # Use pre-built wheel for CUDA 12.1 (common standard)
+                index_url = "https://abetlen.github.io/llama-cpp-python/whl/cu121"
+            else:
+                print("⚠ No NVIDIA GPU detected. Installing CPU wheel.")
+                index_url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+
+            uv_pip_install(["llama-cpp-python", "--extra-index-url", index_url])
+
+        else:
+            print(f"Unknown OS {system}. Attempting standard install...")
+            uv_pip_install(["llama-cpp-python"])
+
+        print("✔ Inference Engine installed successfully.")
+
+    except subprocess.CalledProcessError:
+        print("❌ Failed to install Inference Engine.")
+        sys.exit(1)
 
 
 # --- Command Implementations ---
@@ -192,8 +287,12 @@ def setup(extras=None):
             print("❌ Failed to create virtual environment.")
             sys.exit(1)
 
-    # 3. Install Dependencies using uv pip
-    print_step("Installing Dependencies")
+    # 3. Install Inference Engine (Complex Deps)
+    # We do this before standard deps to ensure the correct wheel/build is present
+    install_inference_engine()
+
+    # 4. Install Dependencies using uv pip
+    print_step("Installing Project Dependencies")
 
     install_target = "-e ."
     if extras:
@@ -237,6 +336,9 @@ def reset(hard=False):
         "build",
         "dist",
         "__pycache__",
+        "__pytest_cache__",
+        "__ruff_cache__",
+        ".benchmarks",
         "uv.lock",
     ]
 
@@ -252,11 +354,9 @@ def reset(hard=False):
                 path.unlink(missing_ok=True)
 
     # 2. Remove __pycache__ recursively from subdirectories
-    # (The loop above only catches __pycache__ in the root)
     print("Scanning for nested __pycache__...")
     for p in PROJECT_ROOT.rglob("__pycache__"):
         if p.is_dir():
-            # Avoid printing every single nested cache to keep logs clean
             shutil.rmtree(p, ignore_errors=True)
 
     # 3. Remove config if hard reset
@@ -416,18 +516,16 @@ def main():
             )
             sys.exit(1)
 
-        agent_cmd_args.extend(
-            [
-                "--device-name",
-                args.device_name,
-                "--username",
-                args.username,
-                "--registration-key",
-                args.registration_key,
-                "--device-type",
-                args.device_type,
-            ]
-        )
+        agent_cmd_args.extend([
+            "--device-name",
+            args.device_name,
+            "--username",
+            args.username,
+            "--registration-key",
+            args.registration_key,
+            "--device-type",
+            args.device_type,
+        ])
 
     elif args.command == "activate":
         agent_cmd_args.extend(["--device-id", args.device_id])

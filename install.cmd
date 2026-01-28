@@ -90,6 +90,7 @@ if exist "defaults.env" (
     )
 )
 if "%DEFAULT_API_URL%"=="" set "DEFAULT_API_URL=https://api.locai.co.uk/api/v1"
+if "%DEV_API_URL%"=="" set "DEV_API_URL=https://dev-api.locai.co.uk/api/v1"
 if "%LOCAL_API_URL%"=="" set "LOCAL_API_URL=http://localhost:8001/api/v1"
 
 :: --- API URL Selection ---
@@ -97,13 +98,16 @@ if "%API_URL%"=="" (
     echo.
     echo Select API Environment:
     echo 1^) Production ^(%DEFAULT_API_URL%^)
-    echo 2^) Localhost ^(%LOCAL_API_URL%^)
-    echo 3^) Custom URL
+    echo 2^) Dev        ^(%DEV_API_URL%^)
+    echo 3^) Localhost  ^(%LOCAL_API_URL%^)
+    echo 4^) Custom URL
     set /p "API_CHOICE=Choice [1]: "
     
     if "!API_CHOICE!"=="2" (
-        set "API_URL=%LOCAL_API_URL%"
+        set "API_URL=%DEV_API_URL%"
     ) else if "!API_CHOICE!"=="3" (
+        set "API_URL=%LOCAL_API_URL%"
+    ) else if "!API_CHOICE!"=="4" (
         set /p "API_URL=Enter Custom API URL: "
     ) else (
         set "API_URL=%DEFAULT_API_URL%"
@@ -124,26 +128,8 @@ uv python install %PYTHON_VERSION%
 if exist ".venv" rmdir /s /q ".venv"
 uv venv --python %PYTHON_VERSION%
 
-:: --- Install Llama-CPP-Python ---
-echo.
-echo Checking for GPU...
-where nvidia-smi >nul 2>nul
-if %errorlevel% equ 0 (
-    echo NVIDIA GPU detected. Installing CUDA support...
-    set "LLAMA_URL=https://abetlen.github.io/llama-cpp-python/whl/cu121"
-) else (
-    echo No GPU detected. Installing CPU support...
-    set "LLAMA_URL=https://abetlen.github.io/llama-cpp-python/whl/cpu"
-)
-
-echo Installing llama-cpp-python...
-uv pip install llama-cpp-python --extra-index-url %LLAMA_URL%
-
-:: --- Install Project Deps ---
-echo Installing project dependencies...
-uv pip install -e .
-
-:: --- Internal Setup ---
+:: --- Run Manager Setup ---
+:: (Manager now handles install_inference_engine for llama-cpp-python and other deps)
 echo.
 echo Running internal setup...
 uv run manager.py setup

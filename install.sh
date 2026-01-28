@@ -93,23 +93,26 @@ if [ -f "defaults.env" ]; then
     set -a; source "defaults.env"; set +a
 fi
 DEFAULT_API_URL=${DEFAULT_API_URL:-"https://api.locai.co.uk/api/v1"}
+DEV_API_URL=${DEV_API_URL:-"https://dev-api.locai.co.uk/api/v1"}
 LOCAL_API_URL=${LOCAL_API_URL:-"http://localhost:8001/api/v1"}
 
 # --- API URL Selection ---
 if [[ -z "$API_URL" ]]; then
     echo -e "\n${BLUE}Select API Environment:${NC}"
     echo "1) Production ($DEFAULT_API_URL)"
-    echo "2) Localhost ($LOCAL_API_URL)"
-    echo "3) Custom URL"
+    echo "2) Dev        ($DEV_API_URL)"
+    echo "3) Localhost  ($LOCAL_API_URL)"
+    echo "4) Custom URL"
     read -p "Choice [1]: " API_CHOICE
     case $API_CHOICE in
-        2) API_URL="$LOCAL_API_URL" ;;
-        3) read -p "Enter Custom API URL: " API_URL ;;
+        2) API_URL="$DEV_API_URL" ;;
+        3) API_URL="$LOCAL_API_URL" ;;
+        4) read -p "Enter Custom API URL: " API_URL ;;
         *) API_URL="$DEFAULT_API_URL" ;;
     esac
 fi
 
-# 4. Environment Setup (Python 3.11.8 & LlamaCPP)
+# 4. Environment Setup (Python 3.11.8)
 echo -e "\n${BLUE}Initializing Environment (Python $PYTHON_VERSION)...${NC}"
 
 # Ensure specific python version
@@ -118,57 +121,11 @@ uv python install "$PYTHON_VERSION"
 rm -rf .venv
 uv venv --python "$PYTHON_VERSION"
 
-# --- Install Llama-CPP-Python ---
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-
-echo -e "${BLUE}Installing AI Inference Engine for $OS...${NC}"
-
-# Install Cmake if missing (required for source builds on Mac/Linux)
-if ! command -v cmake >/dev/null 2>&1; then
-    echo "Installing cmake..."
-    uv pip install cmake
-    export PATH="$INSTALL_DIR/.venv/bin:$PATH"
-fi
-
-if [ "$OS" = "Darwin" ]; then
-    # macOS: Build from source with Metal support
-    echo "Building with Metal (Apple Silicon) support..."
-    export FORCE_CMAKE=1
-    export CMAKE_ARGS="-DGGML_METAL=ON -DGGML_NATIVE=OFF"
-    
-    if [ "$ARCH" = "arm64" ]; then
-        export CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_OSX_ARCHITECTURES=arm64"
-    fi
-    
-    uv pip install --no-binary llama-cpp-python llama-cpp-python
-
-elif [ "$OS" = "Linux" ]; then
-    # Linux: Check for CUDA
-    echo "Checking for NVIDIA GPU..."
-    if command -v nvidia-smi &> /dev/null && command -v nvcc &> /dev/null; then
-        echo "NVIDIA GPU and CUDA Toolkit detected. Building with CUDA support."
-        export CMAKE_ARGS="-DGGML_CUDA=ON"
-    else
-        echo "No NVIDIA/CUDA detected. Building for CPU."
-        export CMAKE_ARGS=""
-    fi
-    export FORCE_CMAKE=1
-    uv pip install --no-binary llama-cpp-python llama-cpp-python
-else
-    # Fallback
-    uv pip install llama-cpp-python
-fi
-
-# 5. Install Project Dependencies
-echo -e "${BLUE}Installing Project Dependencies...${NC}"
-uv pip install -e .
-
-# 6. Run Setup Logic (Database init etc)
+# 5. Run Manager Setup (Installs Inference Engine + Dependencies)
 echo -e "\n${BLUE}Running internal setup...${NC}"
 uv run manager.py setup
 
-# 7. Register Device
+# 6. Register Device
 echo -e "\n${BLUE}Registering device...${NC}"
 CMD_ARGS=("register" "--device-name" "$DEVICE_NAME" "--username" "$USERNAME" "--registration-key" "$REG_KEY" "--device-type" "$DEVICE_TYPE" "--api-url" "$API_URL")
 uv run manager.py "${CMD_ARGS[@]}"
