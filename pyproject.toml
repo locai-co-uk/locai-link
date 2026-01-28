@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "locai-link"
-version = "0.1.5"
+version = "0.1.6"
 description = "Locai edge device inference agent"
 readme = "README.md"
 requires-python = "==3.11.8"
@@ -24,6 +24,7 @@ dependencies = [
   "requests>=2.32.4",
   "python-dotenv>=1.0.0",
   "psutil>=7.0.0",
+  "colorama>=0.4.6",
   "rich>=13.0.0",
   "numpy>=1.21.0",
   "Pillow>=10.0.0",
