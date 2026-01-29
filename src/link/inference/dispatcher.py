@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import argparse
-import json
 import os
 import signal
 import subprocess
@@ -12,6 +11,8 @@ from pathlib import Path
 
 import psutil
 
+from link.utils import CONFIGS_DIR, MODELS_DIR, load_json_config
+
 AUDIO_KEYWORDS = ["yamnet", "audio", "sound", "speech", "voice"]
 LLM_KEYWORDS = ["llama", "gguf", "mistral", "deepseek", "phi", "qwen", "language"]
 
@@ -19,45 +20,38 @@ child_process = None
 llm_detached_mode = False  # Indicates if LLM was launched in a new terminal
 llm_model_path = None  # Used to find detached LLM process
 
-script_dir = Path(__file__).parent
-project_root = script_dir.parent.parent.parent
-configs_dir = project_root / "configs"
-models_dir = project_root / "models"
+# This script is located in src/link/inference/
+SCRIPT_DIR = Path(__file__).parent
 
 
 def determine_inference_script_by_name(name: str) -> Path:
     """Return script path based on audio-vs-image keywords in the name."""
     lower = (name or "").lower()
     if any(k in lower for k in AUDIO_KEYWORDS):
-        return script_dir / "audio_classification_yamnet_tflite.py"
+        return SCRIPT_DIR / "audio_classification_yamnet_tflite.py"
     if any(k in lower for k in LLM_KEYWORDS):
-        return script_dir / "language_model_gguf.py"
+        return SCRIPT_DIR / "language_model_gguf.py"
     # Default to image detection/classification script
-    return script_dir / "image_detection_cpy_tflite.py"
+    return SCRIPT_DIR / "image_detection_cpy_tflite.py"
 
 
 def find_runtime_config_file(model_id: str) -> Path | None:
     """Find the runtime config file for the model."""
-    configs_dir.mkdir(exist_ok=True)
+    # Ensure configs dir exists (using constant from utils)
+    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
 
     # First check configs directory (preferred)
-    config_file_path = configs_dir / f"{model_id}.json"
+    config_file_path = CONFIGS_DIR / f"{model_id}.json"
     if config_file_path.exists():
         return config_file_path
 
     # Fallback to models directory (legacy)
-    legacy_config_path = models_dir / f"{model_id}.json"
+    legacy_config_path = MODELS_DIR / f"{model_id}.json"
     if legacy_config_path.exists():
         print(f"Warning: Using legacy config location {legacy_config_path}")
         return legacy_config_path
 
     return None
-
-
-def read_config_file(config_file_path: Path) -> dict:
-    """Read the config file and return the config as a dictionary."""
-    with open(config_file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 def determine_inference_script_by_config(config: dict) -> Path:
@@ -68,7 +62,7 @@ def determine_inference_script_by_config(config: dict) -> Path:
 
     # Prefer explicit entrypoint if present and exists
     if entrypoint:
-        candidate = script_dir / entrypoint
+        candidate = SCRIPT_DIR / entrypoint
         if candidate.exists():
             return candidate
         else:
@@ -82,7 +76,7 @@ def determine_inference_script_by_config(config: dict) -> Path:
     }
 
     if runner and runner in runner_to_script_path:
-        return script_dir / runner_to_script_path[runner]
+        return SCRIPT_DIR / runner_to_script_path[runner]
 
     # If no valid runner found, raise an error
     raise ValueError(
@@ -214,12 +208,12 @@ def main():
 
     # If a config is available, use it to choose runner and flags
     if config_path:
-        try:
-            cfg = read_config_file(config_path)
-            print(f"Loaded runtime config from {config_path}")
-        except Exception as e:
-            print(f"Error reading config file {config_path}: {e}", file=sys.stderr)
+        cfg = load_json_config(config_path)
+        if cfg is None:
+            print(f"Error reading config file {config_path}", file=sys.stderr)
             sys.exit(1)
+
+        print(f"Loaded runtime config from {config_path}")
 
         try:
             script_path = determine_inference_script_by_config(cfg)

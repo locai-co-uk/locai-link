@@ -30,7 +30,13 @@ dependencies = [
   "Pillow>=10.0.0",
   "opencv-python>=4.7.0",
   "sounddevice>=0.4.6",
-  # TensorFlow variants
+  # Llama.cpp server dependencies. TODO: Lazy load these
+  "uvicorn>=0.22.0",
+  "fastapi>=0.100.0",
+  "pydantic-settings>=2.0.1",
+  "sse-starlette>=1.6.1",
+  "starlette-context<0.4,>=0.3.6",
+  # TensorFlow variants. TODO: Lazy load these 
   "tensorflow-cpu>=2.0.0; sys_platform != 'darwin'",
   "tensorflow-macos; sys_platform == 'darwin'",
   "tensorflow-metal; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -39,7 +45,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["black>=24.0.0", "ruff>=0.1.0", "pytest>=7.0.0", "pytest-mock>=3.10.0"]
+dev = [
+  "black>=24.0.0",
+  "ruff>=0.1.0",
+  "pytest>=7.0.0",
+  "pytest-mock>=3.10.0",
+  "pytest-cov>=6.0.0",
+]
 
 [tool.setuptools]
 include-package-data = true
