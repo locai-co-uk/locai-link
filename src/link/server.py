@@ -164,12 +164,12 @@ class ModelServer:
         """Starts the llama-server."""
         # Gatekeeper Check
         if not self.is_valid:
-            print("❌ Server configuration is invalid. Aborting startup.")
+            link_logger.fail("Server configuration is invalid. Aborting startup.")
             return
 
         if self.is_running():
             pid = self.pid_file.read_text().strip()
-            print(f"Server is already running (PID {pid}). Skipping startup.")
+            link_logger.warn(f"Server is already running (PID {pid}). Skipping startup.")
             return
 
         print("Starting Model Serving...")
@@ -215,6 +215,7 @@ class ModelServer:
                 if val is not None:
                     cmd.extend([cli_flag, str(val)])
 
+        link_logger.info(f"Launching server on http://{self.host}:{self.port}...")
         print(f"Launching server on http://{self.host}:{self.port}...")
         print(f"Logs: {self.log_file}")
 
