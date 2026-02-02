@@ -326,6 +326,7 @@ def reset(hard=False):
         "uv.lock",
         ".ruff_cache",
         ".pytest_cache",
+        ".coverage",
     ]
 
     for pattern in patterns_to_remove:
@@ -443,9 +444,6 @@ def main():
         stop_serving()
         return
 
-    # Default to Production if no URL provided for runtime commands
-    final_api_url = args.api_url if args.api_url else PROD_API_URL
-
     if args.command == "register":
         if not all([args.device_name, args.username, args.registration_key]):
             print("❌ Error: Missing required arguments (name, username, key).")
@@ -463,7 +461,7 @@ def main():
             "--device-type",
             args.device_type,
             "--api-url",
-            final_api_url,
+            args.api_url if args.api_url else PROD_API_URL,
         ]
         subprocess.run(cmd, check=True)
 
@@ -482,7 +480,7 @@ def main():
         if args.device_type:
             cmd.extend(["--device-type", args.device_type])
 
-        cmd.extend(["--api-url", final_api_url])
+        cmd.extend(["--api-url", args.api_url if args.api_url else PROD_API_URL])
         subprocess.run(cmd, check=True)
 
     elif args.command == "run":
@@ -490,7 +488,10 @@ def main():
             print("❌ Error: Device not configured. Run 'register' first.")
             sys.exit(1)
 
-        cmd = [sys.executable, str(AGENT_SCRIPT), "--api-url", final_api_url]
+        # Only append --api-url if it was actually provided in the CLI
+        cmd = [sys.executable, str(AGENT_SCRIPT)]
+        if args.api_url:
+            cmd.extend(["--api-url", args.api_url])
 
         subprocess.run(cmd, check=True)
 

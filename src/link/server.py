@@ -24,7 +24,7 @@ from link.utils import (
 class ModelServer:
     """Manages the lifecycle of the local model server."""
 
-    def __init__(self):
+    def __init__(self, model_id: str):
         """Initialises the ModelServer with basic auth and paths."""
         self.pid_file = PROJECT_ROOT / "serving.pid"
         self.log_file = PROJECT_ROOT / "serving.log"
@@ -32,9 +32,10 @@ class ModelServer:
         self.is_valid = False
         self.model_path = None
         self.params = {}
-        self.device_config = None
-        self.host = "[IP_ADDRESS]"
+        self.host = "localhost"
         self.port = 8003
+        self.model_id = model_id
+        self.model_config = None
 
         print("Initialising Model Server Manager...")
 
@@ -112,13 +113,13 @@ class ModelServer:
         Returns:
             bool: True if config loaded successfully, False otherwise.
         """
-        device_conf_path = CONFIGS_DIR / f"{self.device_id}.json"
+        model_conf_path = CONFIGS_DIR / f"{self.model_id}.json"
 
-        if device_conf_path.exists():
-            self.device_config = load_json_config(device_conf_path)
+        if model_conf_path.exists():
+            self.model_config = load_json_config(model_conf_path)
         else:
             link_logger.fail(
-                f"Device config for {self.device_id} not found.",
+                f"Model config for {self.model_id} not found.",
                 category="configuration",
                 action="start_server",
                 hint="Run 'register' first to generate a config.",
@@ -126,11 +127,11 @@ class ModelServer:
             return False
 
         # Parse State
-        serving = self.device_config.get("serving", {})
-        self.host = serving.get("default_host", "[IP_ADDRESS]")
+        serving = self.model_config.get("serving", {})
+        self.host = serving.get("default_host", "localhost")
         self.port = serving.get("default_port", 8003)
 
-        process = self.device_config.get("process", {})
+        process = self.model_config.get("process", {})
         artifacts = process.get("artifacts", [])
 
         # Try to find a GGUF model in artifacts

@@ -595,7 +595,7 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
             return link_logger.fail("ModelServer module not available.")
 
         try:
-            server = ModelServer()
+            server = ModelServer(payload.get("model_id"))
 
             if not getattr(server, "is_valid", False) and not getattr(server, "is_running", lambda: False)():
                 return link_logger.fail("Server initialization failed (check config/logs).")
@@ -614,7 +614,7 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
             return link_logger.fail("ModelServer module not available.")
 
         try:
-            server = ModelServer()
+            server = ModelServer(payload.get("model_id"))
             server.stop()
             return link_logger.ok("Model Serving stopped.")
         except Exception as e:
