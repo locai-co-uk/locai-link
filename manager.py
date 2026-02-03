@@ -157,7 +157,7 @@ def install_deps_from_source():  # Can be repurposed to install all components t
                 if has_gpu
                 else "https://abetlen.github.io/llama-cpp-python/whl/cpu"
             )
-            print("✔ GPU detected." if has_gpu else "No GPU detected.")
+            print("✔ GPU detected." if has_gpu else "No GPU detected or No CUDA detected. Using CPU.")
 
             uv_pip_install(["llama-cpp-python", "--extra-index-url", index_url])
 
