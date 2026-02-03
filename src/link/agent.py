@@ -591,11 +591,8 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
     # --- SERVER COMMANDS ---
 
     elif command_type == "start_serving":
-        if not ModelServer:
-            return link_logger.fail("ModelServer module not available.")
-
         try:
-            server = ModelServer(payload.get("model_id"))
+            server = ModelServer(payload)
 
             if not getattr(server, "is_valid", False) and not getattr(server, "is_running", lambda: False)():
                 return link_logger.fail("Server initialization failed (check config/logs).")
@@ -610,11 +607,8 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
             return link_logger.fail(f"Error executing start_serving: {e}")
 
     elif command_type == "stop_serving":
-        if not ModelServer:
-            return link_logger.fail("ModelServer module not available.")
-
         try:
-            server = ModelServer(payload.get("model_id"))
+            server = ModelServer(payload)
             server.stop()
             return link_logger.ok("Model Serving stopped.")
         except Exception as e:

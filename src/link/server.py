@@ -22,9 +22,23 @@ from link.utils import (
 
 
 class ModelServer:
-    """Manages the lifecycle of the local model server."""
+    """Manages the lifecycle of the local model server.
 
-    def __init__(self, model_id: str):
+    payload {
+        "id": command_doc["id"],
+        "model_id": model_id,
+        "model_name": payload["model_name"],
+        "model_display_name": payload["model_display_name"],
+        "port": payload["port"],
+        "host": payload["host"],
+        "device_id": command_data["device_id"],
+        "deployed_at": command_data["created_at"],
+        "status": command_data["status"],
+    }
+
+    """
+
+    def __init__(self, payload: dict):
         """Initialises the ModelServer with basic auth and paths."""
         self.pid_file = PROJECT_ROOT / "serving.pid"
         self.log_file = PROJECT_ROOT / "serving.log"
@@ -32,9 +46,10 @@ class ModelServer:
         self.is_valid = False
         self.model_path = None
         self.params = {}
-        self.host = "localhost"
-        self.port = 8003
-        self.model_id = model_id
+        self.host = payload.get("host", "localhost")
+        self.port = payload.get("port", 8003)
+        self.model_id = payload.get("model_id")
+        self.model_display_name = payload.get("model_display_name")
         self.model_config = None
 
         print("Initialising Model Server Manager...")
@@ -127,9 +142,9 @@ class ModelServer:
             return False
 
         # Parse State
-        serving = self.model_config.get("serving", {})
-        self.host = serving.get("default_host", "localhost")
-        self.port = serving.get("default_port", 8003)
+        # serving = self.model_config.get("serving", {})
+        # self.host = serving.get("default_host", "localhost")
+        # self.port = serving.get("default_port", 8003)
 
         process = self.model_config.get("process", {})
         artifacts = process.get("artifacts", [])
@@ -216,9 +231,8 @@ class ModelServer:
                 if val is not None:
                     cmd.extend([cli_flag, str(val)])
 
-        link_logger.info(f"Launching server on http://{self.host}:{self.port}...")
-        print(f"Launching server on http://{self.host}:{self.port}...")
-        print(f"Logs: {self.log_file}")
+        link_logger.info(f"Launching server on http://{self.host}:{self.port}, use model {self.model_display_name}")
+        print(f"Launching server on http://{self.host}:{self.port}, use model {self.model_display_name}")
 
         try:
             with open(self.log_file, "w") as log:
