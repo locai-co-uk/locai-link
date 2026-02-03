@@ -91,7 +91,7 @@ class ModelServer:
         """
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"}
-            payload = {"status": "starting_server"}
+            payload = {"mode": "serving"}
 
             url = f"{self.api_url}/agent/{self.device_id}/status"
 
@@ -260,6 +260,21 @@ class ModelServer:
 
         except Exception as e:
             link_logger.fail(f"Failed to start server: {e}")
+
+        url = f"{self.api_url}/agent/{self.model_id}/status"
+        payload = {"running": True, "pid": process.pid, "serving": True, "serving_port": self.port}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            if response.status_code == 200:
+                print("Successfully reported server status")
+            else:
+                print(
+                    f"Error reporting server status: {response.status_code} - {response.text}",
+                    file=sys.stderr,
+                )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error while reporting server status: {e}", file=sys.stderr)
 
     def stop(self):
         """Stops the running server."""
