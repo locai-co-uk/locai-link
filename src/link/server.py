@@ -22,24 +22,23 @@ from link.utils import (
 
 
 class ModelServer:
-    """Manages the lifecycle of the local model server.
-
-    payload {
-        "id": command_doc["id"],
-        "model_id": model_id,
-        "model_name": payload["model_name"],
-        "model_display_name": payload["model_display_name"],
-        "port": payload["port"],
-        "host": payload["host"],
-        "device_id": command_data["device_id"],
-        "deployed_at": command_data["created_at"],
-        "status": command_data["status"],
-    }
-
-    """
+    """Manages the lifecycle of the local model server."""
 
     def __init__(self, payload: dict):
-        """Initialises the ModelServer with basic auth and paths."""
+        """Initialises the ModelServer with basic auth and paths.
+
+        payload {
+            "id": command_doc["id"],
+            "model_id": model_id,
+            "model_name": payload["model_name"],
+            "model_display_name": payload["model_display_name"],
+            "port": payload["port"],
+            "host": payload["host"],
+            "device_id": command_data["device_id"],
+            "deployed_at": command_data["created_at"],
+            "status": command_data["status"],
+        }
+        """
         self.pid_file = PROJECT_ROOT / "serving.pid"
         self.log_file = PROJECT_ROOT / "serving.log"
 
@@ -47,7 +46,7 @@ class ModelServer:
         self.model_path = None
         self.params = {}
         self.host = payload.get("host", "localhost")
-        self.port = payload.get("port", 8003)
+        self.port = 8003
         self.model_id = payload.get("model_id")
         self.model_display_name = payload.get("model_display_name")
         self.model_config = None
@@ -91,7 +90,7 @@ class ModelServer:
         """
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"}
-            payload = {"mode": "serving"}
+            payload = {"status": "online", "mode": "serving"}
 
             url = f"{self.api_url}/agent/{self.device_id}/status"
 
@@ -110,7 +109,7 @@ class ModelServer:
                 return False
             else:
                 link_logger.warn(
-                    f"Status check returned unexpected code: {response.status_code}",
+                    f"Status check returned unexpected code: {response.status_code} - {response.text}",
                     category="network",
                 )
                 return True
@@ -140,11 +139,6 @@ class ModelServer:
                 hint="Run 'register' first to generate a config.",
             )
             return False
-
-        # Parse State
-        # serving = self.model_config.get("serving", {})
-        # self.host = serving.get("default_host", "localhost")
-        # self.port = serving.get("default_port", 8003)
 
         process = self.model_config.get("process", {})
         artifacts = process.get("artifacts", [])
@@ -249,19 +243,21 @@ class ModelServer:
 
             time.sleep(2)
             if process.poll() is not None:
-                link_logger.fail(
-                    "Server crashed immediately.",
+                link_logger.fail("Server crashed immediately.",
                     category="process",
                     action="start_server",
                     state_after={"exit_code": process.returncode},
                     hint=f"Check {self.log_file} for details.",
                 )
-                self.pid_file.unlink()
+                if self.pid_file.exists():
+                    self.pid_file.unlink()
+                return
+
 
         except Exception as e:
             link_logger.fail(f"Failed to start server: {e}")
 
-        url = f"{self.api_url}/agent/{self.model_id}/status"
+        url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
         payload = {"running": True, "pid": process.pid, "serving": True, "serving_port": self.port}
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
@@ -270,7 +266,7 @@ class ModelServer:
                 print("Successfully reported server status")
             else:
                 print(
-                    f"Error reporting server status: {response.status_code} - {response.text}",
+                    f"Error reporting status: {response.status_code} - {response.text}",
                     file=sys.stderr,
                 )
         except requests.exceptions.RequestException as e:

@@ -327,6 +327,8 @@ def reset(hard=False):
         ".ruff_cache",
         ".pytest_cache",
         ".coverage",
+        "serving.pid",
+        "serving.log",
     ]
 
     for pattern in patterns_to_remove:
