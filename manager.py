@@ -150,14 +150,14 @@ def install_deps_from_source():  # Can be repurposed to install all components t
 
         elif system == "Windows":
             print("Detected Windows.")
-            has_gpu = command_exists("nvidia-smi")
+            has_gpu = command_exists("nvidia-smi") and command_exists("nvcc")
             # Use pre-built wheels for Windows to avoid complex build tools
             index_url = (
                 "https://abetlen.github.io/llama-cpp-python/whl/cu121"
                 if has_gpu
                 else "https://abetlen.github.io/llama-cpp-python/whl/cpu"
             )
-            print("✔ GPU detected." if has_gpu else "No GPU detected.")
+            print("✔ GPU detected." if has_gpu else "No GPU detected or No CUDA detected. Using CPU.")
 
             uv_pip_install(["llama-cpp-python", "--extra-index-url", index_url])
 
