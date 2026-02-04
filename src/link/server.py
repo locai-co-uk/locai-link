@@ -46,7 +46,7 @@ class ModelServer:
         self.model_path = None
         self.params = {}
         self.host = payload.get("host", "localhost")
-        self.port = 8003
+        self.port = payload.get("port", 8003)
         self.model_id = payload.get("model_id")
         self.model_display_name = payload.get("model_display_name")
         self.model_config = None
@@ -243,7 +243,8 @@ class ModelServer:
 
             time.sleep(2)
             if process.poll() is not None:
-                link_logger.fail("Server crashed immediately.",
+                link_logger.fail(
+                    "Server crashed immediately.",
                     category="process",
                     action="start_server",
                     state_after={"exit_code": process.returncode},
@@ -252,7 +253,6 @@ class ModelServer:
                 if self.pid_file.exists():
                     self.pid_file.unlink()
                 return
-
 
         except Exception as e:
             link_logger.fail(f"Failed to start server: {e}")
