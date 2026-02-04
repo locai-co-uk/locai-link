@@ -9,8 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from link.server import ModelServer
-
 # --- Constants ---
 PROJECT_ROOT = Path(__file__).parent.resolve()
 VENV_NAME = ".venv"
@@ -357,18 +355,6 @@ def reset(hard=False):
     print("Reset complete.")
 
 
-def start_serving():
-    """Starts the serving process using the Server module."""
-    server = ModelServer()
-    server.start()
-
-
-def stop_serving():
-    """Stops the serving process using the Server module."""
-    server = ModelServer()
-    server.stop()
-
-
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="LocAI Device Manager")
@@ -394,11 +380,7 @@ def main():
     reset_parser = subparsers.add_parser("reset", help="Clean up artifacts")
     reset_parser.add_argument("--hard", action="store_true", help="Also remove config files")
 
-    # 4. Serving Commands
-    subparsers.add_parser("start-serving", help="Start the serving process")
-    subparsers.add_parser("stop-serving", help="Stop the serving process")
-
-    # 5. Register
+    # 4. Register
     reg_parser = subparsers.add_parser("register", help="Register device")
     reg_parser.add_argument("--device-name")
     reg_parser.add_argument("--username")
@@ -406,7 +388,7 @@ def main():
     reg_parser.add_argument("--device-type", default="edge_device")
     reg_parser.add_argument("--api-url")
 
-    # 6. Activate (Restored)
+    # 5. Activate (Restored)
     act_parser = subparsers.add_parser("activate", help="Activate a pre-registered device")
     act_parser.add_argument("--device-id", required=True, help="Device ID")
     act_parser.add_argument("--api-key", help="API Key (if activated in UI)")
@@ -414,7 +396,7 @@ def main():
     act_parser.add_argument("--device-type", help="Device type (optional)")
     act_parser.add_argument("--api-url", help="Override API URL")
 
-    # 7. Run
+    # 6. Run
     run_parser = subparsers.add_parser("run", help="Run agent")
     run_parser.add_argument("--api-url")
 
@@ -437,14 +419,6 @@ def main():
 
     # Commands that REQUIRE the Virtual Env
     ensure_venv_execution()
-
-    if args.command == "start-serving":
-        start_serving()
-        return
-
-    elif args.command == "stop-serving":
-        stop_serving()
-        return
 
     if args.command == "register":
         if not all([args.device_name, args.username, args.registration_key]):

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import atexit
+import socket
 import subprocess
 import sys
 import time
@@ -50,6 +52,8 @@ class ModelServer:
         self.model_id = payload.get("model_id")
         self.model_display_name = payload.get("model_display_name")
         self.model_config = None
+
+        atexit.register(self.stop)
 
         print("Initialising Model Server Manager...")
 
@@ -166,6 +170,11 @@ class ModelServer:
         self.params = process.get("parameters", {})
         return True
 
+    def _is_port_in_use(self, port: int) -> bool:
+        """Checks if a port is actively in use."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("localhost", port)) == 0
+
     def is_running(self) -> bool:
         """Checks if the server is running."""
         return is_process_running(self.pid_file)
@@ -180,6 +189,11 @@ class ModelServer:
         if self.is_running():
             pid = self.pid_file.read_text().strip()
             link_logger.warn(f"Server is already running (PID {pid}). Skipping startup.")
+            return
+
+        if self._is_port_in_use(self.port):
+            link_logger.fail(f"Port {self.port} is already in use by another process.")
+            print(f"❌ Error: Port {self.port} is busy. Run 'lsof -i :{self.port}' to see what's using it.")
             return
 
         print("Starting Model Serving...")
@@ -203,6 +217,8 @@ class ModelServer:
             "llama_cpp.server",
             "--model",
             str(self.model_path),
+            "--model_alias",
+            str(self.model_display_name),
             "--host",
             str(self.host),
             "--port",
@@ -225,6 +241,9 @@ class ModelServer:
                 if val is not None:
                     cmd.extend([cli_flag, str(val)])
 
+        if "chat_format" not in self.params:
+            cmd.extend(["--chat_format", "chatml"])
+
         link_logger.info(f"Launching server on http://{self.host}:{self.port}, use model {self.model_display_name}")
         print(f"Launching server on http://{self.host}:{self.port}, use model {self.model_display_name}")
 
@@ -234,7 +253,6 @@ class ModelServer:
                     cmd,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True,
                     cwd=PROJECT_ROOT,
                 )
 
@@ -258,7 +276,7 @@ class ModelServer:
             link_logger.fail(f"Failed to start server: {e}")
 
         url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
-        payload = {"running": True, "pid": process.pid, "serving": True, "serving_port": self.port}
+        payload = {"running": False, "pid": 0, "serving": True, "serving_pid": process.pid, "serving_port": self.port}
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=10)
@@ -273,6 +291,36 @@ class ModelServer:
             print(f"Network error while reporting server status: {e}", file=sys.stderr)
 
     def stop(self):
-        """Stops the running server."""
+        """Stops the running server securely."""
         print("Stopping Model Serving...")
-        stop_process_tree(self.pid_file, "Model Server")
+
+        # 1. Try to kill the in-memory process object first (most reliable)
+        if hasattr(self, "process") and self.process:
+            print(f"Terminating process {self.process.pid}...")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print("Force killing process...")
+                self.process.kill()
+
+        # 2. Fallback: Cleanup using the PID file if it exists
+        if self.pid_file.exists():
+            stop_process_tree(self.pid_file, "Model Server")
+
+        url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
+        payload = {"running": False, "pid": 0, "serving": False, "serving_pid": 0, "serving_port": 0}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            if response.status_code == 200:
+                print("Successfully reported server status")
+            else:
+                print(
+                    f"Error reporting status: {response.status_code} - {response.text}",
+                    file=sys.stderr,
+                )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error while reporting server status: {e}", file=sys.stderr)
+
+        print("Server stopped.")
