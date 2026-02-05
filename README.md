@@ -5,7 +5,7 @@
 **The distributed edge runtime for the Loc.ai platform** <br>
 Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a Raspberry Pi to an industrial GPU cluster—into a managed node within your Loc.ai fleet. It handles secure connectivity, model deployment, and local inference orchestration without relying on cloud dependency.
 
-## 🚀 Quick Start
+## Quick Start
 
 For production deployment on edge devices, use our one-line installer to setup, register and activate the agent.
 
@@ -59,29 +59,40 @@ graph TD
     Agent -->|HTTPS| Cloud
 ```
 
-## 📖 User Guide (Manual / Source)
+## Build from Source
 This guide covers setting up a device to run the Loc.ai agent from source (this repository).
 
 ### Installation
-
-Linux / macOS:
+First clone the repository (or download release):
 
 ```bash
-# Make the script executable
-chmod +x run_agent.sh
-
-# Initialise the environment (installs python, dependencies, etc.)
-./run_agent.sh setup
+git clone https://github.com/locai-co-uk/locai-link.git
+cd locai-link
 ```
 
-Windows (PowerShell):
+You can use the `install.sh` script to start a wizard-like setup process.
+
+#### Linux / macOS:
+
+```bash
+chmod +x install.sh # If not already executable
+./install.sh
+```
+
+#### Windows (PowerShell):
 
 ```powershell
-# Initialise the environment
-.\run_agent.ps1 setup
+.\install.ps1
 ```
 
-Running the agent without setup will automatically setup prior.
+Alternatively, you can setup the device with the manager (`manager.py`) directly.
+
+```bash
+python3 manager.py setup
+
+# or with uv if its installed (the manager will install it if not)
+uv run manager.py setup
+```
 
 ### Device Registration
 Before running the agent, you must identify the device to the Loc.ai platform.
@@ -89,7 +100,7 @@ Before running the agent, you must identify the device to the Loc.ai platform.
 Option A: New Device Registration Use this if you have a Registration Key generated from the Loc.ai dashboard.
 
 ```bash
-./run_agent.sh register \
+uv run manager.py register \
   --device-name "my-edge-device-01" \
   --username "my-username" \
   --registration-key "YOUR_REG_KEY"
@@ -98,7 +109,7 @@ Option A: New Device Registration Use this if you have a Registration Key genera
 Option B: Activate Pre-existing Device Use this if you created the device in the UI and have its Device ID and API Key.
 
 ```bash
-./run_agent.sh activate \
+uv run manager.py activate \
   --device-id "dev_12345678" \
   --api-key "sk_live_..."
 ```
@@ -107,21 +118,18 @@ Option B: Activate Pre-existing Device Use this if you created the device in the
 Once set up and registered, start the runtime. The agent will automatically connect to the control plane and await instructions (model deployments, etc.).
 
 ```bash
-./run_agent.sh run
+uv run manager.py run
 ```
-
-## 🛠️ Developer Guide
-This section is for contributors or users extending the agent's functionality.
 
 ### Development Environment Setup
 To develop locally, you need to install the dev dependencies (testing tools, linters, etc.).
 
 ```bash
 # Install with 'dev' extras
-./run_agent.sh setup --extras dev
+uv run manager.py setup --extras dev
 ```
 
-You can pass `--api-url "<your local url>"` to the register.
+When registering pass `--api-url "<your local url>"` if not using the production API.
 
 ### Directory Structure
 manager.py: The entry point. Handles setup, venv management, and launching the agent.

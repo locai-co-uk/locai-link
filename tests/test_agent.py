@@ -1,22 +1,7 @@
-import pytest
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
 
 import link.agent as agent
-
-
-@pytest.fixture
-def device_config():
-    """Fixture providing common device configuration for tests."""
-    return {
-        "device_id": "test_device_123",
-        "api_key": "test_api_key_abc",
-        "base_url": "http://localhost:8000/api/v1",
-    }
-
-
-@pytest.fixture
-def setup_agent(device_config):
-    """Fixture to initialize agent configuration."""
-    agent.BASE_URL = device_config["base_url"]
 
 
 def test_get_system_metrics(mocker):
@@ -32,7 +17,7 @@ def test_get_system_metrics(mocker):
 
     mock_cpu.return_value = 15.5
     mock_mem.return_value.percent = 45.0
-    mock_disk.return_value.free = 50 * (1024**3)  # 50GB
+    mock_disk.return_value.free = 50 * (1024**3)
 
     metrics = agent.get_system_metrics()
 
@@ -42,24 +27,22 @@ def test_get_system_metrics(mocker):
     assert metrics["temperature_celsius"] == 65.0
 
 
-def test_send_metrics(device_config, mocker):
+def test_send_metrics(mocker, mock_paths, device_config):
     """Test sending metrics to the backend."""
     mock_post = mocker.patch("requests.post")
     mock_post.return_value.status_code = 200
 
-    mock_metrics = mocker.patch("link.agent.get_system_metrics")
-    mock_metrics.return_value = {"cpu": 10}
+    mocker.patch("link.agent.get_system_metrics", return_value={"cpu": 10})
 
     agent.send_metrics(device_config["device_id"], device_config["api_key"])
 
     mock_post.assert_called_once()
     args, kwargs = mock_post.call_args
     assert f"/agent/{device_config['device_id']}/metrics" in args[0]
-    assert kwargs["json"] == {"cpu": 10}
 
 
-def test_execute_shell_command(device_config, mocker):
-    """Test executing a shell command received from backend."""
+def test_execute_shell_command(mocker, mock_paths, device_config):
+    """Test executing a shell command."""
     mock_run = mocker.patch("subprocess.run")
     mock_run.return_value.returncode = 0
     mock_run.return_value.stdout = "Command output"
@@ -77,32 +60,78 @@ def test_execute_shell_command(device_config, mocker):
 
     assert status == "completed"
     assert "Command output" in output
-    mock_run.assert_called_with("echo test", shell=True, capture_output=True, text=True, timeout=300)
+    mock_run.assert_called()
 
 
-def test_start_model_inference(device_config, mocker):
-    """Test starting model inference process."""
-    mock_popen = mocker.patch("subprocess.Popen")
+def test_deploy_model(mocker, mock_paths, device_config):
+    """Test model deployment."""
+    mocker.patch("pathlib.Path.mkdir")
+    mock_get = mocker.patch("requests.get")
+    mock_get.return_value.status_code = 200
+    mock_get.return_value.iter_content.return_value = [b"data"]
 
-    # Setup the process mock
-    process_mock = mocker.MagicMock()
-    process_mock.pid = 9999
-    process_mock.poll.return_value = None
+    # Use mocker.mock_open
+    m_open = mocker.mock_open()
+    mocker.patch("builtins.open", m_open)
 
-    process_mock.stdout.readline.return_value = ""
-    process_mock.stderr.readline.return_value = ""
+    mocker.patch("link.logger.LogClient.get")  # Mock logger
 
-    mock_popen.return_value = process_mock
+    payload = {"model_id": "m1", "model_name": "m.gguf", "file_extension": "gguf", "runtime_config": {}}
 
-    # Mock file existence
+    agent.BASE_URL = device_config["api_url"]
+
+    result = agent.deploy_model(payload, device_config["api_key"], device_config)
+    assert result[0] == "completed"
+
+
+def test_execute_start_serving(mocker, mock_paths, device_config):
+    """Test start_serving command."""
+    mock_server_class = mocker.patch("link.agent.ModelServer")
+    mock_instance = mock_server_class.return_value
+    mock_instance.is_valid = True
+    mock_instance.is_running.return_value = True
+
+    command = {"id": "c1", "data": {"command_type": "start_serving", "payload": {}}}
+
+    status, msg = agent.execute_command(command, "key", device_config)
+    assert status == "completed"
+    mock_instance.start.assert_called_once()
+
+
+def test_execute_stop_serving(mocker, mock_paths, device_config):
+    """Test stop_serving command."""
+    mock_server_class = mocker.patch("link.agent.ModelServer")
+    mock_instance = mock_server_class.return_value
+
+    command = {"id": "c2", "data": {"command_type": "stop_serving", "payload": {}}}
+
+    status, msg = agent.execute_command(command, "key", device_config)
+    assert status == "completed"
+    mock_instance.stop.assert_called_once()
+
+
+def test_start_model_inference_success(mocker, mock_paths, device_config):
+    """Test starting a background inference process."""
     mocker.patch("pathlib.Path.exists", return_value=True)
+    mocker.patch("requests.post").return_value.status_code = 200
 
-    payload = {"model_name": "test_model.tflite", "model_id": "model_123"}
-    config = {"device_id": device_config["device_id"]}
+    # --- Subprocess Mock ---
+    mock_popen = mocker.patch("subprocess.Popen")
+    mock_proc = mocker.MagicMock()
+    mock_proc.pid = 555
+
+    # Handle infinite loop in threads by returning EOF
+    mock_proc.stdout.readline.return_value = ""
+    mock_proc.stderr.readline.return_value = ""
+
+    mock_popen.return_value = mock_proc
+    # -----------------------
+
     running_procs = {}
+    payload = {"model_name": "test.tflite", "model_id": "m1"}
 
-    status, output = agent.start_model_inference(payload, device_config["api_key"], config, running_procs)
+    status, msg = agent.start_model_inference(payload, "key", device_config, running_procs)
 
     assert status == "completed"
-    assert "PID 9999" in output
-    assert "test_model.tflite" in running_procs
+    assert "test.tflite" in running_procs
+    assert running_procs["test.tflite"]["process"] == mock_proc

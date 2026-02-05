@@ -59,3 +59,7 @@ uv.lock
 
 # Pyrefly
 pyrefly.toml
+
+# Serving
+serving.pid
+serving.log

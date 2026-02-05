@@ -18,31 +18,21 @@ from rich import print
 
 import link.logger as logger
 from link.logger import link_logger
+from link.server import ModelServer
+from link.utils import (
+    AGENT_CONFIG_PATH,
+    CONFIGS_DIR,
+    MODELS_DIR,
+    load_json_config,
+)
 
 # --- Configuration ---
-# Assuming agent.py is in src/link/agent.py, root is 3 levels up
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_DIR = PROJECT_ROOT / "configs"
-CONFIG_FILE = CONFIG_DIR / "agent_config.json"
 BASE_URL = None
-
 METRICS_INTERVAL_SECONDS = 30  # Interval for sending metrics
 COMMAND_POLL_INTERVAL_SECONDS = 10  # Interval for polling for commands
 
 
 # --- Helper Functions ---
-def load_config() -> dict | None:
-    """Loads the agent's configuration from a local file.
-
-    Returns:
-        dict | None: The configuration data, or None if the file does not exist.
-    """
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return None
-
-
 def save_config(device_id, api_key, api_url=None):
     """Saves the agent's configuration to a local file.
 
@@ -52,7 +42,7 @@ def save_config(device_id, api_key, api_url=None):
         api_url (str, optional): The API URL to persist.
     """
     # Ensure the config directory exists
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
 
     config_data = {"device_id": device_id, "api_key": api_key}
 
@@ -60,9 +50,9 @@ def save_config(device_id, api_key, api_url=None):
     if api_url:
         config_data["api_url"] = api_url
 
-    with open(CONFIG_FILE, "w") as f:
+    with open(AGENT_CONFIG_PATH, "w") as f:
         json.dump(config_data, f, indent=4)
-    print(f"Agent configuration saved to {CONFIG_FILE}")
+    print(f"Agent configuration saved to {AGENT_CONFIG_PATH}")
 
 
 def activate_agent(device_id, user_token) -> bool:
@@ -153,12 +143,12 @@ def register_new_device_with_key(device_name, device_type, username, registratio
     print(f"Using API URL: {BASE_URL}")
 
     if not device_type:
-        print("⚠ Warning: No device type provided. Defaulting to 'other'.")
+        print("Warning: No device type provided. Defaulting to 'other'.")
         device_type = "other"
     else:
         valid_types = ["other"]
         if device_type not in valid_types:
-            print(f"⚠ Warning: Device type '{device_type}' is not natively supported. Defaulting to 'other'.")
+            print(f"Warning: Device type '{device_type}' is not natively supported. Defaulting to 'other'.")
             device_type = "other"
 
     payload = {
@@ -351,10 +341,8 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         device_id = config["device_id"]
 
         # Create directories
-        models_dir = PROJECT_ROOT / "models"
-        models_dir.mkdir(exist_ok=True)
-        configs_dir = PROJECT_ROOT / "configs"
-        configs_dir.mkdir(exist_ok=True)
+        MODELS_DIR.mkdir(exist_ok=True)
+        CONFIGS_DIR.mkdir(exist_ok=True)
 
         # Download model with automatic retry on transient failures
         download_url = f"{BASE_URL}/models/{model_id}/download/{device_id}/agent"
@@ -391,7 +379,7 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         )
 
         # Save the model file
-        model_file_path = models_dir / model_name
+        model_file_path = MODELS_DIR / model_name
         try:
             total_size_bytes = int(response.headers.get("content-length", 0))
             downloaded_bytes = 0
@@ -426,7 +414,7 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
 
         # Save runtime config if provided
         if runtime_config:
-            config_file_path = configs_dir / f"{model_id}.json"
+            config_file_path = CONFIGS_DIR / f"{model_id}.json"
             try:
                 with open(config_file_path, "w", encoding="utf-8") as f:
                     json.dump(runtime_config, f, indent=2)
@@ -584,9 +572,8 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
 
         print(f"Updating runtime config for model {model_id} (variant: {variant_name})...")
 
-        configs_dir = PROJECT_ROOT / "configs"
-        configs_dir.mkdir(exist_ok=True)
-        config_file = configs_dir / f"{model_id}.json"
+        CONFIGS_DIR.mkdir(exist_ok=True)
+        config_file = CONFIGS_DIR / f"{model_id}.json"
 
         try:
             with open(config_file, "w", encoding="utf-8") as f:
@@ -600,6 +587,32 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
             )
         except Exception as e:
             return link_logger.fail(f"Failed to save runtime config: {e}")
+
+    # --- SERVER COMMANDS ---
+
+    elif command_type == "start_serving":
+        try:
+            server = ModelServer(payload)
+
+            if not getattr(server, "is_valid", False) and not getattr(server, "is_running", lambda: False)():
+                return link_logger.fail("Server initialization failed (check config/logs).")
+
+            server.start()
+
+            if server.is_running():
+                return link_logger.ok("Model Serving started successfully.")
+            else:
+                return link_logger.fail("Model Serving failed to start.")
+        except Exception as e:
+            return link_logger.fail(f"Error executing start_serving: {e}")
+
+    elif command_type == "stop_serving":
+        try:
+            server = ModelServer(payload)
+            server.stop()
+            return link_logger.ok("Model Serving stopped.")
+        except Exception as e:
+            return link_logger.fail(f"Error executing stop_serving: {e}")
 
     elif command_type == "shutdown_agent":
         print("Shutdown command received. Initiating graceful shutdown...")
@@ -829,7 +842,7 @@ def main():
     args = parser.parse_args()
 
     # Priority: CLI Arg > Config File > Default (None)
-    config = load_config()
+    config = load_json_config(AGENT_CONFIG_PATH)
 
     if args.api_url:
         BASE_URL = args.api_url
@@ -1001,7 +1014,7 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
         return link_logger.fail(f"Inference for model '{model_name}' is already running (PID {pid})")
 
     # Construct the full path to the model file
-    model_path = PROJECT_ROOT / "models" / model_name
+    model_path = MODELS_DIR / model_name
     if not model_path.exists():
         return link_logger.fail(f"Model file not found: {model_path}")
 
@@ -1025,11 +1038,10 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
                 else:
                     local_cfg = co
             else:
-                cfg_dir = PROJECT_ROOT / "configs"
                 if model_id:
-                    cfg_file = cfg_dir / f"{model_id}.json"
+                    cfg_file = CONFIGS_DIR / f"{model_id}.json"
                 else:
-                    cfg_file = cfg_dir / f"{Path(model_name).stem}.json"
+                    cfg_file = CONFIGS_DIR / f"{Path(model_name).stem}.json"
                 if cfg_file.exists():
                     local_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
         except Exception:
@@ -1126,11 +1138,10 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
         cfg_override = payload.get("config_override")
         cfg_path = None
         if cfg_url or cfg_override is not None:
-            configs_dir = PROJECT_ROOT / "configs"
-            configs_dir.mkdir(exist_ok=True)
+            CONFIGS_DIR.mkdir(exist_ok=True)
             model_id_for_cfg = payload.get("model_id") or Path(model_name).stem
             cfg_filename = f"{model_id_for_cfg}.json"
-            cfg_path = configs_dir / cfg_filename
+            cfg_path = CONFIGS_DIR / cfg_filename
 
             if cfg_url:
                 # Support absolute URLs and API-relative paths

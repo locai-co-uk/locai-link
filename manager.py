@@ -5,7 +5,6 @@ import argparse
 import os
 import platform
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -16,428 +15,380 @@ VENV_NAME = ".venv"
 VENV_PATH = PROJECT_ROOT / VENV_NAME
 PYTHON_VERSION = os.environ.get("PYTHON_VERSION", "3.11")
 AGENT_SCRIPT = PROJECT_ROOT / "src" / "link" / "agent.py"
-DEFAULTS_FILE = PROJECT_ROOT / "defaults.env"
 CONFIG_FILE = PROJECT_ROOT / "configs" / "agent_config.json"
 
-# --- Helper Functions ---
+# Installer Defaults
+DEFAULT_REPO_URL = "https://github.com/locai-co-uk/locai-link.git"
+DEFAULT_BRANCH = "main"
+
+# API Environments
+PROD_API_URL = "https://api.locai.co.uk/api/v1"
+
+# --- Infrastructure Helpers ---
 
 
 def print_step(message):
-    """Print a formatted step message.
-
-    Args:
-        message (str): The message to print.
-    """
+    """Prints a step header."""
     print(f"\n=== {message} ===")
 
 
-def signal_handler(signum, frame):
-    """Handles termination signals by initiating a clean exit.
-
-    Args:
-        signum (int): The signal number.
-        frame (frame): The current stack frame.
-    """
-    print(f"\nReceived signal {signum}. Exiting gracefully...")
-    sys.exit(0)
-
-
-# Register signal handlers
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+def command_exists(cmd: str) -> bool:
+    """Checks if a command exists in the system's PATH."""
+    return shutil.which(cmd) is not None
 
 
 def is_uv_installed() -> bool:
-    """Check if uv is installed and accessible.
-
-    Returns:
-        bool: True if uv is installed, False otherwise.
-    """
+    """Checks if uv (The Package Manager) is installed."""
     try:
-        subprocess.run(
-            ["uv", "--version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
+        subprocess.run(["uv", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return True
     except (FileNotFoundError, subprocess.CalledProcessError):
         return False
 
 
 def install_uv():
-    """Install uv using the appropriate method for the OS."""
-    print_step("Installing uv (package manager)")
+    """Installs uv (The Package Manager) if missing."""
+    if is_uv_installed():
+        return
 
+    print_step("Installing uv (package manager)")
     system = platform.system().lower()
 
     try:
         if system == "windows":
-            # Use PowerShell to install on Windows
             cmd = 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
             subprocess.run(cmd, shell=True, check=True)
         else:
-            # Use curl/sh on Linux/macOS
             cmd = "curl -LsSf https://astral.sh/uv/install.sh | sh"
             subprocess.run(cmd, shell=True, check=True)
 
-        # Add typical install locations to PATH for this session
+        # Attempt to add to PATH for current session
         home = Path.home()
-        if system == "windows":
-            # Typical windows location
-            uv_path = home / ".local" / "bin"  # generic
-            if not uv_path.exists():
-                uv_path = home / ".cargo" / "bin"  # fallback
-        else:
-            uv_path = home / ".local" / "bin"
-
-        if uv_path.exists():
-            os.environ["PATH"] += os.pathsep + str(uv_path)
-            print(f"✔ Added {uv_path} to PATH for this session")
-
+        new_paths = [home / ".local" / "bin", home / ".cargo" / "bin"]
+        for p in new_paths:
+            if p.exists():
+                os.environ["PATH"] += os.pathsep + str(p)
     except subprocess.CalledProcessError as e:
         print(f"❌ Failed to install uv: {e}")
         sys.exit(1)
 
 
-def get_venv_python() -> Path:
-    """Returns the path to the python executable inside the venv.
-
-    Returns:
-        Path: The path to the python executable inside the venv.
-    """
-    if sys.platform == "win32":
-        return VENV_PATH / "Scripts" / "python.exe"
-    else:
-        return VENV_PATH / "bin" / "python"
-
-
 def ensure_venv_execution():
-    """Check if we are running inside the virtual environment."""
-    # Check if we are already in a venv (sys.prefix != sys.base_prefix)
+    """Ensures the script is running inside the project's virtual environment."""
     if sys.prefix != sys.base_prefix:
         return
 
-    venv_python = get_venv_python()
+    # Determine venv python path
+    if sys.platform == "win32":
+        venv_python = VENV_PATH / "Scripts" / "python.exe"
+    else:
+        venv_python = VENV_PATH / "bin" / "python"
 
     if venv_python.exists():
-        # We found the venv, but we aren't using it. Re-exec.
-        # Construct the command: [path/to/venv/python, manager.py, arg1, arg2...]
+        # Re-execute the current command inside the venv
         args = [str(venv_python), str(Path(__file__).resolve())] + sys.argv[1:]
-
         try:
-            # On Unix, os.execv replaces the current process
             if sys.platform != "win32":
                 os.execv(str(venv_python), args)
             else:
-                # On Windows, use subprocess and exit
                 subprocess.run(args, check=True)
                 sys.exit(0)
         except OSError as e:
             print(f"❌ Failed to switch to venv: {e}")
             sys.exit(1)
     else:
-        if "setup" not in sys.argv:
-            print("⚠ Warning: .venv not found. Run 'python manager.py setup' first.")
+        print("❌ Virtual environment not found.")
+        print("Please run: python manager.py setup")
+        sys.exit(1)
 
 
-def load_defaults():
-    """Reads defaults.env and returns a dict."""
-    defaults = {}
-    if DEFAULTS_FILE.exists():
-        with open(DEFAULTS_FILE, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    defaults[key.strip()] = value.strip()
-    return defaults
-
-
-def command_exists(cmd: str) -> bool:
-    """Check if a command exists in the system path."""
-    return shutil.which(cmd) is not None
-
-
-def install_inference_engine():
-    """Installs llama-cpp-python with hardware acceleration support."""
+def install_deps_from_source():  # Can be repurposed to install all components that require building from source
+    """Installs packages that cannot be installed directly with pip/setuptools."""
     print_step("Installing AI Inference Engine")
-
     system = platform.system()
     machine = platform.machine()
 
-    # Prepare environment for uv pip
     env = os.environ.copy()
     env["VIRTUAL_ENV"] = str(VENV_PATH)
 
-    # Helper wrapper for uv pip install
     def uv_pip_install(args, extra_env=None):
         run_env = env.copy()
         if extra_env:
             run_env.update(extra_env)
-        subprocess.run(
-            ["uv", "pip", "install"] + args,
-            cwd=PROJECT_ROOT,
-            env=run_env,
-            check=True,
-        )
+        subprocess.run(["uv", "pip", "install"] + args, cwd=PROJECT_ROOT, env=run_env, check=True)
 
     try:
         if system == "Darwin":
-            print(f"Detected macOS ({machine})")
-
-            # Ensure cmake is available
+            print(f"Detected macOS ({machine}). Building with Metal support...")
             if not command_exists("cmake"):
-                print("cmake not found. Installing via pip...")
                 uv_pip_install(["cmake"])
-                # Update PATH to include venv/bin where cmake might be
-                env["PATH"] = str(VENV_PATH / "bin") + os.pathsep + env.get("PATH", "")
 
-            print("Building with Metal (Apple Silicon) support...")
-
-            # Build flags for Metal
             cmake_args = "-DGGML_METAL=ON -DGGML_NATIVE=OFF"
             if machine == "arm64":
                 cmake_args += " -DCMAKE_OSX_ARCHITECTURES=arm64"
 
-            build_env = {"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args}
-
-            uv_pip_install(["--no-binary", "llama-cpp-python", "llama-cpp-python"], extra_env=build_env)
+            uv_pip_install(
+                ["--no-binary", "llama-cpp-python", "llama-cpp-python"],
+                extra_env={"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args},
+            )
 
         elif system == "Linux":
-            print("Detected Linux")
-
-            # Ensure cmake
+            print("Detected Linux.")
             if not command_exists("cmake"):
-                print("cmake not found. Installing via pip...")
                 uv_pip_install(["cmake"])
-                env["PATH"] = str(VENV_PATH / "bin") + os.pathsep + env.get("PATH", "")
 
-            # Check for NVIDIA GPU / CUDA
             has_gpu = command_exists("nvidia-smi") and command_exists("nvcc")
+            cmake_args = "-DGGML_CUDA=ON" if has_gpu else ""
+            print("✔ CUDA detected." if has_gpu else "No CUDA detected. Using CPU.")
 
-            cmake_args = ""
-            if has_gpu:
-                print("✔ NVIDIA GPU and CUDA Toolkit detected. Building with CUDA support.")
-                cmake_args = "-DGGML_CUDA=ON"
-            else:
-                print("⚠ No NVIDIA/CUDA detected. Building for CPU.")
-
-            build_env = {"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args}
-
-            uv_pip_install(["--no-binary", "llama-cpp-python", "llama-cpp-python"], extra_env=build_env)
+            uv_pip_install(
+                ["--no-binary", "llama-cpp-python", "llama-cpp-python"],
+                extra_env={"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args},
+            )
 
         elif system == "Windows":
-            print("Detected Windows")
-
-            # Check for NVIDIA GPU
-            has_gpu = command_exists("nvidia-smi")
-
-            if has_gpu:
-                print("✔ NVIDIA GPU detected. Installing CUDA-enabled wheel.")
-                # Use pre-built wheel for CUDA 12.1 (common standard)
-                index_url = "https://abetlen.github.io/llama-cpp-python/whl/cu121"
-            else:
-                print("⚠ No NVIDIA GPU detected. Installing CPU wheel.")
-                index_url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+            print("Detected Windows.")
+            has_gpu = command_exists("nvidia-smi") and command_exists("nvcc")
+            # Use pre-built wheels for Windows to avoid complex build tools
+            index_url = (
+                "https://abetlen.github.io/llama-cpp-python/whl/cu121"
+                if has_gpu
+                else "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+            )
+            print("✔ GPU detected." if has_gpu else "No GPU detected or No CUDA detected. Using CPU.")
 
             uv_pip_install(["llama-cpp-python", "--extra-index-url", index_url])
 
         else:
-            print(f"Unknown OS {system}. Attempting standard install...")
             uv_pip_install(["llama-cpp-python"])
 
-        print("✔ Inference Engine installed successfully.")
-
+        print("✔ Inference Engine installed.")
     except subprocess.CalledProcessError:
         print("❌ Failed to install Inference Engine.")
         sys.exit(1)
 
 
-# --- Command Implementations ---
+# --- Main Commands ---
 
 
 def setup(extras=None):
-    """Sets up the environment: installs uv, creates venv, installs dependencies.
+    """Builder: Prepares the environment."""
+    print_step(f"Setting up Environment (Python {PYTHON_VERSION})")
 
-    Args:
-        extras (str, optional): Extra dependencies to install. Defaults to None.
-    """
-    print_step(f"Setting up LocAI Device Environment (Python {PYTHON_VERSION})")
+    install_uv()
 
-    # 1. Check/Install uv
-    if not is_uv_installed():
-        install_uv()
-    else:
-        print("✔ uv is already installed")
-
-    # 2. Create Virtual Environment using uv if it doesn't exist
-    print_step("Creating Virtual Environment")
     if VENV_PATH.exists():
-        print(f"✔ Virtual environment already exists at {VENV_PATH}")
+        print(f"✔ Virtual environment exists at {VENV_PATH}")
     else:
-        try:
-            subprocess.run(
-                ["uv", "venv", "--python", PYTHON_VERSION, ".venv"],
-                cwd=PROJECT_ROOT,
-                check=True,
-            )
-            print(f"✔ Virtual environment created at {VENV_PATH}")
-        except subprocess.CalledProcessError:
-            print("❌ Failed to create virtual environment.")
-            sys.exit(1)
+        print("Creating virtual environment...")
+        subprocess.run(["uv", "venv", "--python", PYTHON_VERSION, ".venv"], cwd=PROJECT_ROOT, check=True)
 
-    # 3. Install Inference Engine (Complex Deps)
-    # We do this before standard deps to ensure the correct wheel/build is present
-    install_inference_engine()
+    install_deps_from_source()
 
-    # 4. Install Dependencies using uv pip
     print_step("Installing Project Dependencies")
+    install_target = f"-e .[{extras}]" if extras else "-e ."
 
-    install_target = "-e ."
-    if extras:
-        install_target = f"-e .[{extras}]"
-        print(f"  -> Including extras: {extras}")
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(VENV_PATH)
+    subprocess.run(["uv", "pip", "install"] + install_target.split(), cwd=PROJECT_ROOT, env=env, check=True)
+
+    print("\n✔ Setup Complete.")
+
+
+def install(args):
+    """Orchestrator: The 'Web Installer' Logic."""
+    print_step("LocAI Edge Agent Installer")
+    cwd = Path.cwd()
+
+    # Determine API URL
+    target_api_url = PROD_API_URL  # Default
+
+    if args.api_url:
+        target_api_url = args.api_url
+        print(f"✔ Using provided API URL: {target_api_url}")
+    elif args.dev:
+        print("\n--- Development Configuration ---")
+        # Flush input buffer to prevent skipping
+        try:
+            sys.stdin.flush()
+        except Exception:
+            pass
+
+        user_input = input("Enter Target API URL: ").strip()
+        if not user_input:
+            print("❌ Error: API URL is required when using --dev.")
+            sys.exit(1)
+        target_api_url = user_input
+        print(f"✔ Selected Custom URL: {target_api_url}")
+
+    # Git Operations
+    if (cwd / "pyproject.toml").exists():
+        install_dir = cwd
+        print(f"✔ Detected existing repository in {install_dir}")
+        is_fresh_clone = False
     else:
-        print("  -> Installing CORE dependencies.")
+        install_dir = cwd / "locai-link"
+        print(f"Target Directory: {install_dir}")
+        is_fresh_clone = True
 
-    try:
-        # Determine environment for uv pip
-        env = os.environ.copy()
-        env["VIRTUAL_ENV"] = str(VENV_PATH)
-
-        subprocess.run(
-            ["uv", "pip", "install"] + install_target.split(),
-            cwd=PROJECT_ROOT,
-            env=env,
-            check=True,
-        )
-        print("✔ Dependencies installed successfully.")
-    except subprocess.CalledProcessError:
-        print("❌ Failed to install dependencies.")
+    if not command_exists("git"):
+        print("❌ Error: git is not installed.")
         sys.exit(1)
 
-    print("\nSUCCESS! Environment ready.")
+    if is_fresh_clone:
+        if install_dir.exists():
+            print("Updating existing directory...")
+            subprocess.run(["git", "pull", "origin", args.branch], cwd=install_dir, check=True)
+        else:
+            print(f"Cloning repository ({args.branch})...")
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "-b", args.branch, args.repo_url, str(install_dir)], check=True
+            )
+    else:
+        subprocess.run(["git", "pull", "origin", args.branch], cwd=install_dir, check=True)
+
+    # Handover to Local Manager
+    print_step("Handing over to local installer...")
+
+    local_manager = install_dir / "manager.py"
+    if not local_manager.exists():
+        print("❌ Error: manager.py not found in target directory.")
+        sys.exit(1)
+
+    # Interactive Inputs (only if not provided)
+    if not args.device_name:
+        args.device_name = input("Enter Device Name: ").strip()
+    if not args.username:
+        args.username = input("Enter Username: ").strip()
+    if not args.registration_key:
+        args.registration_key = input("Enter Registration Key: ").strip()
+
+    if not all([args.device_name, args.username, args.registration_key]):
+        print("❌ Error: All fields are required.")
+        sys.exit(1)
+
+    # Define helper to run commands inside the new repo
+    def run_target(cmd_list):
+        full_cmd = ["uv", "run", "manager.py"] + cmd_list
+        subprocess.run(full_cmd, cwd=install_dir, check=True)
+
+    try:
+        # A. Setup
+        run_target(["setup"])
+
+        # B. Register
+        reg_args = [
+            "register",
+            "--device-name",
+            args.device_name,
+            "--username",
+            args.username,
+            "--registration-key",
+            args.registration_key,
+            "--device-type",
+            args.device_type,
+            "--api-url",
+            target_api_url,
+        ]
+        run_target(reg_args)
+
+        # C. Run
+        start = args.start_running
+        if not start and sys.stdin.isatty():
+            confirm = input("\nDo you want to start the agent now? [Y/n] ").strip().lower()
+            if confirm in ["", "y", "yes"]:
+                start = True
+
+        if start:
+            run_target(["run", "--api-url", target_api_url])
+        else:
+            print(f"\n✔ Installation complete. To run later:\n  cd {install_dir}\n  uv run manager.py run")
+
+    except subprocess.CalledProcessError as e:
+        print(f"\n❌ Installation step failed (Exit Code: {e.returncode})")
+        sys.exit(e.returncode)
 
 
 def reset(hard=False):
-    """Cleans up the environment.
-
-    Args:
-        hard (bool, optional): Whether to remove configuration files.
-            Defaults to False.
-    """
+    """Cleans up the environment."""
     print_step("Resetting device environment")
 
-    # Patterns to remove. Using glob syntax allowing wildcards.
+    # Patterns to remove
     patterns_to_remove = [
         VENV_NAME,
         "*.egg-info",
         "build",
         "dist",
         "__pycache__",
-        "__pytest_cache__",
-        "__ruff_cache__",
         ".benchmarks",
         "uv.lock",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".coverage",
+        "serving.pid",
+        "serving.log",
     ]
 
-    # 1. Remove Directories matching patterns
     for pattern in patterns_to_remove:
-        # PROJECT_ROOT.glob(pattern) handles both exact names (.venv) and wildcards (*.egg-info)
-        for path in PROJECT_ROOT.glob(pattern):
+        for path in PROJECT_ROOT.rglob(pattern):
+            if path == PROJECT_ROOT:
+                continue
+
             if path.is_dir():
-                print(f"Removing directory: {path.name}...")
+                print(f"Removing directory: {path.relative_to(PROJECT_ROOT)}...")
                 shutil.rmtree(path, ignore_errors=True)
             elif path.is_file():
-                print(f"Removing file: {path.name}...")
+                print(f"Removing file: {path.relative_to(PROJECT_ROOT)}...")
                 path.unlink(missing_ok=True)
 
-    # 2. Remove __pycache__ recursively from subdirectories
-    print("Scanning for nested __pycache__...")
-    for p in PROJECT_ROOT.rglob("__pycache__"):
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-
-    # 3. Remove config if hard reset
     if hard:
-        config_path = PROJECT_ROOT / "configs" / "agent_config.json"
-        if config_path.exists():
-            print("Removing configs/agent_config.json...")
-            config_path.unlink()
+        config_dir = PROJECT_ROOT / "configs"
+        if config_dir.exists():
+            print(f"Clearing all files in {config_dir.name}...")
+            for item in config_dir.iterdir():
+                if item.is_file() and item.name != ".gitkeep":
+                    print(f"Removing config file: {item.name}")
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
 
     print("Reset complete.")
 
 
-def start_serving():
-    """Starts the serving process."""
-    print_step("Starting Serving Process")
-    print("... placeholder logic for start_serving ...")
-    # TODO: Implement start serving logic here
-
-
-def stop_serving():
-    """Stops the serving process."""
-    print_step("Stopping Serving Process")
-    print("... placeholder logic for stop_serving ...")
-    # TODO: Implement stop serving logic here
-
-
-def run_agent_process(agent_args):
-    """Runs the agent.py script.
-
-    Assumes we are already in the venv (handled by ensure_venv_execution).
-
-    Args:
-        agent_args (list): List of arguments to pass to agent.py.
-    """
-    cmd = [sys.executable, str(AGENT_SCRIPT)] + agent_args
-
-    print(f"🚀 Executing agent command: {' '.join(cmd)}")
-
-    try:
-        # Replace the current process with the agent process
-        if sys.platform != "win32":
-            os.execv(sys.executable, cmd)
-        else:
-            # Windows doesn't support execv well, so we subprocess
-            subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-    except KeyboardInterrupt:
-        sys.exit(130)
-
-
 def main():
-    """Main entry point for the manager script."""
+    """Main entry point."""
     parser = argparse.ArgumentParser(description="LocAI Device Manager")
-    subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # --- SETUP COMMAND ---
-    setup_parser = subparsers.add_parser("setup", help="Install uv, create venv, install deps")
-    setup_parser.add_argument("--extras", default="", help="Comma-separated optional profiles (e.g. 'dev')")
+    # 1. Install
+    install_parser = subparsers.add_parser("install", help="Full installation wizard")
+    install_parser.add_argument("--repo-url", default=DEFAULT_REPO_URL)
+    install_parser.add_argument("--branch", default=DEFAULT_BRANCH)
+    install_parser.add_argument("--device-name")
+    install_parser.add_argument("--username")
+    install_parser.add_argument("--registration-key")
+    install_parser.add_argument("--device-type", default="edge_device")
+    install_parser.add_argument("--start-running", action="store_true")
+    install_parser.add_argument("--api-url", help="Specific API URL override")
+    install_parser.add_argument("--dev", action="store_true", help="Prompt for custom API URL")
 
-    # --- RESET COMMAND ---
+    # 2. Setup
+    setup_parser = subparsers.add_parser("setup", help="Configure venv and deps")
+    setup_parser.add_argument("--extras", default="")
+
+    # 3. Reset
     reset_parser = subparsers.add_parser("reset", help="Clean up artifacts")
     reset_parser.add_argument("--hard", action="store_true", help="Also remove config files")
 
-    # --- SERVING COMMANDS ---
-    subparsers.add_parser("start-serving", help="Start the serving process")
-    subparsers.add_parser("stop-serving", help="Stop the serving process")
+    # 4. Register
+    reg_parser = subparsers.add_parser("register", help="Register device")
+    reg_parser.add_argument("--device-name")
+    reg_parser.add_argument("--username")
+    reg_parser.add_argument("--registration-key")
+    reg_parser.add_argument("--device-type", default="edge_device")
+    reg_parser.add_argument("--api-url")
 
-    # --- REGISTER COMMAND ---
-    reg_parser = subparsers.add_parser("register", help="Register a new device")
-    reg_parser.add_argument("--device-name", required=False, help="Name for the new device")
-    reg_parser.add_argument("--username", required=False, help="Platform username")
-    reg_parser.add_argument("--registration-key", required=False, help="Registration key")
-    reg_parser.add_argument(
-        "--device-type",
-        default="edge_device",
-        help="Device type (default: edge_device)",
-    )
-    reg_parser.add_argument("--api-url", help="Override API URL")
-
-    # --- ACTIVATE COMMAND ---
+    # 5. Activate (Restored)
     act_parser = subparsers.add_parser("activate", help="Activate a pre-registered device")
     act_parser.add_argument("--device-id", required=True, help="Device ID")
     act_parser.add_argument("--api-key", help="API Key (if activated in UI)")
@@ -445,116 +396,101 @@ def main():
     act_parser.add_argument("--device-type", help="Device type (optional)")
     act_parser.add_argument("--api-url", help="Override API URL")
 
-    # --- RUN COMMAND ---
-    run_parser = subparsers.add_parser("run", help="Run the agent")
-    run_parser.add_argument("--api-url", help="Override API URL")
+    # 6. Run
+    run_parser = subparsers.add_parser("run", help="Run agent")
+    run_parser.add_argument("--api-url")
 
     args = parser.parse_args()
 
-    # Dispatch commands
-    if args.command == "setup":
+    # --- DISPATCHER ---
+
+    # Commands that do NOT require the Virtual Env
+    if args.command == "install":
+        install(args)
+        return
+
+    elif args.command == "setup":
         setup(extras=args.extras)
         return
 
-    if args.command == "reset":
+    elif args.command == "reset":
         reset(hard=args.hard)
         return
 
-    if args.command == "start-serving":
-        start_serving()
-        return
-
-    if args.command == "stop-serving":
-        stop_serving()
-        return
-
-    # --- AUTO-SETUP CHECK ---
-    if not VENV_PATH.exists() or not get_venv_python().exists():
-        print_step("Environment Not Found")
-        print("⚠ The virtual environment is not set up yet.")
-        print("  initiating automatic setup (Core Dependencies)...")
-
-        setup()
-        if not get_venv_python().exists():
-            print("❌ Automatic setup failed. Please run 'python manager.py setup' manually to debug.")
-            sys.exit(1)
-
+    # Commands that REQUIRE the Virtual Env
     ensure_venv_execution()
 
-    # Load defaults for API URL
-    env_vars = load_defaults()
-    default_api = env_vars.get("DEFAULT_API_URL", "https://api.locai.co.uk/api/v1")
-
-    # Construct arguments for agent.py
-    agent_cmd_args = []
-
-    # If user explicitly provided --api-url, always pass it.
-    if args.api_url:
-        agent_cmd_args.extend(["--api-url", args.api_url])
-
-    # If running setup commands (register/activate) and NO url provided, force the default.
-    elif args.command in ["register", "activate"]:
-        agent_cmd_args.extend(["--api-url", default_api])
-
     if args.command == "register":
-        # Manual Validation for Better Feedback
-        missing_args = []
-        if not args.device_name:
-            missing_args.append("--device-name")
-        if not args.username:
-            missing_args.append("--username")
-        if not args.registration_key:
-            missing_args.append("--registration-key")
-
-        if missing_args:
-            print("\n❌ Error: Missing required arguments for registration:")
-            for arg in missing_args:
-                print(f"   - {arg}")
-            print("\nUsage example:")
-            print(
-                "   python manager.py register --device-name MyDevice --username user@loc.ai --registration-key XYZ-123"
-            )
+        if not all([args.device_name, args.username, args.registration_key]):
+            print("❌ Error: Missing required arguments (name, username, key).")
             sys.exit(1)
 
-        agent_cmd_args.extend(
-            [
-                "--device-name",
-                args.device_name,
-                "--username",
-                args.username,
-                "--registration-key",
-                args.registration_key,
-                "--device-type",
-                args.device_type,
-            ]
-        )
+        cmd = [
+            sys.executable,
+            str(AGENT_SCRIPT),
+            "--device-name",
+            args.device_name,
+            "--username",
+            args.username,
+            "--registration-key",
+            args.registration_key,
+            "--device-type",
+            args.device_type,
+            "--api-url",
+            args.api_url if args.api_url else PROD_API_URL,
+        ]
+        subprocess.run(cmd, check=True)
 
     elif args.command == "activate":
-        agent_cmd_args.extend(["--device-id", args.device_id])
+        # Logic restored from old main
+        cmd = [sys.executable, str(AGENT_SCRIPT), "--device-id", args.device_id]
+
         if args.api_key:
-            agent_cmd_args.extend(["--api-key", args.api_key])
+            cmd.extend(["--api-key", args.api_key])
         elif args.registration_key:
-            agent_cmd_args.extend(["--registration-key", args.registration_key])
+            cmd.extend(["--registration-key", args.registration_key])
         else:
-            print("Error: activate requires either --api-key or --registration-key")
+            print("❌ Error: activate requires either --api-key or --registration-key")
             sys.exit(1)
 
         if args.device_type:
-            agent_cmd_args.extend(["--device-type", args.device_type])
+            cmd.extend(["--device-type", args.device_type])
+
+        cmd.extend(["--api-url", args.api_url if args.api_url else PROD_API_URL])
+        subprocess.run(cmd, check=True)
 
     elif args.command == "run":
         if not CONFIG_FILE.exists():
-            print("\n❌ Error: Device is not configured.")
-            print("You must register or activate the device before running it.")
-            print("\nTo register a new device:")
-            print("  python manager.py register --device-name <NAME> --username <USER> ...")
-            print("\nTo activate an existing device:")
-            print("  python manager.py activate --device-id <ID> --api-key <KEY>")
+            print("❌ Error: Device not configured. Run 'register' first.")
             sys.exit(1)
 
-    # Execute agent
-    run_agent_process(agent_cmd_args)
+        # Only append --api-url if it was actually provided in the CLI
+        cmd = [sys.executable, str(AGENT_SCRIPT)]
+        if args.api_url:
+            cmd.extend(["--api-url", args.api_url])
+
+        subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+        sys.exit(0)
+    except subprocess.CalledProcessError as e:
+        print(f"\n❌ Command execution failed (Exit Code: {e.returncode})")
+
+        cmd_str = str(e.cmd)
+        if "agent.py" in cmd_str:
+            print("   The agent process crashed. Please check the logs above for details.")
+        elif "git" in cmd_str:
+            print("   Git operation failed. Check your internet connection or permissions.")
+        elif "uv" in cmd_str:
+            print("   Dependency installation failed.")
+
+        sys.exit(e.returncode)
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+        raise e
+        sys.exit(1)
