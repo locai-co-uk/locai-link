@@ -292,35 +292,34 @@ class ModelServer:
 
     def stop(self):
         """Stops the running server securely."""
-        print("Stopping Model Serving...")
-
-        # 1. Try to kill the in-memory process object first (most reliable)
-        if hasattr(self, "process") and self.process:
-            print(f"Terminating process {self.process.pid}...")
+        if getattr(self, "process", None):
             self.process.terminate()
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                print("Force killing process...")
                 self.process.kill()
 
-        # 2. Fallback: Cleanup using the PID file if it exists
-        if self.pid_file.exists():
+        if getattr(self, "pid_file", None) and self.pid_file.exists():
             stop_process_tree(self.pid_file, "Model Server")
 
-        url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
-        payload = {"running": False, "pid": 0, "serving": False, "serving_pid": 0, "serving_port": 0}
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=10)
-            if response.status_code == 200:
-                print("Successfully reported server status")
-            else:
-                print(
-                    f"Error reporting status: {response.status_code} - {response.text}",
-                    file=sys.stderr,
-                )
-        except requests.exceptions.RequestException as e:
-            print(f"Network error while reporting server status: {e}", file=sys.stderr)
+        if (
+            getattr(self, "api_url", None)
+            and getattr(self, "device_id", None)
+            and getattr(self, "model_id", None)
+            and getattr(self, "api_key", None)
+        ):
+            try:
+                url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
+                payload = {
+                    "running": False,
+                    "pid": 0,
+                    "serving": False,
+                    "serving_pid": 0,
+                    "serving_port": 0,
+                }
+                headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        print("Server stopped.")
+                requests.post(url, json=payload, headers=headers, timeout=2)
+
+            except Exception:
+                pass
