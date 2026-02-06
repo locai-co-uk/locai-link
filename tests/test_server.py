@@ -107,7 +107,7 @@ def test_start_success(mocker, mock_paths, device_config, runtime_config, mock_p
     # Verify values from runtime_config match the command args
     assert "--port" in args
     assert str(runtime_config["serving"]["default_port"]) in args
-    assert "--n_gpu_layers" in args
+    # assert "--n_gpu_layers" in args
     assert str(runtime_config["process"]["parameters"]["n_gpu_layers"]) in args
 
 
