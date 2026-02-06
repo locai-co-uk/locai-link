@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import atexit
+import os
+import platform
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from link.utils import (
 
 
 class ModelServer:
-    """Manages the lifecycle of the local model server."""
+    """Manages the lifecycle of the local model server using official llama.cpp binaries."""
 
     def __init__(self, payload: dict):
         """Initialises the ModelServer with basic auth and paths.
@@ -43,6 +44,7 @@ class ModelServer:
         """
         self.pid_file = PROJECT_ROOT / "serving.pid"
         self.log_file = PROJECT_ROOT / "serving.log"
+        self.bin_dir = PROJECT_ROOT / "bin"  # Directory where binaries are installed
 
         self.is_valid = False
         self.model_path = None
@@ -171,53 +173,98 @@ class ModelServer:
         return True
 
     def _is_port_in_use(self, port: int) -> bool:
-        """Checks if a port is actively in use."""
+        """Checks if a port is actively in use.
+
+        Returns:
+            bool: True if the port is in use, False otherwise.
+        """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(("localhost", port)) == 0
 
+    def _get_server_binary(self) -> Path:
+        """Locates the platform-specific llama-server binary in the VENV.
+
+        Returns:
+            Path: The path to the llama-server binary.
+        """
+        system = platform.system()
+        binary_name = "llama-server.exe" if system == "Windows" else "llama-server"
+
+        candidate = PROJECT_ROOT / ".venv" / "bin-llama" / binary_name
+        if candidate.exists():
+            return candidate
+
+        return None
+
     def is_running(self) -> bool:
-        """Checks if the server is running."""
+        """Checks if the server is running.
+
+        Returns:
+            bool: True if the server is running, False otherwise.
+        """
         return is_process_running(self.pid_file)
 
     def start(self):
-        """Starts the llama-server."""
-        # Gatekeeper Check
+        """Starts the llama-server with robust backend discovery."""
         if not self.is_valid:
-            link_logger.fail("Server configuration is invalid. Aborting startup.")
+            link_logger.fail("Server configuration is invalid.")
             return
 
         if self.is_running():
             pid = self.pid_file.read_text().strip()
-            link_logger.warn(f"Server is already running (PID {pid}). Skipping startup.")
+            link_logger.warn(f"Server is already running (PID {pid}).")
             return
 
         if self._is_port_in_use(self.port):
-            link_logger.fail(f"Port {self.port} is already in use by another process.")
-            print(f"❌ Error: Port {self.port} is busy. Run 'lsof -i :{self.port}' to see what's using it.")
+            link_logger.fail(f"Port {self.port} is busy.")
             return
 
         print("Starting Model Serving...")
 
-        # Runtime Config Check
         if not self._load_and_parse_runtime_config():
             return
 
         if not self.model_path or not self.model_path.exists():
-            link_logger.fail(
-                f"Model file not found: {self.model_path}",
-                category="process",
-                action="start_server",
-            )
+            link_logger.fail(f"Model file not found: {self.model_path}")
             return
 
-        # Build Command
+        server_bin = self._get_server_binary()
+        if not server_bin:
+            link_logger.fail("Inference Engine binary not found. Run installer.")
+            return
+
+        env = os.environ.copy()
+        bin_dir = server_bin.parent
+        lib_paths = set()
+
+        # Always add the binary's own directory
+        lib_paths.add(str(bin_dir))
+
+        # Search for the critical backend library 'libggml-cpu.so' (or similar)
+        # This ensures we find the EXACT folder where the plugins live.
+        backend_lib_found = False
+        for root, dirs, files in os.walk(bin_dir):
+            for file in files:
+                if "ggml-cpu" in file and file.endswith(".so"):
+                    lib_paths.add(root)
+                    backend_lib_found = True
+
+        if not backend_lib_found:
+            print("WARNING: Could not find 'ggml-cpu' shared object. Server might fail to load backends.")
+
+        # Construct LD_LIBRARY_PATH
+        current_ld = env.get("LD_LIBRARY_PATH", "")
+        new_ld_path = os.pathsep.join(list(lib_paths))
+        if current_ld:
+            new_ld_path += f"{os.pathsep}{current_ld}"
+
+        env["LD_LIBRARY_PATH"] = new_ld_path
+
         cmd = [
-            sys.executable,
-            "-m",
-            "llama_cpp.server",
+            str(server_bin),
             "--model",
             str(self.model_path),
-            "--model_alias",
+            "--alias",
             str(self.model_display_name),
             "--host",
             str(self.host),
@@ -225,14 +272,12 @@ class ModelServer:
             str(self.port),
         ]
 
-        # Map JSON parameters to CLI flags
         param_map = {
-            "n_gpu_layers": "--n_gpu_layers",
-            "n_ctx": "--n_ctx",
-            "n_batch": "--n_batch",
-            "n_threads": "--n_threads",
-            "chat_format": "--chat_format",
-            "clip_model_path": "--clip_model_path",
+            "n_gpu_layers": "--n-gpu-layers",
+            "n_ctx": "--ctx-size",
+            "n_batch": "--batch-size",
+            "n_threads": "--threads",
+            "chat_format": "--chat-template",
         }
 
         for config_key, cli_flag in param_map.items():
@@ -242,10 +287,9 @@ class ModelServer:
                     cmd.extend([cli_flag, str(val)])
 
         if "chat_format" not in self.params:
-            cmd.extend(["--chat_format", "chatml"])
+            cmd.extend(["--chat-template", "chatml"])
 
-        link_logger.info(f"Launching server on http://{self.host}:{self.port}, use model {self.model_display_name}")
-        print(f"Launching server on http://{self.host}:{self.port}, use model {self.model_display_name}")
+        link_logger.info(f"Launching server on http://{self.host}:{self.port}")
 
         try:
             with open(self.log_file, "w") as log:
@@ -254,6 +298,7 @@ class ModelServer:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     cwd=PROJECT_ROOT,
+                    env=env,  # Critical
                 )
 
             self.pid_file.write_text(str(process.pid))
@@ -261,13 +306,7 @@ class ModelServer:
 
             time.sleep(2)
             if process.poll() is not None:
-                link_logger.fail(
-                    "Server crashed immediately.",
-                    category="process",
-                    action="start_server",
-                    state_after={"exit_code": process.returncode},
-                    hint=f"Check {self.log_file} for details.",
-                )
+                link_logger.fail("Server crashed immediately. Check logs.")
                 if self.pid_file.exists():
                     self.pid_file.unlink()
                 return
@@ -275,23 +314,18 @@ class ModelServer:
         except Exception as e:
             link_logger.fail(f"Failed to start server: {e}")
 
+        # Notify backend (fire and forget)
         url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
         payload = {"running": False, "pid": 0, "serving": True, "serving_pid": process.pid, "serving_port": self.port}
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=10)
-            if response.status_code == 200:
-                print("Successfully reported server status")
-            else:
-                print(
-                    f"Error reporting status: {response.status_code} - {response.text}",
-                    file=sys.stderr,
-                )
-        except requests.exceptions.RequestException as e:
-            print(f"Network error while reporting server status: {e}", file=sys.stderr)
+            requests.post(url, json=payload, headers=headers, timeout=5)
+        except Exception:
+            pass
 
     def stop(self):
         """Stops the running server securely."""
+        # If we have a direct handle (started in this session)
         if getattr(self, "process", None):
             self.process.terminate()
             try:
@@ -299,6 +333,7 @@ class ModelServer:
             except subprocess.TimeoutExpired:
                 self.process.kill()
 
+        # Always check the PID file to be sure
         if getattr(self, "pid_file", None) and self.pid_file.exists():
             stop_process_tree(self.pid_file, "Model Server")
 

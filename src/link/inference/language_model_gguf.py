@@ -2,21 +2,17 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import argparse
+import json
 import os
 import queue
 import signal
 import sys
 import threading
+import time
 from datetime import datetime
 
-import llama_cpp
 import requests
 from colorama import Fore, Style
-from llama_cpp.llama_types import (
-    ChatCompletionRequestAssistantMessage,
-    ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestUserMessage,
-)
 
 # --- Global state ---
 keep_running = True
@@ -28,19 +24,12 @@ BASE_URL = os.environ.get("BASE_URL")
 
 
 def signal_handler(signum, frame):
-    """Gracefully handle termination signals.
-
-    Args:
-        signum (int): The signal number.
-        frame (traceback): The current stack frame.
-    """
+    """Gracefully handle termination signals."""
     global keep_running, worker_running
     print(f"\nTermination signal {signum} received. Shutting down...")
     sys.stdout.flush()
     keep_running = False
     worker_running = False
-    # If waiting on input(), we might need to force exit or hit enter.
-    # But usually signal interrupts input() call or loop.
     sys.exit(0)
 
 
@@ -59,26 +48,13 @@ def io_worker():
 
 
 def queue_task(task_func, *args):
-    """Add a task to the background processing queue.
-
-    Args:
-        task_func (callable): The function to execute.
-        *args: Arguments to pass to the function.
-    """
+    """Add a task to the background processing queue."""
     task_queue.put((task_func, args))
 
 
 def send_telemetry_to_backend(metadata, device_id, api_key, model_id):
-    """Sends telemetry data (token usage, timing) to the backend.
-
-    Args:
-        metadata (dict): Metadata about the model output.
-        device_id (str): The ID of the device.
-        api_key (str): The API key for authentication.
-        model_id (str): The ID of the model.
-    """
+    """Sends telemetry data (token usage, timing) to the backend."""
     if not BASE_URL:
-        # If no URL, just skip silently or log once
         return
 
     payload = {
@@ -86,8 +62,8 @@ def send_telemetry_to_backend(metadata, device_id, api_key, model_id):
         "model_type": "generation",
         "sub_model_type": "text_generation",
         "model_output_type": "telemetry",
-        "model_output": "stats_only",  # Privacy: no content
-        "model_output_confidence": 1.0,  # Placeholder
+        "model_output": "stats_only",
+        "model_output_confidence": 1.0,
         "model_output_start_time": metadata.get("start_time"),
         "model_output_end_time": metadata.get("end_time"),
         "model_output_duration": metadata.get("duration"),
@@ -95,165 +71,151 @@ def send_telemetry_to_backend(metadata, device_id, api_key, model_id):
     }
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
     url = f"{BASE_URL}/agent/model_results/{device_id}/create_from_agent"
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         if response.status_code != 200:
-            print(
-                f"[Telemetry] Error sending stats: {response.status_code} - {response.text}",
-                file=sys.stderr,
-            )
+            print(f"[Telemetry] Error sending stats: {response.status_code}", file=sys.stderr)
     except Exception as e:
         print(f"[Telemetry] Failed to send stats: {e}", file=sys.stderr)
 
 
+def wait_for_server(url, timeout=30):
+    """Waits for the inference server to be ready."""
+    start_t = time.time()
+    print(f"Connecting to Inference Server at {url}...", end="", flush=True)
+    while time.time() - start_t < timeout:
+        try:
+            # The /health endpoint is standard on llama-server
+            requests.get(f"{url}/health", timeout=1)
+            print(" Connected.")
+            return True
+        except requests.exceptions.RequestException:
+            time.sleep(1)
+            print(".", end="", flush=True)
+    print("\nError: Inference Server connection timed out.")
+    return False
+
+
 def main():
-    """Main entry point with setup and cleanup."""
+    """Main entry point acting as a Client to the Model Server."""
     global keep_running, worker_running
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    parser = argparse.ArgumentParser(description="Run language model inference (GGUF) in interactive mode.")
-    parser.add_argument("--model", required=True, help="Path to GGUF model file")
+    parser = argparse.ArgumentParser(description="Run language model client.")
+    # Note: We no longer need model path here strictly, but we keep it for ID purposes
+    parser.add_argument("--model", required=True, help="Model ID or Path (used for logging)")
     parser.add_argument("--device-id", required=True, help="Device ID")
     parser.add_argument("--api-key", required=True, help="API key")
 
-    # Model Load Params
-    parser.add_argument("--n-ctx", type=int, default=2048, help="Context window size")
-    parser.add_argument(
-        "--n-gpu-layers",
-        type=int,
-        default=35,
-        help="Number of layers to offload to GPU",
-    )
+    # Connection Params
+    parser.add_argument("--server-port", type=int, default=8003, help="Port of the running llama-server")
+    parser.add_argument("--server-host", type=str, default="localhost", help="Host of the running llama-server")
 
     # Generation Params
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-tokens", type=int, default=2000)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--repeat-penalty", type=float, default=1.1)
 
     # Config
     parser.add_argument("--system-prompt", default="You are a helpful assistant.")
-    parser.add_argument("--stream", action="store_true", default=True, help="Stream output to stdout")
-    parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable streaming")
-
-    # Unused but captured to prevent wrapper connection errors
-    parser.add_argument("--camera-index", help=argparse.SUPPRESS)
-    parser.add_argument("--width", help=argparse.SUPPRESS)
-    parser.add_argument("--height", help=argparse.SUPPRESS)
-    parser.add_argument("--fps", help=argparse.SUPPRESS)
-    parser.add_argument("--sample-rate", help=argparse.SUPPRESS)
-    parser.add_argument("--channels", help=argparse.SUPPRESS)
-    parser.add_argument("--confidence-threshold", help=argparse.SUPPRESS)
-    parser.add_argument("--min-event-duration", help=argparse.SUPPRESS)
-    parser.add_argument("--min-event-interval", help=argparse.SUPPRESS)
+    parser.add_argument("--stream", action="store_true", default=True)
 
     args, unknown = parser.parse_known_args()
 
-    if not os.path.exists(args.model):
-        print(f"Error: Model file not found at {args.model}", file=sys.stderr)
-        sys.exit(1)
-
-    # Start background thread
+    # Start background thread for telemetry
     io_thread = threading.Thread(target=io_worker, daemon=True)
     io_thread.start()
 
-    print(f"Loading model: {args.model}...")
-    try:
-        llm = llama_cpp.Llama(
-            model_path=args.model,
-            n_ctx=args.n_ctx,
-            n_gpu_layers=args.n_gpu_layers,
-            verbose=False,
-        )
-    except Exception as e:
-        print(f"Error loading model: {e}", file=sys.stderr)
+    server_url = f"http://{args.server_host}:{args.server_port}"
+
+    # Wait for the separate server process (managed by server.py) to come online
+    if not wait_for_server(server_url):
         sys.exit(1)
 
-    print("Model loaded. ready for input (type 'quit' to exit).")
+    print("Client ready for input (type 'quit' to exit).")
     print(f"System Prompt: {args.system_prompt}")
     sys.stdout.flush()
 
-    messages = [ChatCompletionRequestSystemMessage(role="system", content=args.system_prompt)]
+    messages = [{"role": "system", "content": args.system_prompt}]
+    model_id = os.path.basename(args.model)
 
-    model_id = os.path.basename(args.model)  # simplistic ID from filename
+    chat_endpoint = f"{server_url}/v1/chat/completions"
 
     while keep_running:
         try:
-            # Simple blocking input.
-            # In a production agent pipe scenario, this reads line by line from pipe buffer.
             user_input = input(f"{Fore.GREEN}\nUser: {Style.RESET_ALL}")
 
             if user_input.lower() in ("quit", "exit"):
                 break
 
-            messages.append(ChatCompletionRequestUserMessage(role="user", content=user_input))
+            messages.append({"role": "user", "content": user_input})
 
             start_time = datetime.now()
             start_ts = start_time.isoformat()
 
             print(f"{Fore.BLUE}Assistant: {Style.RESET_ALL}", end="", flush=True)
 
-            # Record metrics
+            payload = {
+                "messages": messages,
+                "max_tokens": args.max_tokens,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "frequency_penalty": 0.0,  # mapped roughly to repeat_penalty in some versions
+                "stream": args.stream,
+            }
+
             tokens_generated = 0
             full_response_text = ""
 
-            # Determine mode
             try:
-                if args.stream:
-                    stream_completion = llm.create_chat_completion(
-                        messages=messages,
-                        max_tokens=args.max_tokens,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                        top_k=args.top_k,
-                        repeat_penalty=args.repeat_penalty,
-                        stream=True,
-                    )
+                response = requests.post(chat_endpoint, json=payload, stream=args.stream, timeout=600)
+                response.raise_for_status()
 
-                    for chunk in stream_completion:
-                        # chunk is Dict[str, Any]
-                        delta = chunk["choices"][0]["delta"]
-                        if "content" in delta:
-                            content = delta["content"]
-                            print(content, end="", flush=True)
-                            full_response_text += content
-                            tokens_generated += 1
+                if args.stream:
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+
+                        line_text = line.decode("utf-8")
+                        if line_text.startswith("data: "):
+                            data_str = line_text[6:]  # Strip "data: "
+
+                            if data_str.strip() == "[DONE]":
+                                break
+
+                            try:
+                                chunk = json.loads(data_str)
+                                if "choices" in chunk and len(chunk["choices"]) > 0:
+                                    delta = chunk["choices"][0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        print(content, end="", flush=True)
+                                        full_response_text += content
+                                        tokens_generated += 1
+                            except json.JSONDecodeError:
+                                pass
                 else:
-                    completion = llm.create_chat_completion(
-                        messages=messages,
-                        max_tokens=args.max_tokens,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                        top_k=args.top_k,
-                        repeat_penalty=args.repeat_penalty,
-                        stream=False,
-                    )
-                    # completion is Dict[str, Any]
-                    full_response_text = completion["choices"][0]["message"]["content"]
-                    tokens_generated = completion["usage"]["completion_tokens"]  # Accurate
+                    # Non-stream mode
+                    data = response.json()
+                    full_response_text = data["choices"][0]["message"]["content"]
+                    tokens_generated = data["usage"].get("completion_tokens", 0)
                     print(full_response_text, end="", flush=True)
 
             except Exception as e:
                 print(f"\n[Error during generation]: {e}", file=sys.stderr)
+                # Don't add failed assistant message to history
                 continue
 
-            print("")  # Newline at end
+            print("")  # Newline
             sys.stdout.flush()
 
-            # End of turn logic
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
-
-            # Approximate prompt tokens if not available (llama-cpp-python usage in stream is tricky)
-            # For non-stream it gives usage. For stream we count output manualy.
-            # We can use llm.tokenize() to count inputs if strict accuracy needed
-            # For now, let's just use what we have.
 
             metadata = {
                 "start_time": start_ts,
@@ -273,7 +235,7 @@ def main():
             )
 
             # Update history
-            messages.append(ChatCompletionRequestAssistantMessage(role="assistant", content=full_response_text))
+            messages.append({"role": "assistant", "content": full_response_text})
 
         except (EOFError, KeyboardInterrupt):
             break

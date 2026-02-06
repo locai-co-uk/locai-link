@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import argparse
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 # --- Constants ---
@@ -102,69 +106,135 @@ def ensure_venv_execution():
         sys.exit(1)
 
 
-def install_deps_from_source():  # Can be repurposed to install all components that require building from source
-    """Installs packages that cannot be installed directly with pip/setuptools."""
+def install_deps_from_source():
+    """Downloads and installs the official llama.cpp binaries from GitHub Releases."""
     print_step("Installing AI Inference Engine")
+
+    # Ensure bin directory exists
+    bin_dir = VENV_PATH / "bin-llama"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
     system = platform.system()
     machine = platform.machine()
 
-    env = os.environ.copy()
-    env["VIRTUAL_ENV"] = str(VENV_PATH)
+    # 1. Determine Asset
+    asset_keyword = ""
+    expected_ext = ""
 
-    def uv_pip_install(args, extra_env=None):
-        run_env = env.copy()
-        if extra_env:
-            run_env.update(extra_env)
-        subprocess.run(["uv", "pip", "install"] + args, cwd=PROJECT_ROOT, env=run_env, check=True)
-
-    try:
-        if system == "Darwin":
-            print(f"Detected macOS ({machine}). Building with Metal support...")
-            if not command_exists("cmake"):
-                uv_pip_install(["cmake"])
-
-            cmake_args = "-DGGML_METAL=ON -DGGML_NATIVE=OFF"
-            if machine == "arm64":
-                cmake_args += " -DCMAKE_OSX_ARCHITECTURES=arm64"
-
-            uv_pip_install(
-                ["--no-binary", "llama-cpp-python", "llama-cpp-python"],
-                extra_env={"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args},
-            )
-
-        elif system == "Linux":
-            print("Detected Linux.")
-            if not command_exists("cmake"):
-                uv_pip_install(["cmake"])
-
-            has_gpu = command_exists("nvidia-smi") and command_exists("nvcc")
-            cmake_args = "-DGGML_CUDA=ON" if has_gpu else ""
-            print("✔ CUDA detected." if has_gpu else "No CUDA detected. Using CPU.")
-
-            uv_pip_install(
-                ["--no-binary", "llama-cpp-python", "llama-cpp-python"],
-                extra_env={"FORCE_CMAKE": "1", "CMAKE_ARGS": cmake_args},
-            )
-
-        elif system == "Windows":
-            print("Detected Windows.")
-            has_gpu = command_exists("nvidia-smi") and command_exists("nvcc")
-            # Use pre-built wheels for Windows to avoid complex build tools
-            index_url = (
-                "https://abetlen.github.io/llama-cpp-python/whl/cu121"
-                if has_gpu
-                else "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-            )
-            print("✔ GPU detected." if has_gpu else "No GPU detected or No CUDA detected. Using CPU.")
-
-            uv_pip_install(["llama-cpp-python", "--extra-index-url", index_url])
-
+    if system == "Darwin":
+        expected_ext = ".tar.gz"
+        if machine == "arm64":
+            asset_keyword = "macos-arm64"
         else:
-            uv_pip_install(["llama-cpp-python"])
+            asset_keyword = "macos-x64"
 
-        print("✔ Inference Engine installed.")
-    except subprocess.CalledProcessError:
-        print("❌ Failed to install Inference Engine.")
+    elif system == "Windows":
+        expected_ext = ".zip"
+        if command_exists("nvidia-smi"):
+            asset_keyword = "bin-win-cuda-12"
+        else:
+            asset_keyword = "bin-win-cpu-x64"
+
+    elif system == "Linux":
+        expected_ext = ".tar.gz"
+
+        # Check for NVIDIA GPU
+        if command_exists("nvidia-smi"):
+            print("ℹ️  NVIDIA GPU detected.")
+            print("   (Official CUDA binaries are not distributed for Linux due to driver compatibility)")
+            print("   Switched target to **Vulkan** build (supports NVIDIA GPUs).")
+            asset_keyword = "bin-ubuntu-vulkan-x64"
+        else:
+            print("ℹ️  No GPU detected. Using CPU build.")
+            asset_keyword = "bin-ubuntu-x64"
+
+    else:
+        print(f"❌ Unsupported platform: {system} {machine}")
+        sys.exit(1)
+
+    print(f"Targeting Release Asset: *{asset_keyword}*")
+
+    # 2. Fetch Release Info
+    try:
+        print("Fetching latest release info...")
+        with urllib.request.urlopen("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest") as response:
+            release_data = json.loads(response.read().decode())
+
+        assets = release_data.get("assets", [])
+        download_url = None
+        asset_name = None
+
+        for asset in assets:
+            name = asset["name"]
+            if asset_keyword in name and name.endswith(expected_ext):
+                download_url = asset["browser_download_url"]
+                asset_name = name
+                break
+
+        if not download_url:
+            print(f"❌ Could not find a suitable binary for {asset_keyword}")
+            # Fallback for Linux: If Vulkan is missing, try standard CPU
+            if "vulkan" in asset_keyword:
+                print("   Falling back to standard CPU build...")
+                fallback_keyword = "bin-ubuntu-x64"
+                for asset in assets:
+                    name = asset["name"]
+                    if fallback_keyword in name and name.endswith(expected_ext):
+                        download_url = asset["browser_download_url"]
+                        asset_name = name
+                        break
+
+            if not download_url:
+                sys.exit(1)
+
+        # 3. Download
+        dest_file = bin_dir / asset_name
+        print(f"Downloading {asset_name}...")
+        urllib.request.urlretrieve(download_url, dest_file)
+
+        # 4. Extract
+        print("Extracting...")
+        if dest_file.suffix == ".zip":
+            with zipfile.ZipFile(dest_file, "r") as zip_ref:
+                zip_ref.extractall(bin_dir)
+
+        elif dest_file.name.endswith(".tar.gz") or dest_file.suffix == ".tar":
+            with tarfile.open(dest_file, "r:*") as tar_ref:
+                tar_ref.extractall(bin_dir)
+
+        os.remove(dest_file)
+
+        # 5. Flatten & Cleanup (Critical for finding libs!)
+        print("Flattening directory structure...")
+        # Move EVERYTHING from subfolders to BIN_DIR root
+        for root, dirs, files in os.walk(bin_dir):
+            if Path(root) == bin_dir:
+                continue
+
+            for file in files:
+                src = Path(root) / file
+                dst = bin_dir / file
+                if not dst.exists():
+                    shutil.move(src, dst)
+
+        # Cleanup empty folders
+        for child in bin_dir.iterdir():
+            if child.is_dir() and child.name.startswith("llama-"):
+                try:
+                    shutil.rmtree(child)
+                except OSError:
+                    pass
+
+        # 6. Permissions
+        if system != "Windows":
+            print("Setting permissions...")
+            for f in bin_dir.glob("llama-*"):
+                f.chmod(0o755)
+
+        print(f"✔ Inference Engine installed successfully in {bin_dir}")
+
+    except Exception as e:
+        print(f"❌ Failed to install Inference Engine: {e}")
         sys.exit(1)
 
 
