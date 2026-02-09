@@ -78,7 +78,7 @@ def test_start_success(mocker, mock_paths, device_config, runtime_config, mock_p
     mocker.patch("link.server.LogClient.get")
     mocker.patch("requests.put").return_value.status_code = 200
 
-    # Mock port check (added in your recent fixes)
+    # Mock port check
     if hasattr(ModelServer, "_is_port_in_use"):
         mocker.patch.object(ModelServer, "_is_port_in_use", return_value=False)
     else:
@@ -87,28 +87,43 @@ def test_start_success(mocker, mock_paths, device_config, runtime_config, mock_p
     # Path.exists mock
     mocker.patch("pathlib.Path.exists", return_value=True)
 
-    # Mock subprocess using mocker.MagicMock
+    # Mock subprocess
     mock_popen = mocker.patch("subprocess.Popen")
     mock_process = mocker.MagicMock()
     mock_process.pid = 12345
     mock_process.poll.return_value = None
     mock_popen.return_value = mock_process
 
-    # Mock file operations using mocker.mock_open
+    # Mock file operations
     mocker.patch("pathlib.Path.write_text")
     mocker.patch("builtins.open", mocker.mock_open())
 
     server = ModelServer(mock_payload)
     server.start()
 
-    mock_popen.assert_called_once()
-    args = mock_popen.call_args[0][0]
+    # Retrieve all calls made to Popen
+    all_calls = mock_popen.call_args_list
+
+    # Filter for the call that actually starts the server
+    # We look for "llama-server" or "server.exe" in the command arguments
+    server_calls = []
+    for call in all_calls:
+        # call.args[0] is typically the command list (e.g., ['path/to/server', '--model', ...])
+        cmd_args = call.args[0]
+        if isinstance(cmd_args, list) and any("server" in str(arg) for arg in cmd_args):
+            server_calls.append(call)
+
+    # Assert we found exactly one server start call
+    assert len(server_calls) == 1, f"Expected 1 call to start server, found {len(server_calls)}"
+
+    # Get the arguments from that specific call
+    call_args, _ = server_calls[0]
+    cmd_list = call_args[0]
 
     # Verify values from runtime_config match the command args
-    assert "--port" in args
-    assert str(runtime_config["serving"]["default_port"]) in args
-    # assert "--n_gpu_layers" in args
-    assert str(runtime_config["process"]["parameters"]["n_gpu_layers"]) in args
+    assert "--port" in cmd_list
+    assert str(runtime_config["serving"]["default_port"]) in cmd_list
+    assert str(runtime_config["process"]["parameters"]["n_gpu_layers"]) in cmd_list
 
 
 def test_start_already_running(mocker, mock_paths, device_config, mock_payload):
@@ -156,7 +171,6 @@ def test_start_failure_missing_model(mocker, mock_paths, device_config, runtime_
     server.start()
 
     mock_fail.assert_called()
-    # Now this assertion will pass because we got past the config check
     assert "Model file not found" in mock_fail.call_args[0][0]
     mock_popen.assert_not_called()
 
@@ -169,7 +183,6 @@ def test_stop(mocker, mock_paths, device_config, mock_payload):
 
     mock_stop_tree = mocker.patch("link.server.stop_process_tree")
 
-    # Mock the internal process object for the new stop logic
     mock_proc = mocker.MagicMock()
 
     server = ModelServer(mock_payload)
@@ -177,8 +190,6 @@ def test_stop(mocker, mock_paths, device_config, mock_payload):
 
     server.stop()
 
-    # Verify it tried to terminate the process object first (new logic)
     mock_proc.terminate.assert_called()
-    # Verify it also tried to clean up the pid file (old logic fallback)
     if mock_stop_tree.called:
         mock_stop_tree.assert_called_with(server.pid_file, "Model Server")
