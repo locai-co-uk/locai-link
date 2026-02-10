@@ -150,6 +150,10 @@ class ModelServer:
         if not self._load_and_parse_runtime_config():
             return
 
+        if not self.model_path or not self.model_path.exists():
+            link_logger.fail(f"Model file not found: {self.model_path}")
+            return
+
         server_bin = self._get_server_binary()
         if not server_bin:
             link_logger.fail("Binary not found.")
