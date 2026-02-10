@@ -130,9 +130,20 @@ def install_deps_from_source():
 
     elif system == "Windows":
         expected_ext = ".zip"
+        has_gpu = False
         if command_exists("nvidia-smi"):
+            try:
+                res = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+                if res.returncode == 0 and len(res.stdout.strip()) > 0:
+                    has_gpu = True
+            except Exception:
+                pass
+
+        if has_gpu:
+            print("NVIDIA GPU detected.")
             asset_keyword = "bin-win-cuda-12"
         else:
+            print("No GPU detected. Using CPU build.")
             asset_keyword = "bin-win-cpu-x64"
 
     elif system == "Linux":
@@ -140,12 +151,12 @@ def install_deps_from_source():
 
         # Check for NVIDIA GPU
         if command_exists("nvidia-smi"):
-            print("ℹ️  NVIDIA GPU detected.")
-            print("   (Official CUDA binaries are not distributed for Linux due to driver compatibility)")
-            print("   Switched target to **Vulkan** build (supports NVIDIA GPUs).")
+            print("NVIDIA GPU detected.")
+            print("(Official CUDA binaries are not distributed for Linux due to driver compatibility)")
+            print("Switched target to **Vulkan** build (supports NVIDIA GPUs).")
             asset_keyword = "bin-ubuntu-vulkan-x64"
         else:
-            print("ℹ️  No GPU detected. Using CPU build.")
+            print("No GPU detected. Using CPU build.")
             asset_keyword = "bin-ubuntu-x64"
 
     else:
@@ -404,12 +415,27 @@ def reset(hard=False):
             if path == PROJECT_ROOT:
                 continue
 
+            if pattern == VENV_NAME:
+                try:
+                    if Path(sys.prefix).resolve() == path.resolve():
+                        print(f"Skipping active virtual environment: {path.name} (Cannot delete while in use)")
+                        print("(To fully reset, exit the process/uv and delete '.venv' manually)")
+                        continue
+                except Exception:
+                    pass
+
             if path.is_dir():
                 print(f"Removing directory: {path.relative_to(PROJECT_ROOT)}...")
-                shutil.rmtree(path, ignore_errors=True)
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                except Exception as e:
+                    print(f"Warning: Failed to remove {path.name}: {e}")
             elif path.is_file():
                 print(f"Removing file: {path.relative_to(PROJECT_ROOT)}...")
-                path.unlink(missing_ok=True)
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"Warning: Failed to remove {path.name}: {e}")
 
     if hard:
         config_dir = PROJECT_ROOT / "configs"
@@ -455,7 +481,7 @@ def main():
     reg_parser.add_argument("--device-name")
     reg_parser.add_argument("--username")
     reg_parser.add_argument("--registration-key")
-    reg_parser.add_argument("--device-type", default="edge_device")
+    reg_parser.add_argument("--device-type", default="other")
     reg_parser.add_argument("--api-url")
 
     # 5. Activate (Restored)

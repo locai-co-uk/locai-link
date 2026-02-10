@@ -4,9 +4,13 @@
 import atexit
 import os
 import platform
+import re
 import socket
 import subprocess
+import sys
+import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -28,23 +32,10 @@ class ModelServer:
     """Manages the lifecycle of the local model server using official llama.cpp binaries."""
 
     def __init__(self, payload: dict):
-        """Initialises the ModelServer with basic auth and paths.
-
-        payload {
-            "id": command_doc["id"],
-            "model_id": model_id,
-            "model_name": payload["model_name"],
-            "model_display_name": payload["model_display_name"],
-            "port": payload["port"],
-            "host": payload["host"],
-            "device_id": command_data["device_id"],
-            "deployed_at": command_data["created_at"],
-            "status": command_data["status"],
-        }
-        """
+        """Initialises the ModelServer."""
         self.pid_file = PROJECT_ROOT / "serving.pid"
         self.log_file = PROJECT_ROOT / "serving.log"
-        self.bin_dir = PROJECT_ROOT / "bin"  # Directory where binaries are installed
+        self.bin_dir = PROJECT_ROOT / "bin"
 
         self.is_valid = False
         self.model_path = None
@@ -55,18 +46,18 @@ class ModelServer:
         self.model_display_name = payload.get("model_display_name")
         self.model_config = None
 
+        self.process = None
+        self.log_handle = None
+        self.telemetry_thread = None
+        self.running = False
+
         atexit.register(self.stop)
 
         print("Initialising Model Server Manager...")
 
         self.base_conf = load_json_config(AGENT_CONFIG_PATH)
         if not self.base_conf:
-            link_logger.fail(
-                "Base config not found.",
-                category="process",
-                action="init_server",
-                hint="Run 'register' first to generate a config.",
-            )
+            link_logger.fail("Base config not found.")
             return
 
         self.device_id = self.base_conf.get("device_id")
@@ -76,11 +67,7 @@ class ModelServer:
         if self.device_id and self.api_key and self.api_url:
             LogClient.get().configure(self.device_id, self.api_key, self.api_url)
         else:
-            link_logger.fail(
-                "Incomplete configuration (missing ID, Key, or URL).",
-                category="configuration",
-                action="init_server",
-            )
+            link_logger.fail("Incomplete configuration.")
             return
 
         if not self._verify_connection_and_status():
@@ -89,67 +76,29 @@ class ModelServer:
         self.is_valid = True
 
     def _verify_connection_and_status(self) -> bool:
-        """Sends a status update to verify security credentials and connectivity.
-
-        Returns:
-            bool: True if connection is successful and authorized, False otherwise.
-        """
+        """Sends a status update to verify security credentials."""
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"}
             payload = {"status": "online", "mode": "serving"}
-
             url = f"{self.api_url}/agent/{self.device_id}/status"
-
             response = requests.put(url, json=payload, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                print("✔ Security check passed: Device authorized.")
-                return True
-            elif response.status_code in (401, 403):
-                link_logger.fail(
-                    "Security check failed: Unauthorized.",
-                    category="authentication",
-                    action="init_server",
-                    state_after={"status_code": response.status_code},
-                )
-                return False
-            else:
-                link_logger.warn(
-                    f"Status check returned unexpected code: {response.status_code} - {response.text}",
-                    category="network",
-                )
-                return True
-        except Exception as e:
-            link_logger.fail(
-                f"Failed to connect to platform: {e}",
-                category="network",
-                action="init_server",
-            )
+            return response.status_code == 200
+        except Exception:
             return False
 
     def _load_and_parse_runtime_config(self) -> bool:
-        """Loads the heavy device configuration and parses parameters.
-
-        Returns:
-            bool: True if config loaded successfully, False otherwise.
-        """
+        """Loads the heavy device configuration."""
         model_conf_path = CONFIGS_DIR / f"{self.model_id}.json"
 
         if model_conf_path.exists():
             self.model_config = load_json_config(model_conf_path)
         else:
-            link_logger.fail(
-                f"Model config for {self.model_id} not found.",
-                category="configuration",
-                action="start_server",
-                hint="Run 'register' first to generate a config.",
-            )
+            link_logger.fail(f"Model config for {self.model_id} not found.")
             return False
 
         process = self.model_config.get("process", {})
         artifacts = process.get("artifacts", [])
 
-        # Try to find a GGUF model in artifacts
         for art in artifacts:
             if art.get("name") == "model" or art.get("framework") == "GGUF":
                 raw_path = art.get("path")
@@ -162,7 +111,6 @@ class ModelServer:
                         self.model_path = Path(raw_path)
                 break
 
-        # Fallback: Auto-discovery
         if not self.model_path:
             gguf_files = list(MODELS_DIR.glob("*.gguf"))
             if gguf_files:
@@ -173,20 +121,10 @@ class ModelServer:
         return True
 
     def _is_port_in_use(self, port: int) -> bool:
-        """Checks if a port is actively in use.
-
-        Returns:
-            bool: True if the port is in use, False otherwise.
-        """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(("localhost", port)) == 0
 
     def _get_server_binary(self) -> Path:
-        """Locates the platform-specific llama-server binary in the VENV.
-
-        Returns:
-            Path: The path to the llama-server binary.
-        """
         system = platform.system()
         binary_name = "llama-server.exe" if system == "Windows" else "llama-server"
 
@@ -194,71 +132,40 @@ class ModelServer:
         if candidate.exists():
             return candidate
 
+        candidate = PROJECT_ROOT / "bin" / binary_name
+        if candidate.exists():
+            return candidate
         return None
 
     def is_running(self) -> bool:
-        """Checks if the server is running.
-
-        Returns:
-            bool: True if the server is running, False otherwise.
-        """
+        """Checks if the server is running."""
         return is_process_running(self.pid_file)
 
     def start(self):
-        """Starts the llama-server with robust backend discovery."""
-        if not self.is_valid:
-            link_logger.fail("Server configuration is invalid.")
-            return
-
-        if self.is_running():
-            pid = self.pid_file.read_text().strip()
-            link_logger.warn(f"Server is already running (PID {pid}).")
-            return
-
-        if self._is_port_in_use(self.port):
-            link_logger.fail(f"Port {self.port} is busy.")
+        """Starts the llama-server."""
+        if not self.is_valid or self.is_running() or self._is_port_in_use(self.port):
             return
 
         print("Starting Model Serving...")
-
         if not self._load_and_parse_runtime_config():
-            return
-
-        if not self.model_path or not self.model_path.exists():
-            link_logger.fail(f"Model file not found: {self.model_path}")
             return
 
         server_bin = self._get_server_binary()
         if not server_bin:
-            link_logger.fail("Inference Engine binary not found. Run installer.")
+            link_logger.fail("Binary not found.")
             return
 
+        # Setup Env
         env = os.environ.copy()
         bin_dir = server_bin.parent
-        lib_paths = set()
-
-        # Always add the binary's own directory
-        lib_paths.add(str(bin_dir))
-
-        # Search for the critical backend library 'libggml-cpu.so' (or similar)
-        # This ensures we find the EXACT folder where the plugins live.
-        backend_lib_found = False
-        for root, dirs, files in os.walk(bin_dir):
+        lib_paths = {str(bin_dir)}
+        for root, _, files in os.walk(bin_dir):
             for file in files:
-                if "ggml-cpu" in file and file.endswith(".so"):
+                if "ggml" in file and file.endswith(".so"):
                     lib_paths.add(root)
-                    backend_lib_found = True
 
-        if not backend_lib_found:
-            print("WARNING: Could not find 'ggml-cpu' shared object. Server might fail to load backends.")
-
-        # Construct LD_LIBRARY_PATH
-        current_ld = env.get("LD_LIBRARY_PATH", "")
-        new_ld_path = os.pathsep.join(list(lib_paths))
-        if current_ld:
-            new_ld_path += f"{os.pathsep}{current_ld}"
-
-        env["LD_LIBRARY_PATH"] = new_ld_path
+        curr_ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(list(lib_paths)) + (f"{os.pathsep}{curr_ld}" if curr_ld else "")
 
         cmd = [
             str(server_bin),
@@ -270,6 +177,7 @@ class ModelServer:
             str(self.host),
             "--port",
             str(self.port),
+            # "--verbose",
         ]
 
         param_map = {
@@ -280,11 +188,9 @@ class ModelServer:
             "chat_format": "--chat-template",
         }
 
-        for config_key, cli_flag in param_map.items():
-            if config_key in self.params:
-                val = self.params[config_key]
-                if val is not None:
-                    cmd.extend([cli_flag, str(val)])
+        for k, v in param_map.items():
+            if k in self.params:
+                cmd.extend([v, str(self.params[k])])
 
         if "chat_format" not in self.params:
             cmd.extend(["--chat-template", "chatml"])
@@ -292,40 +198,101 @@ class ModelServer:
         link_logger.info(f"Launching server on http://{self.host}:{self.port}")
 
         try:
-            with open(self.log_file, "w") as log:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    cwd=PROJECT_ROOT,
-                    env=env,  # Critical
-                )
+            # Open with buffering=1 (line buffered)
+            self.log_handle = open(self.log_file, "w", buffering=1)
 
-            self.pid_file.write_text(str(process.pid))
-            link_logger.ok(f"Server started (PID {process.pid})")
+            self.process = subprocess.Popen(
+                cmd, stdout=self.log_handle, stderr=subprocess.STDOUT, cwd=PROJECT_ROOT, env=env, text=True
+            )
+            self.running = True
+
+            self.pid_file.write_text(str(self.process.pid))
+            link_logger.ok(f"Server started (PID {self.process.pid})")
+
+            # Start Telemetry Sidecar
+            self.telemetry_thread = threading.Thread(target=self._telemetry_monitor_loop, daemon=True)
+            self.telemetry_thread.start()
 
             time.sleep(2)
-            if process.poll() is not None:
+            if self.process.poll() is not None:
                 link_logger.fail("Server crashed immediately. Check logs.")
-                if self.pid_file.exists():
-                    self.pid_file.unlink()
+                self.stop()
                 return
 
         except Exception as e:
-            link_logger.fail(f"Failed to start server: {e}")
+            link_logger.fail(f"Failed to start: {e}")
+            self.stop()
+            return
 
-        # Notify backend (fire and forget)
-        url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
-        payload = {"running": False, "pid": 0, "serving": True, "serving_pid": process.pid, "serving_port": self.port}
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        self._send_status(False, True)
+
+    def _telemetry_monitor_loop(self):
+        """Monitors log file with error handling for non-utf8 characters."""
+        time.sleep(1)
+        if not self.log_file.exists():
+            return
+
         try:
-            requests.post(url, json=payload, headers=headers, timeout=5)
-        except Exception:
-            pass
+            with open(self.log_file, "r", encoding="utf-8", errors="replace") as f:
+                while self.running:
+                    line = f.readline()
+                    if not line:
+                        time.sleep(0.1)
+                        continue
+
+                    # Log Format: "eval time = 2587.42 ms / 2038 tokens"
+                    if "eval time =" in line and "prompt" not in line:
+                        self._parse_and_send_telemetry(line)
+
+        except Exception as e:
+            print(f"DEBUG: Monitor error: {e}", file=sys.stderr)
+
+    def _parse_and_send_telemetry(self, log_line):
+        try:
+            # 1. Parse Duration
+            dur_match = re.search(r"=\s+(\d+\.\d+)\s+ms", log_line)
+            duration_ms = float(dur_match.group(1)) if dur_match else 0.0
+
+            # 2. Parse Tokens
+            token_match = re.search(r"/\s+(\d+)\s+tokens", log_line)
+            tokens = int(token_match.group(1)) if token_match else 0
+
+            # 3. Payload Construction
+            now = datetime.now()
+            start_time = now - timedelta(milliseconds=duration_ms)
+
+            metadata = {
+                "start_time": start_time.isoformat(),
+                "end_time": now.isoformat(),
+                "duration": duration_ms / 1000.0,
+                "tokens_generated": tokens,
+                "temperature": float(self.params.get("temperature", 0.0)),
+            }
+
+            payload = {
+                "model_id": self.model_id,
+                "model_type": "generation",
+                "sub_model_type": "text_generation",
+                "model_output_type": "telemetry",
+                "model_output": "stats_only",
+                "model_output_confidence": 1.0,
+                "model_output_start_time": metadata["start_time"],
+                "model_output_end_time": metadata["end_time"],
+                "model_output_duration": metadata["duration"],
+                "model_output_metadata": metadata,
+            }
+
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            url = f"{self.api_url}/agent/model_results/{self.device_id}/create_from_agent"
+
+            requests.post(url, json=payload, headers=headers, timeout=10)
+
+        except Exception as e:
+            print(f"Failed to send telemetry: {e}")
 
     def stop(self):
         """Stops the running server securely."""
-        # If we have a direct handle (started in this session)
+        self.running = False
         if getattr(self, "process", None):
             self.process.terminate()
             try:
@@ -333,28 +300,29 @@ class ModelServer:
             except subprocess.TimeoutExpired:
                 self.process.kill()
 
-        # Always check the PID file to be sure
+        if getattr(self, "log_handle", None):
+            try:
+                self.log_handle.close()
+            except Exception:
+                pass
+
         if getattr(self, "pid_file", None) and self.pid_file.exists():
             stop_process_tree(self.pid_file, "Model Server")
 
-        if (
-            getattr(self, "api_url", None)
-            and getattr(self, "device_id", None)
-            and getattr(self, "model_id", None)
-            and getattr(self, "api_key", None)
-        ):
+        self._send_status(False, False)
+
+    def _send_status(self, running, serving):
+        if hasattr(self, "api_url"):
             try:
                 url = f"{self.api_url}/agent/{self.device_id}/models/{self.model_id}/status"
                 payload = {
-                    "running": False,
+                    "running": running,
                     "pid": 0,
-                    "serving": False,
-                    "serving_pid": 0,
-                    "serving_port": 0,
+                    "serving": serving,
+                    "serving_pid": self.process.pid if self.process else 0,
+                    "serving_port": self.port if serving else 0,
                 }
                 headers = {"Authorization": f"Bearer {self.api_key}"}
-
                 requests.post(url, json=payload, headers=headers, timeout=2)
-
             except Exception:
                 pass
