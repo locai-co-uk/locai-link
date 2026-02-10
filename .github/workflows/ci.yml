@@ -1,4 +1,4 @@
-name: Build and Test Python Agent
+name: CI pipeline
 
 on:
   workflow_dispatch:
