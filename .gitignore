@@ -63,3 +63,8 @@ pyrefly.toml
 # Serving
 serving.pid
 serving.log
+
+# License Scripts
+*.reuse
+gen_third_party.sh
+download_licenses.py 

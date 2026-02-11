@@ -1,0 +1,2 @@
+Pointer stub to avoid duplication. Canonical text at:
+../LICENSES-external/BSD-3-Clause.txt
