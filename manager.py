@@ -242,7 +242,7 @@ def install_deps_from_source():
             for f in bin_dir.glob("llama-*"):
                 f.chmod(0o755)
 
-        print(f"✔ Inference Engine installed successfully in {bin_dir}")
+        print(f"Inference Engine installed successfully in {bin_dir}")
 
     except Exception as e:
         print(f"❌ Failed to install Inference Engine: {e}")
@@ -259,7 +259,7 @@ def setup(extras=None):
     install_uv()
 
     if VENV_PATH.exists():
-        print(f"✔ Virtual environment exists at {VENV_PATH}")
+        print(f"Virtual environment exists at {VENV_PATH}")
     else:
         print("Creating virtual environment...")
         subprocess.run(["uv", "venv", "--python", PYTHON_VERSION, ".venv"], cwd=PROJECT_ROOT, check=True)
@@ -273,12 +273,12 @@ def setup(extras=None):
     env["VIRTUAL_ENV"] = str(VENV_PATH)
     subprocess.run(["uv", "pip", "install"] + install_target.split(), cwd=PROJECT_ROOT, env=env, check=True)
 
-    print("\n✔ Setup Complete.")
+    print("\nSetup Complete.")
 
 
 def install(args):
     """Orchestrator: The 'Web Installer' Logic."""
-    print_step("LocAI Edge Agent Installer")
+    print_step("Loc.ai Agent Installer")
     cwd = Path.cwd()
 
     # Determine API URL
@@ -286,7 +286,7 @@ def install(args):
 
     if args.api_url:
         target_api_url = args.api_url
-        print(f"✔ Using provided API URL: {target_api_url}")
+        print(f"Using provided API URL: {target_api_url}")
     elif args.dev:
         print("\n--- Development Configuration ---")
         # Flush input buffer to prevent skipping
@@ -300,12 +300,12 @@ def install(args):
             print("❌ Error: API URL is required when using --dev.")
             sys.exit(1)
         target_api_url = user_input
-        print(f"✔ Selected Custom URL: {target_api_url}")
+        print(f"Selected Custom URL: {target_api_url}")
 
     # Git Operations
     if (cwd / "pyproject.toml").exists():
         install_dir = cwd
-        print(f"✔ Detected existing repository in {install_dir}")
+        print(f"Detected existing repository in {install_dir}")
         is_fresh_clone = False
     else:
         install_dir = cwd / "locai-link"
@@ -383,7 +383,7 @@ def install(args):
         if start:
             run_target(["run", "--api-url", target_api_url])
         else:
-            print(f"\n✔ Installation complete. To run later:\n  cd {install_dir}\n  uv run manager.py run")
+            print(f"\nInstallation complete. To run later:\n  cd {install_dir}\n  uv run manager.py run")
 
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Installation step failed (Exit Code: {e.returncode})")

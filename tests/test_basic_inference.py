@@ -26,31 +26,40 @@ def test_determine_script_image():
     assert "image" in script.name
 
 
-def test_determine_script_by_config():
-    """Test selection based on config file."""
-    # Test explicit runner mapping
+def test_determine_script_by_config(mocker):
+    """Test selection based on config file with mocked filesystem."""
+    mocker.patch.object(Path, "exists", return_value=True)
+
     config = {"process": {"impl": {"runner": "tflite_audio_classification"}}}
     script = dispatcher.determine_inference_script_by_config(config)
     assert "audio" in script.name
 
-    # Test invalid runner raises error
     config_invalid = {"process": {"impl": {"runner": "invalid_runner"}}}
-    with pytest.raises(ValueError):
+    with pytest.raises(FileNotFoundError) as excinfo:
         dispatcher.determine_inference_script_by_config(config_invalid)
+
+    assert "invalid_runner" in str(excinfo.value)
 
 
 def test_run_inference_script(mocker):
-    """Test subprocess launching."""
+    """Test subprocess launching by mocking file system existence."""
     mock_popen = mocker.patch("subprocess.Popen")
-    mock_popen.return_value = mocker.MagicMock()
+    mock_popen.return_value = mocker.MagicMock(pid=123)
+
+    mock_exists = mocker.patch.object(Path, "exists")
+    mock_exists.return_value = True
 
     script_path = Path("fake_script.py")
     model_path = Path("fake_model.tflite")
 
-    dispatcher.run_inference_script(script_path, model_path, "dev1", "key1")
+    _process = dispatcher.run_inference_script(script_path, model_path, "dev1", "key1")
 
     mock_popen.assert_called_once()
     args = mock_popen.call_args[0][0]
+
     assert str(script_path) in args
     assert str(model_path) in args
     assert "--device-id" in args
+    assert "dev1" in args
+    assert "--api-key" in args
+    assert "key1" in args
