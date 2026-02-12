@@ -12,10 +12,10 @@ if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
 
 # 2. Determine source (Local vs Remote)
 if (Test-Path ".\manager.py") {
-    Write-Host "✔ Found local manager.py" -ForegroundColor Green
+    Write-Host "Found local manager.py" -ForegroundColor Green
     $ManagerTarget = "manager.py"
 } else {
-    Write-Host "⬇ Downloading remote manager.py..." -ForegroundColor Cyan
+    Write-Host "Downloading remote manager.py..." -ForegroundColor Cyan
     $ManagerTarget = "https://raw.githubusercontent.com/locai-co-uk/locai-link/main/manager.py"
 }
 

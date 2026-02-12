@@ -11,7 +11,7 @@ version = "0.1.9"
 description = "Locai edge device inference agent"
 readme = "README.md"
 requires-python = "==3.11.8"
-authors = [{ name = "MVP Platform Team" }]
+authors = [{ name = "Loc.ai Team" }]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",

@@ -29,6 +29,27 @@ curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) -DeviceName "YOUR_DEVICE_NAME" -Username "YOUR_USERNAME" -RegistrationKey "YOUR_KEY" -StartRunning
 ```
 
+## Prerequisites
+Often times these libraries are already installed on your system. If not, you will need to install them with your package manager.
+
+If you are running audio classification in *Linux/macOS* you will need to install `libportaudio` with your package manager. For example:
+
+### Linux
+```bash
+sudo apt-get install -y libportaudio2
+```
+
+### macOS
+```bash
+brew install portaudio
+```
+
+For image classification on *Linux*, you will need to install `libgl1`, with apt this looks like:
+
+```bash
+sudo apt-get install -y libgl1
+```
+
 ## Architecture Information
 Loc.ai:Link operates as a managed process on the edge device. The `manager.py` acts as the lifecycle orchestrator, handling environment setup, updates, and the execution of the main `agent.py`.
 

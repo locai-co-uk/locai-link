@@ -14,9 +14,9 @@ if errorlevel 1 (
 
 :: 2. Determine source and Launch
 if exist manager.py (
-    echo ✔ Found local manager.py
+    echo Found local manager.py
     uv run manager.py install %*
 ) else (
-    echo ⬇ Downloading remote manager.py...
+    echo Downloading remote manager.py...
     uv run https://raw.githubusercontent.com/locai-co-uk/locai-link/main/manager.py install %*
 )

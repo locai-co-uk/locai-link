@@ -60,28 +60,35 @@ def determine_inference_script_by_config(config: dict) -> Path:
     runner = impl.get("runner")
     entrypoint = impl.get("entrypoint")
 
-    # Prefer explicit entrypoint if present and exists
-    if entrypoint:
-        candidate = SCRIPT_DIR / entrypoint
-        if candidate.exists():
-            return candidate
-        else:
-            print(f"Warning: Entrypoint '{entrypoint}' not found, falling back to runner mapping")
-
-    # Map runner to script path
+    # Map runner to the physical filenames on disk
     runner_to_script_path = {
         "tflite_audio_classification": "audio_classification_yamnet_tflite.py",
         "tflite_image_detection": "image_detection_cpy_tflite.py",
         "gguf_language_model": "language_model_gguf.py",
     }
 
-    if runner and runner in runner_to_script_path:
-        return SCRIPT_DIR / runner_to_script_path[runner]
+    # 1. Try explicit entrypoint
+    if entrypoint:
+        candidate = SCRIPT_DIR / entrypoint
+        if candidate.exists():
+            return candidate
+        # If entrypoint fails, we log and fall through to mapping
+        print(f"Warning: Entrypoint '{entrypoint}' not found, falling back to runner mapping")
 
-    # If no valid runner found, raise an error
-    raise ValueError(
-        f"Invalid or missing runner '{runner}' in config file. Expected one of: {list(runner_to_script_path.keys())}"
-    )
+    # 2. Try Runner mapping
+    if runner in runner_to_script_path:
+        candidate = SCRIPT_DIR / runner_to_script_path[runner]
+        if candidate.exists():
+            return candidate
+
+    # 3. Final error handling
+    error_msg = "Could not find a valid inference script."
+    if entrypoint:
+        error_msg += f" Entrypoint '{entrypoint}' does not exist."
+    if runner:
+        error_msg += f" Runner '{runner}' mapping failed or file is missing."
+
+    raise FileNotFoundError(error_msg)
 
 
 def find_llm_process_by_model(model_path_str: str) -> int | None:
