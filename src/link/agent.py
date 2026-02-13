@@ -18,6 +18,7 @@ from rich import print
 
 import link.logger as logger
 from link.logger import link_logger
+from link.analytics import send_model_downloaded
 from link.server import ModelServer
 from link.utils import (
     AGENT_CONFIG_PATH,
@@ -348,6 +349,7 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         download_url = f"{BASE_URL}/models/{model_id}/download/{device_id}/agent"
 
         link_logger.progress(f"Starting download for {model_name}...", 0, "downloading")
+        download_started_at = time.monotonic()
 
         def download_model_file() -> requests.Response:
             """Inner function for retry wrapper.
@@ -411,6 +413,27 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         link_logger.progress("Model saved. Processing config...", 80, "configuring")
 
         messages = [f"Model '{model_name}' deployed successfully to {model_file_path}"]
+
+        try:
+            ext = (file_extension or "").lower().lstrip(".")
+            if ext == "tflite":
+                model_format = "tflite"
+            elif ext == "gguf":
+                model_format = "gguf"
+            else:
+                model_format = "other"
+
+            send_model_downloaded(
+                device_id=device_id,
+                api_key=api_key,
+                model_id=model_id,
+                model_name=model_name,
+                model_format=model_format,
+                file_size_bytes=downloaded_bytes,
+                download_duration_seconds=(time.monotonic() - download_started_at),
+            )
+        except Exception:
+            pass
 
         # Save runtime config if provided
         if runtime_config:
