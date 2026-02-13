@@ -18,6 +18,8 @@ import sounddevice as sd
 import tensorflow as tf
 from rich import print
 
+from link.analytics import send_model_ready
+
 # --- Global state for signal handling and detection throttling ---
 keep_running = True
 last_detection_time = 0  # Track the last time we saved/sent a detection
@@ -262,6 +264,21 @@ def audio_thread(
     except Exception as e:
         print(f"Error loading model: {e}")
         return
+
+    if device_id and api_key:
+        try:
+            model_id = Path(model_path).stem
+            send_model_ready(
+                device_id=device_id,
+                api_key=api_key,
+                model_id=model_id,
+                model_name=Path(model_path).name,
+                mode="inference",
+                runner="tflite_audio_classification",
+                model_format="tflite",
+            )
+        except Exception:
+            pass
 
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
