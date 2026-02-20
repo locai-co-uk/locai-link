@@ -16,6 +16,7 @@ from pathlib import Path
 import requests
 
 from link import logger as link_logger
+from link.analytics import send_model_ready
 from link.logger import LogClient
 from link.utils import (
     AGENT_CONFIG_PATH,
@@ -228,7 +229,35 @@ class ModelServer:
             self.stop()
             return
 
+        try:
+            ready = self._wait_for_ready(timeout_seconds=120)
+            if ready:
+                send_model_ready(
+                    device_id=self.device_id,
+                    api_key=self.api_key,
+                    model_id=self.model_id or Path(self.model_path).stem,
+                    model_name=Path(self.model_path).name if self.model_path else None,
+                    mode="serve",
+                    runner="llama-server",
+                    model_format="gguf",
+                )
+        except Exception:
+            pass
+
         self._send_status(False, True)
+
+    def _wait_for_ready(self, timeout_seconds: int = 120) -> bool:
+        url = f"http://{self.host}:{self.port}/health"
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                resp = requests.get(url, timeout=2)
+                if resp.status_code == 200:
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+        return False
 
     def _telemetry_monitor_loop(self):
         """Monitors log file with error handling for non-utf8 characters."""
