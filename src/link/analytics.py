@@ -18,6 +18,7 @@ def send_model_ready(
     runner: Optional[str] = None,
     model_format: Optional[str] = None,
 ) -> bool:
+    """Report that a model is ready to be used on a device."""
     base_url = os.environ.get("BASE_URL")
     if not base_url:
         return False
@@ -49,6 +50,7 @@ def send_model_downloaded(
     file_size_bytes: Optional[int] = None,
     download_duration_seconds: Optional[float] = None,
 ) -> bool:
+    """Report that a model has been downloaded to a device."""
     base_url = os.environ.get("BASE_URL")
     if not base_url:
         return False

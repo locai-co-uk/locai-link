@@ -16,8 +16,8 @@ from pathlib import Path
 import requests
 
 from link import logger as link_logger
-from link.logger import LogClient
 from link.analytics import send_model_ready
+from link.logger import LogClient
 from link.utils import (
     AGENT_CONFIG_PATH,
     CONFIGS_DIR,
