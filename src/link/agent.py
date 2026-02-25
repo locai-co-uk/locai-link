@@ -424,6 +424,7 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
                 model_format = "other"
 
             send_model_downloaded(
+                base_url=BASE_URL,
                 device_id=device_id,
                 api_key=api_key,
                 model_id=model_id,

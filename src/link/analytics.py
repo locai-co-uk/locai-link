@@ -10,6 +10,7 @@ import requests
 
 def send_model_ready(
     *,
+    base_url: str,
     device_id: str,
     api_key: str,
     model_id: str,
@@ -19,7 +20,6 @@ def send_model_ready(
     model_format: Optional[str] = None,
 ) -> bool:
     """Report that a model is ready to be used on a device."""
-    base_url = os.environ.get("BASE_URL")
     if not base_url:
         return False
 
@@ -42,6 +42,7 @@ def send_model_ready(
 
 def send_model_downloaded(
     *,
+    base_url: str,
     device_id: str,
     api_key: str,
     model_id: str,
@@ -51,7 +52,6 @@ def send_model_downloaded(
     download_duration_seconds: Optional[float] = None,
 ) -> bool:
     """Report that a model has been downloaded to a device."""
-    base_url = os.environ.get("BASE_URL")
     if not base_url:
         return False
 
