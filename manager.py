@@ -177,7 +177,7 @@ def install_deps_from_source():
 
         for asset in assets:
             name = asset["name"]
-            if asset_keyword in name and name.endswith(expected_ext):
+            if asset_keyword in name and name.endswith(expected_ext) and name.startswith("llama-"):
                 download_url = asset["browser_download_url"]
                 asset_name = name
                 break
