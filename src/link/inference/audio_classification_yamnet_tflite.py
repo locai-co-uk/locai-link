@@ -269,6 +269,7 @@ def audio_thread(
         try:
             model_id = Path(model_path).stem
             send_model_ready(
+                base_url=BASE_URL,
                 device_id=device_id,
                 api_key=api_key,
                 model_id=model_id,

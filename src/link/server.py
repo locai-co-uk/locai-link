@@ -233,6 +233,7 @@ class ModelServer:
             ready = self._wait_for_ready(timeout_seconds=120)
             if ready:
                 send_model_ready(
+                    base_url=self.api_url,
                     device_id=self.device_id,
                     api_key=self.api_key,
                     model_id=self.model_id or Path(self.model_path).stem,
