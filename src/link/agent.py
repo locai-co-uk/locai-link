@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ import requests
 from rich import print
 
 import link.logger as logger
-from link.analytics import send_model_downloaded
+from link.analytics import send_agent_error, send_model_downloaded
 from link.logger import link_logger
 from link.server import ModelServer
 from link.utils import (
@@ -31,6 +32,43 @@ from link.utils import (
 BASE_URL = None
 METRICS_INTERVAL_SECONDS = 30  # Interval for sending metrics
 COMMAND_POLL_INTERVAL_SECONDS = 10  # Interval for polling for commands
+
+
+# --- Error Tracking ---
+def _track_error(
+    error_type: str,
+    message: str,
+    *,
+    model_id: str = None,
+    device_id: str = None,
+    api_key: str = None,
+    raw_log_line: str = "",
+):
+    """Forward an agent-level error to the backend (which handles PostHog).
+
+    Args:
+        error_type: One of "serving", "inference", "deployment".
+        message: Human-readable error description.
+        model_id: The model involved, if known.
+        device_id: The device ID.
+        api_key: The device API key.
+        raw_log_line: Raw log output associated with the error.
+    """
+    if not BASE_URL:
+        return
+
+    try:
+        send_agent_error(
+            base_url=BASE_URL,
+            device_id=device_id or "",
+            api_key=api_key or "",
+            error_type=error_type,
+            model_id=model_id or "",
+            error_message=message,
+            raw_log_line=raw_log_line or message,
+        )
+    except Exception:
+        pass
 
 
 # --- Helper Functions ---
@@ -333,7 +371,9 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         missing_fields.append("file_extension")
 
     if missing_fields:
-        return link_logger.fail(f"Payload for deploy_model must include: {', '.join(missing_fields)}")
+        msg = f"Payload for deploy_model must include: {', '.join(missing_fields)}"
+        _track_error("deployment", msg, model_id=model_id, device_id=config.get("device_id"), api_key=api_key)
+        return link_logger.fail(msg)
 
     print(f"Deploying model: {model_name} ({model_id})")
 
@@ -403,6 +443,14 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
                             )
                             last_logged_pct = progress_pct
         except IOError as e:
+            _track_error(
+                "deployment",
+                f"Failed to save model file to disk: {e}",
+                model_id=model_id,
+                device_id=device_id,
+                api_key=api_key,
+                raw_log_line=str(e),
+            )
             raise logger.ModelSaveLog(
                 message="Failed to save model file to disk",
                 model_name=model_name,
@@ -453,6 +501,14 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
         return link_logger.ok(" ".join(messages))
 
     except Exception as e:
+        _track_error(
+            "deployment",
+            str(e),
+            model_id=model_id,
+            device_id=config.get("device_id"),
+            api_key=api_key,
+            raw_log_line=str(e),
+        )
         # Use link_logger.catch to log and return error tuple
         with link_logger.catch(reraise=False) as ctx:
             raise e
@@ -615,20 +671,45 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
     # --- SERVER COMMANDS ---
 
     elif command_type == "start_serving":
+        serving_model_id = payload.get("model_id")
+        serving_device_id = config.get("device_id")
         try:
             server = ModelServer(payload)
 
             if not getattr(server, "is_valid", False) and not getattr(server, "is_running", lambda: False)():
-                return link_logger.fail("Server initialization failed (check config/logs).")
+                msg = "Server initialization failed (check config/logs)."
+                _track_error("serving", msg, model_id=serving_model_id, device_id=serving_device_id, api_key=api_key)
+                return link_logger.fail(msg)
+
+            # Check port availability before starting
+            port = payload.get("port", 8003)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("localhost", port)) == 0:
+                    msg = f"Port {port} is already in use. Cannot start serving."
+                    _track_error(
+                        "serving", msg, model_id=serving_model_id, device_id=serving_device_id, api_key=api_key
+                    )
+                    return link_logger.fail(msg)
 
             server.start()
 
             if server.is_running():
                 return link_logger.ok("Model Serving started successfully.")
             else:
-                return link_logger.fail("Model Serving failed to start.")
+                msg = "Model Serving failed to start."
+                _track_error("serving", msg, model_id=serving_model_id, device_id=serving_device_id, api_key=api_key)
+                return link_logger.fail(msg)
         except Exception as e:
-            return link_logger.fail(f"Error executing start_serving: {e}")
+            msg = f"Error executing start_serving: {e}"
+            _track_error(
+                "serving",
+                msg,
+                model_id=serving_model_id,
+                device_id=serving_device_id,
+                api_key=api_key,
+                raw_log_line=str(e),
+            )
+            return link_logger.fail(msg)
 
     elif command_type == "stop_serving":
         try:
@@ -636,7 +717,11 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
             server.stop()
             return link_logger.ok("Model Serving stopped.")
         except Exception as e:
-            return link_logger.fail(f"Error executing stop_serving: {e}")
+            msg = f"Error executing stop_serving: {e}"
+            _track_error(
+                "serving", msg, model_id=payload.get("model_id"), device_id=config.get("device_id"), api_key=api_key
+            )
+            return link_logger.fail(msg)
 
     elif command_type == "shutdown_agent":
         print("Shutdown command received. Initiating graceful shutdown...")
@@ -1027,20 +1112,27 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
     """
     model_name = payload.get("model_name")
     model_id = payload.get("model_id")
+    inf_device_id = config.get("device_id")
 
     # Validate model_name
     if not model_name:
-        return link_logger.fail("Payload must include 'model_name'")
+        msg = "Payload must include 'model_name'"
+        _track_error("inference", msg, model_id=model_id, device_id=inf_device_id, api_key=api_key)
+        return link_logger.fail(msg)
 
     # Check if this model is already running
     if model_name in running_processes and running_processes[model_name]["process"].poll() is None:
         pid = running_processes[model_name]["process"].pid
-        return link_logger.fail(f"Inference for model '{model_name}' is already running (PID {pid})")
+        msg = f"Inference for model '{model_name}' is already running (PID {pid})"
+        _track_error("inference", msg, model_id=model_id, device_id=inf_device_id, api_key=api_key)
+        return link_logger.fail(msg)
 
     # Construct the full path to the model file
     model_path = MODELS_DIR / model_name
     if not model_path.exists():
-        return link_logger.fail(f"Model file not found: {model_path}")
+        msg = f"Model file not found: {model_path}"
+        _track_error("inference", msg, model_id=model_id, device_id=inf_device_id, api_key=api_key)
+        return link_logger.fail(msg)
 
     try:
         headers = {
@@ -1206,14 +1298,18 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
                         cfg_json_bytes = json.dumps(cfg_override).encode("utf-8")
                     cfg_path.write_bytes(cfg_json_bytes)
                 except Exception as e:
-                    return link_logger.fail(f"Failed to write inline config override: {e}")
+                    msg = f"Failed to write inline config override: {e}"
+                    _track_error("inference", msg, model_id=model_id, device_id=inf_device_id, api_key=api_key)
+                    return link_logger.fail(msg)
 
             command.extend(["--config", str(cfg_path)])
         else:
             print("No explicit config provided, wrapper will attempt auto-discovery for model_id")
 
     except Exception as e:
-        return link_logger.fail(f"Config setup failed: {e}")
+        msg = f"Config setup failed: {e}"
+        _track_error("inference", msg, model_id=model_id, device_id=inf_device_id, api_key=api_key)
+        return link_logger.fail(msg)
 
     # Provide additional context to the wrapper for better selection
     if payload.get("model_name"):
@@ -1286,7 +1382,9 @@ def start_model_inference(payload: dict, api_key: str, config: dict, running_pro
         return link_logger.ok(f"Inference started for model '{model_name}' with PID {process.pid}.")
 
     except Exception as e:
-        return link_logger.fail(f"Failed to start inference subprocess: {e}")
+        msg = f"Failed to start inference subprocess: {e}"
+        _track_error("inference", msg, model_id=model_id, device_id=inf_device_id, api_key=api_key, raw_log_line=str(e))
+        return link_logger.fail(msg)
 
 
 # Start the agent
