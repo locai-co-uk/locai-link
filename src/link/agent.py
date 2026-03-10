@@ -502,7 +502,12 @@ def deploy_model(payload, api_key, config) -> tuple[str, str] | None:
 
     except Exception as e:
         _track_error(
-            "deployment", str(e), model_id=model_id, device_id=config.get("device_id"), api_key=api_key, raw_log_line=str(e)
+            "deployment",
+            str(e),
+            model_id=model_id,
+            device_id=config.get("device_id"),
+            api_key=api_key,
+            raw_log_line=str(e),
         )
         # Use link_logger.catch to log and return error tuple
         with link_logger.catch(reraise=False) as ctx:
@@ -697,7 +702,12 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
         except Exception as e:
             msg = f"Error executing start_serving: {e}"
             _track_error(
-                "serving", msg, model_id=serving_model_id, device_id=serving_device_id, api_key=api_key, raw_log_line=str(e)
+                "serving",
+                msg,
+                model_id=serving_model_id,
+                device_id=serving_device_id,
+                api_key=api_key,
+                raw_log_line=str(e),
             )
             return link_logger.fail(msg)
 
