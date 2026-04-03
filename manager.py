@@ -339,13 +339,14 @@ def install(args):
     # Interactive Inputs (only if not provided)
     if not args.device_name:
         args.device_name = input("Enter Device Name: ").strip()
-    if not args.username:
-        args.username = input("Enter Username: ").strip()
+    if not args.token and not args.email:
+        args.email = input("Enter Email: ").strip()
     if not args.registration_key:
         args.registration_key = input("Enter Registration Key: ").strip()
 
-    if not all([args.device_name, args.username, args.registration_key]):
-        print("❌ Error: All fields are required.")
+    identity_provided = args.token or args.email
+    if not all([args.device_name, args.registration_key]) or not identity_provided:
+        print("❌ Error: Device name, registration key, and an identity (--email or --token) are required.")
         sys.exit(1)
 
     # Define helper to run commands inside the new repo
@@ -362,8 +363,6 @@ def install(args):
             "register",
             "--device-name",
             args.device_name,
-            "--username",
-            args.username,
             "--registration-key",
             args.registration_key,
             "--device-type",
@@ -371,6 +370,11 @@ def install(args):
             "--api-url",
             target_api_url,
         ]
+        if args.token:
+            reg_args += ["--token", args.token]
+        else:
+            reg_args += ["--email", args.email]
+            # Do NOT pass --password here; agent.py will prompt securely via getpass
         run_target(reg_args)
 
         # C. Run
@@ -461,7 +465,9 @@ def main():
     install_parser.add_argument("--repo-url", default=DEFAULT_REPO_URL)
     install_parser.add_argument("--branch", default=DEFAULT_BRANCH)
     install_parser.add_argument("--device-name")
-    install_parser.add_argument("--username")
+    install_parser.add_argument("--email")
+    install_parser.add_argument("--password")
+    install_parser.add_argument("--token", help="Pre-obtained JWT access token (alternative to email/password)")
     install_parser.add_argument("--registration-key")
     install_parser.add_argument("--device-type", default="edge_device")
     install_parser.add_argument("--start-running", action="store_true")
@@ -479,7 +485,9 @@ def main():
     # 4. Register
     reg_parser = subparsers.add_parser("register", help="Register device")
     reg_parser.add_argument("--device-name")
-    reg_parser.add_argument("--username")
+    reg_parser.add_argument("--email")
+    reg_parser.add_argument("--password")
+    reg_parser.add_argument("--token", help="Pre-obtained JWT access token (alternative to email/password)")
     reg_parser.add_argument("--registration-key")
     reg_parser.add_argument("--device-type", default="other")
     reg_parser.add_argument("--api-url")
@@ -524,8 +532,9 @@ def main():
     ensure_venv_execution()
 
     if args.command == "register":
-        if not all([args.device_name, args.username, args.registration_key]):
-            print("❌ Error: Missing required arguments (name, username, key).")
+        identity_provided = args.token or args.email
+        if not args.device_name or not args.registration_key or not identity_provided:
+            print("❌ Error: Missing required arguments (name, registration-key, and email or token).")
             sys.exit(1)
 
         cmd = [
@@ -533,8 +542,6 @@ def main():
             str(AGENT_SCRIPT),
             "--device-name",
             args.device_name,
-            "--username",
-            args.username,
             "--registration-key",
             args.registration_key,
             "--device-type",
@@ -542,6 +549,13 @@ def main():
             "--api-url",
             args.api_url if args.api_url else PROD_API_URL,
         ]
+        if args.token:
+            cmd += ["--token", args.token]
+        else:
+            cmd += ["--email", args.email]
+            if args.password:
+                cmd += ["--password", args.password]
+            # If no password, agent.py will prompt via getpass
         subprocess.run(cmd, check=True)
 
     elif args.command == "activate":
