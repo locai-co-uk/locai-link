@@ -108,7 +108,7 @@ def test_server_lifecycle(server_binary):
 
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-        print(f"[CI] Response: {content}")
+        print(f"[CI] Response: {content.encode('ascii', errors='replace').decode('ascii')}")
         assert len(content) > 0, "Model returned an empty response"
 
     finally:
