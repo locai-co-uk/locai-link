@@ -16,9 +16,9 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
-  # 1. Unit Tests (fast, no external binaries needed)
-  unit-test:
-    name: Unit Test on ${{ matrix.os }}
+  # 1. Tests (fast, no external binaries needed)
+  test:
+    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,11 +52,10 @@ jobs:
         uv venv
         uv pip install -e ".[dev]"
 
-    - name: Run Unit Tests
+    - name: Run Tests
       shell: bash
       env:
         DEVICE_MODE: "LOCAL"
-      # Default addopts already excludes -m "not ci", so only unit tests run
       run: |
         uv run pytest tests/
 
@@ -85,10 +84,10 @@ jobs:
       - name: Check Code
         run: uv run ruff check .
 
-  # 3. CI Tests (downloads model + binary, runs real server)
-  ci-test:
-    name: CI Test on ${{ matrix.os }}
-    needs: [unit-test]
+  # 3. Server Smoke Test (downloads model + binary, runs real server)
+  smoke-test:
+    name: Smoke Test on ${{ matrix.os }}
+    needs: [test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -126,7 +125,7 @@ jobs:
       shell: bash
       run: uv run python manager.py install-deps
 
-    - name: Run CI Tests
+    - name: Run Smoke Tests
       shell: bash
       run: |
         uv run pytest -m ci -v -s
