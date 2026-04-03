@@ -12,7 +12,7 @@ For production deployment on edge devices, use our one-line installer to setup, 
 ### Linux / macOS
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --start-running
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "YOUR_DEVICE_NAME" --email "YOUR_EMAIL" --registration-key "YOUR_KEY" --start-running
 ```
 
 ### Windows
@@ -20,13 +20,13 @@ curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.
 #### CMD
 
 ```cmd
-curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --start-running
+curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "YOUR_DEVICE_NAME" --email "YOUR_EMAIL" --registration-key "YOUR_KEY" --start-running
 ```
 
 #### PowerShell
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) -DeviceName "YOUR_DEVICE_NAME" -Username "YOUR_USERNAME" -RegistrationKey "YOUR_KEY" -StartRunning
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) -DeviceName "YOUR_DEVICE_NAME" -Email "YOUR_EMAIL" -RegistrationKey "YOUR_KEY" -StartRunning
 ```
 
 ## Prerequisites
@@ -123,9 +123,11 @@ Option A: New Device Registration Use this if you have a Registration Key genera
 ```bash
 uv run manager.py register \
   --device-name "my-edge-device-01" \
-  --username "my-username" \
+  --email "your@email.com" \
   --registration-key "YOUR_REG_KEY"
 ```
+
+You can also use `--token "YOUR_JWT"` instead of `--email` if you have a pre-obtained access token.
 
 Option B: Activate Pre-existing Device Use this if you created the device in the UI and have its Device ID and API Key.
 
