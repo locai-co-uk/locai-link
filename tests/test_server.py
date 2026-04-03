@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import json
+import platform
 from pathlib import Path
 
 import pytest
 
 from link.server import ModelServer
+
+BINARY_NAME = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
 
 
 @pytest.fixture
@@ -308,7 +311,7 @@ class TestGetServerBinary:
 
         venv_bin = tmp_path / ".venv" / "bin-llama"
         venv_bin.mkdir(parents=True)
-        binary = venv_bin / "llama-server"
+        binary = venv_bin / BINARY_NAME
         binary.write_text("fake")
 
         mocker.patch("link.server.PROJECT_ROOT", tmp_path)
@@ -322,7 +325,7 @@ class TestGetServerBinary:
 
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        binary = bin_dir / "llama-server"
+        binary = bin_dir / BINARY_NAME
         binary.write_text("fake")
 
         mocker.patch("link.server.PROJECT_ROOT", tmp_path)
