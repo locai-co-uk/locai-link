@@ -492,7 +492,10 @@ def main():
     act_parser.add_argument("--device-type", help="Device type (optional)")
     act_parser.add_argument("--api-url", help="Override API URL")
 
-    # 6. Run
+    # 6. Install Deps (binary only, no venv creation)
+    subparsers.add_parser("install-deps", help="Download llama.cpp server binary")
+
+    # 7. Run
     run_parser = subparsers.add_parser("run", help="Run agent")
     run_parser.add_argument("--api-url")
 
@@ -511,6 +514,10 @@ def main():
 
     elif args.command == "reset":
         reset(hard=args.hard)
+        return
+
+    elif args.command == "install-deps":
+        install_deps_from_source()
         return
 
     # Commands that REQUIRE the Virtual Env

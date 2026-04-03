@@ -68,3 +68,6 @@ serving.log
 *.reuse
 gen_third_party.sh
 download_licenses.py 
+
+# VS code
+.vscode
