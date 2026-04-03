@@ -197,8 +197,6 @@ class ModelServer:
             if k in self.params:
                 cmd.extend([v, str(self.params[k])])
 
-        if "chat_format" not in self.params:
-            cmd.extend(["--chat-template", "chatml"])
 
         link_logger.info(f"Launching server on http://{self.host}:{self.port}")
 
