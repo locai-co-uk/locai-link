@@ -123,6 +123,8 @@ jobs:
 
     - name: Install llama-server binary
       shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: uv run python manager.py install-deps
 
     - name: Run Smoke Tests

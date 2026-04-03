@@ -977,7 +977,9 @@ def main():
 
     parser.add_argument("--device-type", default="edge_device")
     parser.add_argument("--email", help="Platform account email (used to obtain a token automatically)")
-    parser.add_argument("--password", help="Platform account password (prompted securely if --email used without --password)")
+    parser.add_argument(
+        "--password", help="Platform account password (prompted securely if --email used without --password)"
+    )
     parser.add_argument("--token", help="Pre-obtained JWT access token (alternative to --email/--password)")
     parser.add_argument("--registration-key", help="One-time registration key")
     parser.add_argument("--api-key", help="Existing API Key")

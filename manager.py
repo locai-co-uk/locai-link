@@ -168,7 +168,15 @@ def install_deps_from_source():
     # 2. Fetch Release Info
     try:
         print("Fetching latest release info...")
-        with urllib.request.urlopen("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest") as response:
+        gh_token = os.environ.get("GITHUB_TOKEN")
+        api_headers = {"Accept": "application/vnd.github+json"}
+        if gh_token:
+            api_headers["Authorization"] = f"Bearer {gh_token}"
+        api_req = urllib.request.Request(
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+            headers=api_headers,
+        )
+        with urllib.request.urlopen(api_req) as response:
             release_data = json.loads(response.read().decode())
 
         assets = release_data.get("assets", [])
