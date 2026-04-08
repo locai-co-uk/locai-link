@@ -12,7 +12,7 @@ For production deployment on edge devices, use our one-line installer to setup, 
 ### Linux / macOS
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --start-running
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- --device-name "YOUR_DEVICE_NAME" --email "YOUR_EMAIL" --registration-key "YOUR_KEY" --start-running
 ```
 
 ### Windows
@@ -20,17 +20,22 @@ curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.
 #### CMD
 
 ```cmd
-curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "YOUR_DEVICE_NAME" --username "YOUR_USERNAME" --registration-key "YOUR_KEY" --start-running
+curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "YOUR_DEVICE_NAME" --email "YOUR_EMAIL" --registration-key "YOUR_KEY" --start-running
 ```
 
 #### PowerShell
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) -DeviceName "YOUR_DEVICE_NAME" -Username "YOUR_USERNAME" -RegistrationKey "YOUR_KEY" -StartRunning
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) -DeviceName "YOUR_DEVICE_NAME" -Email "YOUR_EMAIL" -RegistrationKey "YOUR_KEY" -StartRunning
 ```
 
 ## Prerequisites
-Often times these libraries are already installed on your system. If not, you will need to install them with your package manager.
+
+The following are required on your device before installing:
+
+- **git** — [git-scm.com](https://git-scm.com/) (used for installation and updates)
+
+The following libraries are optional and only needed for specific model types. Often they are already installed on your system — if not, install them with your package manager.
 
 If you are running audio classification in *Linux/macOS* you will need to install `libportaudio` with your package manager. For example:
 
@@ -123,9 +128,11 @@ Option A: New Device Registration Use this if you have a Registration Key genera
 ```bash
 uv run manager.py register \
   --device-name "my-edge-device-01" \
-  --username "my-username" \
+  --email "your@email.com" \
   --registration-key "YOUR_REG_KEY"
 ```
+
+You can also use `--token "YOUR_JWT"` instead of `--email` if you have a pre-obtained access token.
 
 Option B: Activate Pre-existing Device Use this if you created the device in the UI and have its Device ID and API Key.
 

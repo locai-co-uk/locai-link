@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import argparse
+import getpass
 import json
 import os
 import signal
@@ -166,13 +167,48 @@ def activate_agent(device_id, user_token) -> bool:
         return False
 
 
-def register_new_device_with_key(device_name, device_type, username, registration_key) -> tuple[str, str] | None:
+def login_and_get_token(email: str, password: str) -> str | None:
+    """Authenticates with the platform and returns a JWT access token.
+
+    Args:
+        email (str): The user's platform email address.
+        password (str): The user's platform password.
+
+    Returns:
+        str | None: The JWT access token, or None if authentication failed.
+    """
+    print("Authenticating with the platform...")
+    try:
+        response = requests.post(
+            f"{BASE_URL}/auth/login",
+            data={"email": email, "password": password},
+        )
+        if response.status_code == 200:
+            token = response.json().get("access_token")
+            if token:
+                print("Authentication successful.")
+                return token
+            print("Error: Login succeeded but no access token returned.", file=sys.stderr)
+            return None
+        else:
+            print(f"Authentication failed: {response.status_code}", file=sys.stderr)
+            try:
+                print(f"Details: {response.json().get('detail', 'No details.')}", file=sys.stderr)
+            except Exception:
+                print(f"Raw response: {response.text}", file=sys.stderr)
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Network error during authentication: {e}", file=sys.stderr)
+        return None
+
+
+def register_new_device_with_key(device_name, device_type, token, registration_key) -> tuple[str, str] | None:
     """Registers and activates a new device using a one-time registration key.
 
     Args:
         device_name (str): The name of the device.
         device_type (str): The type of the device.
-        username (str): The username for the device.
+        token (str): A valid JWT access token for the platform account that owns the device.
         registration_key (str): The registration key for the device.
 
     Returns:
@@ -191,14 +227,14 @@ def register_new_device_with_key(device_name, device_type, username, registratio
             device_type = "other"
 
     payload = {
-        "username": username,
         "registration_key": registration_key,
         "name": device_name,
         "device_type": device_type,
     }
+    headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        response = requests.post(f"{BASE_URL}/devices/register-with-key", json=payload)
+        response = requests.post(f"{BASE_URL}/devices/register-with-key", json=payload, headers=headers)
         if response.status_code == 200:
             data = response.json()
             device_id = data.get("device_id")
@@ -940,7 +976,11 @@ def main():
     device_group.add_argument("--device-name", help="Device Name (for new registration)")
 
     parser.add_argument("--device-type", default="edge_device")
-    parser.add_argument("--username", help="Platform username")
+    parser.add_argument("--email", help="Platform account email (used to obtain a token automatically)")
+    parser.add_argument(
+        "--password", help="Platform account password (prompted securely if --email used without --password)"
+    )
+    parser.add_argument("--token", help="Pre-obtained JWT access token (alternative to --email/--password)")
     parser.add_argument("--registration-key", help="One-time registration key")
     parser.add_argument("--api-key", help="Existing API Key")
 
@@ -974,13 +1014,27 @@ def main():
     if is_setup_mode:
         # A. New Device Registration
         if args.device_name:
-            if not args.username or not args.registration_key:
-                print("Error: --username and --registration-key required with --device-name.", file=sys.stderr)
+            if not args.registration_key:
+                print("Error: --registration-key is required with --device-name.", file=sys.stderr)
                 sys.exit(1)
 
-            # Pass BASE_URL to ensure it gets saved in the new config
+            # Resolve identity: explicit token takes priority over email/password login
+            if args.token:
+                token = args.token
+            elif args.email:
+                password = args.password or getpass.getpass("Enter platform password: ")
+                token = login_and_get_token(args.email, password)
+                if not token:
+                    sys.exit(1)
+            else:
+                print(
+                    "Error: Provide either --token or --email (with optional --password) to authenticate.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
             device_id, api_key = register_new_device_with_key(
-                args.device_name, args.device_type, args.username, args.registration_key
+                args.device_name, args.device_type, token, args.registration_key
             )
             if not device_id or not api_key:
                 sys.exit(1)

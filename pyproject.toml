@@ -78,7 +78,10 @@ known-first-party = ["device_scripts"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q"
+addopts = "-ra -q -m 'not ci'"
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+  "ci: marks tests that require external binaries / network (skipped locally, run in CI)",
+]

@@ -168,7 +168,15 @@ def install_deps_from_source():
     # 2. Fetch Release Info
     try:
         print("Fetching latest release info...")
-        with urllib.request.urlopen("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest") as response:
+        gh_token = os.environ.get("GITHUB_TOKEN")
+        api_headers = {"Accept": "application/vnd.github+json"}
+        if gh_token:
+            api_headers["Authorization"] = f"Bearer {gh_token}"
+        api_req = urllib.request.Request(
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+            headers=api_headers,
+        )
+        with urllib.request.urlopen(api_req) as response:
             release_data = json.loads(response.read().decode())
 
         assets = release_data.get("assets", [])
@@ -276,6 +284,100 @@ def setup(extras=None):
     print("\nSetup Complete.")
 
 
+def get_local_version() -> str | None:
+    """Reads the version string from pyproject.toml."""
+    toml_path = PROJECT_ROOT / "pyproject.toml"
+    if not toml_path.exists():
+        return None
+    for line in toml_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("version"):
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"').strip("'")
+    return None
+
+
+def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
+    """Pulls the latest code from the remote, stashing any local changes.
+
+    Returns True if the codebase was updated, False if already up to date.
+    """
+    print_step("Checking for Updates")
+
+    if not command_exists("git"):
+        print("❌ git is not installed — cannot check for updates.")
+        return False
+
+    # Fetch without merging so we can compare first
+    subprocess.run(["git", "fetch", "origin", branch], cwd=repo_dir, check=True)
+
+    # Count commits the local branch is behind the remote
+    result = subprocess.run(
+        ["git", "rev-list", "--count", f"HEAD..origin/{branch}"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    behind = int(result.stdout.strip() or "0")
+
+    if behind == 0:
+        local_ver = get_local_version()
+        print(f"Already up to date{f' (v{local_ver})' if local_ver else ''}.")
+        return False
+
+    print(f"Update available: {behind} new commit(s) on {branch}.")
+
+    # Check for local modifications that would block the pull
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    stashed = False
+    if dirty:
+        print("Local modifications detected — stashing before update...")
+        stash_result = subprocess.run(
+            ["git", "stash", "push", "--include-untracked", "-m", "locai-auto-stash"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+        )
+        if stash_result.returncode != 0:
+            print("❌ Could not stash local changes. Aborting update to avoid data loss.")
+            print("   Resolve conflicts manually, then run: uv run manager.py update")
+            return False
+        stashed = True
+
+    # Pull
+    subprocess.run(["git", "pull", "origin", branch], cwd=repo_dir, check=True)
+
+    # Restore stash if we created one
+    if stashed:
+        pop_result = subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+        )
+        if pop_result.returncode != 0:
+            print("⚠️  Update succeeded but stash could not be re-applied cleanly.")
+            print("   Your changes are saved in git stash — run 'git stash show' to review.")
+        else:
+            print("Local changes re-applied successfully.")
+
+    # Re-install dependencies in case pyproject.toml changed
+    print("Updating dependencies...")
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(VENV_PATH)
+    subprocess.run(["uv", "pip", "install", "-e", "."], cwd=repo_dir, env=env, check=True)
+
+    new_ver = get_local_version()
+    print(f"✅ Update complete{f' — now at v{new_ver}' if new_ver else ''}.")
+    return True
+
+
 def install(args):
     """Orchestrator: The 'Web Installer' Logic."""
     print_step("Loc.ai Agent Installer")
@@ -318,15 +420,16 @@ def install(args):
 
     if is_fresh_clone:
         if install_dir.exists():
-            print("Updating existing directory...")
-            subprocess.run(["git", "pull", "origin", args.branch], cwd=install_dir, check=True)
+            print("Existing installation found — checking for updates...")
+            update(install_dir, args.branch)
         else:
             print(f"Cloning repository ({args.branch})...")
             subprocess.run(
                 ["git", "clone", "--depth", "1", "-b", args.branch, args.repo_url, str(install_dir)], check=True
             )
     else:
-        subprocess.run(["git", "pull", "origin", args.branch], cwd=install_dir, check=True)
+        print("Running from repository — checking for updates...")
+        update(install_dir, args.branch)
 
     # Handover to Local Manager
     print_step("Handing over to local installer...")
@@ -339,13 +442,14 @@ def install(args):
     # Interactive Inputs (only if not provided)
     if not args.device_name:
         args.device_name = input("Enter Device Name: ").strip()
-    if not args.username:
-        args.username = input("Enter Username: ").strip()
+    if not args.token and not args.email:
+        args.email = input("Enter Email: ").strip()
     if not args.registration_key:
         args.registration_key = input("Enter Registration Key: ").strip()
 
-    if not all([args.device_name, args.username, args.registration_key]):
-        print("❌ Error: All fields are required.")
+    identity_provided = args.token or args.email
+    if not all([args.device_name, args.registration_key]) or not identity_provided:
+        print("❌ Error: Device name, registration key, and an identity (--email or --token) are required.")
         sys.exit(1)
 
     # Define helper to run commands inside the new repo
@@ -362,8 +466,6 @@ def install(args):
             "register",
             "--device-name",
             args.device_name,
-            "--username",
-            args.username,
             "--registration-key",
             args.registration_key,
             "--device-type",
@@ -371,6 +473,11 @@ def install(args):
             "--api-url",
             target_api_url,
         ]
+        if args.token:
+            reg_args += ["--token", args.token]
+        else:
+            reg_args += ["--email", args.email]
+            # Do NOT pass --password here; agent.py will prompt securely via getpass
         run_target(reg_args)
 
         # C. Run
@@ -461,7 +568,9 @@ def main():
     install_parser.add_argument("--repo-url", default=DEFAULT_REPO_URL)
     install_parser.add_argument("--branch", default=DEFAULT_BRANCH)
     install_parser.add_argument("--device-name")
-    install_parser.add_argument("--username")
+    install_parser.add_argument("--email")
+    install_parser.add_argument("--password")
+    install_parser.add_argument("--token", help="Pre-obtained JWT access token (alternative to email/password)")
     install_parser.add_argument("--registration-key")
     install_parser.add_argument("--device-type", default="edge_device")
     install_parser.add_argument("--start-running", action="store_true")
@@ -479,7 +588,9 @@ def main():
     # 4. Register
     reg_parser = subparsers.add_parser("register", help="Register device")
     reg_parser.add_argument("--device-name")
-    reg_parser.add_argument("--username")
+    reg_parser.add_argument("--email")
+    reg_parser.add_argument("--password")
+    reg_parser.add_argument("--token", help="Pre-obtained JWT access token (alternative to email/password)")
     reg_parser.add_argument("--registration-key")
     reg_parser.add_argument("--device-type", default="other")
     reg_parser.add_argument("--api-url")
@@ -492,7 +603,14 @@ def main():
     act_parser.add_argument("--device-type", help="Device type (optional)")
     act_parser.add_argument("--api-url", help="Override API URL")
 
-    # 6. Run
+    # 6. Install Deps (binary only, no venv creation)
+    subparsers.add_parser("install-deps", help="Download llama.cpp server binary")
+
+    # 7. Update
+    update_parser = subparsers.add_parser("update", help="Pull latest code and update dependencies")
+    update_parser.add_argument("--branch", default=DEFAULT_BRANCH)
+
+    # 8. Run
     run_parser = subparsers.add_parser("run", help="Run agent")
     run_parser.add_argument("--api-url")
 
@@ -513,12 +631,21 @@ def main():
         reset(hard=args.hard)
         return
 
+    elif args.command == "install-deps":
+        install_deps_from_source()
+        return
+
+    elif args.command == "update":
+        update(PROJECT_ROOT, args.branch)
+        return
+
     # Commands that REQUIRE the Virtual Env
     ensure_venv_execution()
 
     if args.command == "register":
-        if not all([args.device_name, args.username, args.registration_key]):
-            print("❌ Error: Missing required arguments (name, username, key).")
+        identity_provided = args.token or args.email
+        if not args.device_name or not args.registration_key or not identity_provided:
+            print("❌ Error: Missing required arguments (name, registration-key, and email or token).")
             sys.exit(1)
 
         cmd = [
@@ -526,8 +653,6 @@ def main():
             str(AGENT_SCRIPT),
             "--device-name",
             args.device_name,
-            "--username",
-            args.username,
             "--registration-key",
             args.registration_key,
             "--device-type",
@@ -535,6 +660,13 @@ def main():
             "--api-url",
             args.api_url if args.api_url else PROD_API_URL,
         ]
+        if args.token:
+            cmd += ["--token", args.token]
+        else:
+            cmd += ["--email", args.email]
+            if args.password:
+                cmd += ["--password", args.password]
+            # If no password, agent.py will prompt via getpass
         subprocess.run(cmd, check=True)
 
     elif args.command == "activate":
