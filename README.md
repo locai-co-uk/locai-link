@@ -30,7 +30,12 @@ curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install
 ```
 
 ## Prerequisites
-Often times these libraries are already installed on your system. If not, you will need to install them with your package manager.
+
+The following are required on your device before installing:
+
+- **git** — [git-scm.com](https://git-scm.com/) (used for installation and updates)
+
+The following libraries are optional and only needed for specific model types. Often they are already installed on your system — if not, install them with your package manager.
 
 If you are running audio classification in *Linux/macOS* you will need to install `libportaudio` with your package manager. For example:
 
