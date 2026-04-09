@@ -778,8 +778,8 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
 
         # Stop ModelServer if running
         try:
-            from link.utils import stop_process_tree
-            from link.utils import PROJECT_ROOT
+            from link.utils import PROJECT_ROOT, stop_process_tree
+
             pid_file = PROJECT_ROOT / "serving.pid"
             if pid_file.exists():
                 print("Stopping model server before update...")
@@ -972,7 +972,12 @@ def set_device_status(device_id, api_key, status):
     print(f"Setting device status to '{status}'...")
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    payload = {"status": status}
+    try:
+        agent_version = version("locai-link")
+    except PackageNotFoundError:
+        agent_version = "unknown"
+
+    payload = {"status": status, "agent_version": agent_version}
 
     # If going offline, also include a metrics dictionary to reset them
     if status == "offline":
