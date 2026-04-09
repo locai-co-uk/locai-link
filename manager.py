@@ -25,6 +25,13 @@ CONFIG_FILE = PROJECT_ROOT / "configs" / "agent_config.json"
 DEFAULT_REPO_URL = "https://github.com/locai-co-uk/locai-link.git"
 DEFAULT_BRANCH = "main"
 
+# Pinned llama.cpp release — update manually after vetting a new release.
+# Find release tags at: https://github.com/ggml-org/llama.cpp/releases
+LLAMA_CPP_RELEASE = "b8705"
+
+# Exit code the agent uses to signal "update and restart me"
+EXIT_CODE_UPDATE = 42
+
 # API Environments
 PROD_API_URL = "https://api.locai.co.uk/api/v1"
 
@@ -167,13 +174,13 @@ def install_deps_from_source():
 
     # 2. Fetch Release Info
     try:
-        print("Fetching latest release info...")
+        print(f"Fetching release info for llama.cpp {LLAMA_CPP_RELEASE}...")
         gh_token = os.environ.get("GITHUB_TOKEN")
         api_headers = {"Accept": "application/vnd.github+json"}
         if gh_token:
             api_headers["Authorization"] = f"Bearer {gh_token}"
         api_req = urllib.request.Request(
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+            f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{LLAMA_CPP_RELEASE}",
             headers=api_headers,
         )
         with urllib.request.urlopen(api_req) as response:
@@ -692,12 +699,20 @@ def main():
             print("❌ Error: Device not configured. Run 'register' first.")
             sys.exit(1)
 
-        # Only append --api-url if it was actually provided in the CLI
         cmd = [sys.executable, str(AGENT_SCRIPT)]
         if args.api_url:
             cmd.extend(["--api-url", args.api_url])
 
-        subprocess.run(cmd, check=True)
+        while True:
+            result = subprocess.run(cmd)
+            if result.returncode == EXIT_CODE_UPDATE:
+                print_step("OTA Update Requested")
+                update(PROJECT_ROOT, DEFAULT_BRANCH)
+                install_deps_from_source()
+                print("Restarting agent...")
+            else:
+                # Normal exit or crash — don't restart
+                sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

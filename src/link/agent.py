@@ -34,6 +34,9 @@ BASE_URL = None
 METRICS_INTERVAL_SECONDS = 30  # Interval for sending metrics
 COMMAND_POLL_INTERVAL_SECONDS = 10  # Interval for polling for commands
 
+# Exit code that signals manager.py to run an OTA update and restart the agent
+EXIT_CODE_UPDATE = 42
+
 
 # --- Error Tracking ---
 def _track_error(
@@ -764,6 +767,43 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
         os.kill(os.getpid(), signal.SIGINT)
         return link_logger.ok("Agent shutdown initiated.")
 
+    elif command_type == "update_agent":
+        print("OTA update command received. Preparing to update...")
+
+        device_id = config.get("device_id")
+        api_key_val = config.get("api_key") or api_key
+
+        # Report updating status to backend before we go down
+        set_device_status(device_id, api_key_val, "updating")
+
+        # Stop ModelServer if running
+        try:
+            from link.utils import PROJECT_ROOT, stop_process_tree
+
+            pid_file = PROJECT_ROOT / "serving.pid"
+            if pid_file.exists():
+                print("Stopping model server before update...")
+                stop_process_tree(pid_file, "Model Server")
+        except Exception as e:
+            print(f"Warning: Could not stop model server cleanly: {e}", file=sys.stderr)
+
+        # Stop any running inference processes
+        for model_name, proc_info in list(running_processes.items()):
+            proc = proc_info.get("process")
+            if proc and proc.poll() is None:
+                try:
+                    if os.name == "nt":
+                        psutil.Process(proc.pid).kill()
+                    else:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    proc.wait(timeout=5)
+                except Exception as e:
+                    print(f"Warning: Could not stop inference process '{model_name}': {e}", file=sys.stderr)
+        running_processes.clear()
+
+        print(f"Exiting with code {EXIT_CODE_UPDATE} — manager will update and restart.")
+        sys.exit(EXIT_CODE_UPDATE)
+
     else:
         return link_logger.fail(f"Unknown command type: {command_type}")
 
@@ -932,7 +972,12 @@ def set_device_status(device_id, api_key, status):
     print(f"Setting device status to '{status}'...")
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    payload = {"status": status}
+    try:
+        agent_version = version("locai-link")
+    except PackageNotFoundError:
+        agent_version = "unknown"
+
+    payload = {"status": status, "agent_version": agent_version}
 
     # If going offline, also include a metrics dictionary to reset them
     if status == "offline":
