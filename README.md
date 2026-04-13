@@ -159,6 +159,13 @@ uv run manager.py setup --extras dev
 
 When registering pass `--api-url "<your local url>"` if not using the production API.
 
+To test a specific branch end-to-end on a device using the one-liner, pass `--branch <name>` — the installer will clone that branch instead of `main`:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
+  --device-name "my-device" --email "you@email.com" --registration-key "KEY" --branch dev
+```
+
 ### Directory Structure
 manager.py: The entry point. Handles setup, venv management, and launching the agent.
 

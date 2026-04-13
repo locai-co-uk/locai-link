@@ -304,6 +304,18 @@ def get_local_version():
     return None
 
 
+def get_current_branch(repo_dir: Path):
+    """Returns the current git branch name, or None if it cannot be determined."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    branch = result.stdout.strip()
+    return branch if result.returncode == 0 and branch and branch != "HEAD" else None
+
+
 def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
     """Pulls the latest code from the remote, stashing any local changes.
 
@@ -314,6 +326,13 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
     if not command_exists("git"):
         print("❌ git is not installed — cannot check for updates.")
         return False
+
+    # Use the actual current branch rather than the default, so running
+    # install/update on a dev branch doesn't pull main into it.
+    current_branch = get_current_branch(repo_dir)
+    if current_branch and current_branch != branch:
+        print(f"Detected branch '{current_branch}' — updating from origin/{current_branch}.")
+        branch = current_branch
 
     # Fetch without merging so we can compare first
     subprocess.run(["git", "fetch", "origin", branch], cwd=repo_dir, check=True)
