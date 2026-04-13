@@ -972,12 +972,7 @@ def set_device_status(device_id, api_key, status):
     print(f"Setting device status to '{status}'...")
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    try:
-        agent_version = version("locai-link")
-    except PackageNotFoundError:
-        agent_version = "unknown"
-
-    payload = {"status": status, "agent_version": agent_version}
+    payload = {"status": status}
 
     # If going offline, also include a metrics dictionary to reset them
     if status == "offline":
