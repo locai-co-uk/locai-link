@@ -291,7 +291,7 @@ def setup(extras=None):
     print("\nSetup Complete.")
 
 
-def get_local_version() -> str | None:
+def get_local_version():
     """Reads the version string from pyproject.toml."""
     toml_path = PROJECT_ROOT / "pyproject.toml"
     if not toml_path.exists():
