@@ -773,8 +773,8 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
         device_id = config.get("device_id")
         api_key_val = config.get("api_key") or api_key
 
-        # Report updating status to backend before we go down
-        set_device_status(device_id, api_key_val, "updating")
+        # Report offline before going down — agent will come back online after update
+        set_device_status(device_id, api_key_val, "offline")
 
         # Stop ModelServer if running
         try:
@@ -1085,6 +1085,7 @@ def main():
                 sys.exit(1)
 
             print("✔ Registration complete. Configuration saved.")
+            set_device_status(device_id, api_key, "offline")
             sys.exit(0)  # STOP HERE
 
         # B. Existing Device Activation / Re-configuration
