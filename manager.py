@@ -407,7 +407,6 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
     if not command_exists("git"):
         install_git(required_for="updates")
 
-
     # Use the actual current branch rather than the default, so running
     # install/update on a dev branch doesn't pull main into it.
     current_branch = get_current_branch(repo_dir)
