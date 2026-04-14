@@ -84,7 +84,7 @@ def install_uv():
             if p.exists():
                 os.environ["PATH"] += os.pathsep + str(p)
     except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to install uv: {e}")
+        print(f"ERROR: Failed to install uv: {e}")
         sys.exit(1)
 
 
@@ -109,10 +109,10 @@ def ensure_venv_execution():
                 subprocess.run(args, check=True)
                 sys.exit(0)
         except OSError as e:
-            print(f"❌ Failed to switch to venv: {e}")
+            print(f"ERROR: Failed to switch to venv: {e}")
             sys.exit(1)
     else:
-        print("❌ Virtual environment not found.")
+        print("ERROR: Virtual environment not found.")
         print("Please run: python manager.py setup")
         sys.exit(1)
 
@@ -144,7 +144,7 @@ def install_git(required_for=None):
             install_cmd = ["sudo", "pacman", "-S", "--noconfirm", "git"]
             install_desc = "sudo pacman -S --noconfirm git"
         else:
-            print("❌ No supported package manager found (apt-get, dnf, pacman).")
+            print("ERROR: No supported package manager found (apt-get, dnf, pacman).")
             print("   Install git manually: https://git-scm.com/downloads")
             sys.exit(1)
 
@@ -156,12 +156,12 @@ def install_git(required_for=None):
             install_cmd = ["choco", "install", "git", "-y"]
             install_desc = "choco install git"
         else:
-            print("❌ No package manager found (winget, choco).")
+            print("ERROR: No package manager found (winget, choco).")
             print("   Install git from: https://git-scm.com/downloads/win")
             sys.exit(1)
 
     else:
-        print(f"❌ Cannot auto-install git on {system}.")
+        print(f"ERROR: Cannot auto-install git on {system}.")
         print("   Install git manually: https://git-scm.com/downloads")
         sys.exit(1)
 
@@ -178,14 +178,14 @@ def install_git(required_for=None):
     try:
         subprocess.run(install_cmd, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"❌ git installation failed: {e}")
+        print(f"ERROR: git installation failed: {e}")
         sys.exit(1)
 
     if not command_exists("git"):
-        print("❌ git still not found after installation. You may need to open a new terminal.")
+        print("ERROR: git still not found after installation. You may need to open a new terminal.")
         sys.exit(1)
 
-    print("✅ git installed successfully.")
+    print("OK: git installed successfully.")
 
 
 def install_cmake(required_for=None):
@@ -209,7 +209,7 @@ def install_cmake(required_for=None):
     try:
         subprocess.run(["uv", "pip", "install", "cmake"], env=env, cwd=PROJECT_ROOT, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"❌ cmake installation failed: {e}")
+        print(f"ERROR: cmake installation failed: {e}")
         sys.exit(1)
 
     # Add venv bin to PATH so cmake is usable immediately in this process
@@ -217,10 +217,10 @@ def install_cmake(required_for=None):
     os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
 
     if not command_exists("cmake"):
-        print("❌ cmake still not found after installation. Re-run this command.")
+        print("ERROR: cmake still not found after installation. Re-run this command.")
         sys.exit(1)
 
-    print("✅ cmake installed into .venv successfully.")
+    print("OK: cmake installed into .venv successfully.")
 
 
 def _detect_gpu_cmake_flags():
@@ -272,7 +272,7 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
     cached_tag = tag_file.read_text().strip() if tag_file.exists() else None
     binary_dest = bin_dir / binary_filename
     if binary_dest.exists() and cached_tag == tag:
-        print(f"✅ {display_name} already installed ({tag}) — skipping build.")
+        print(f"OK: {display_name} already installed ({tag}) — skipping build.")
         return
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -333,7 +333,7 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
         # Binary location varies by platform/generator — search recursively
         found = next(build_dir.rglob(binary_filename), None)
         if not found:
-            print(f"❌ {binary_filename} not found in build output.")
+            print(f"ERROR: {binary_filename} not found in build output.")
             sys.exit(1)
 
         shutil.copy2(found, binary_dest)
@@ -343,13 +343,13 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
         # Record the installed tag so future runs can skip the build
         tag_file.write_text(tag)
 
-        print(f"✅ {display_name} installed to {bin_dir}")
+        print(f"OK: {display_name} installed to {bin_dir}")
 
     except subprocess.CalledProcessError as e:
-        print(f"❌ Build failed (exit {e.returncode}).")
+        print(f"ERROR: Build failed (exit {e.returncode}).")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Failed to install {display_name}: {e}")
+        print(f"ERROR: Failed to install {display_name}: {e}")
         sys.exit(1)
 
 
@@ -501,7 +501,7 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
             text=True,
         )
         if stash_result.returncode != 0:
-            print("❌ Could not stash local changes. Aborting update to avoid data loss.")
+            print("ERROR: Could not stash local changes. Aborting update to avoid data loss.")
             print("   Resolve conflicts manually, then run: uv run manager.py update")
             return False
         stashed = True
@@ -518,7 +518,7 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
             text=True,
         )
         if pop_result.returncode != 0:
-            print("⚠️  Update succeeded but stash could not be re-applied cleanly.")
+            print("WARNING:  Update succeeded but stash could not be re-applied cleanly.")
             print("   Your changes are saved in git stash — run 'git stash show' to review.")
         else:
             print("Local changes re-applied successfully.")
@@ -530,7 +530,7 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
     subprocess.run(["uv", "pip", "install", "-e", "."], cwd=repo_dir, env=env, check=True)
 
     new_ver = get_local_version()
-    print(f"✅ Update complete{f' — now at v{new_ver}' if new_ver else ''}.")
+    print(f"OK: Update complete{f' — now at v{new_ver}' if new_ver else ''}.")
     return True
 
 
@@ -555,7 +555,7 @@ def install(args):
 
         user_input = input("Enter Target API URL: ").strip()
         if not user_input:
-            print("❌ Error: API URL is required when using --dev.")
+            print("ERROR: Error: API URL is required when using --dev.")
             sys.exit(1)
         target_api_url = user_input
         print(f"Selected Custom URL: {target_api_url}")
@@ -591,7 +591,7 @@ def install(args):
 
     local_manager = install_dir / "manager.py"
     if not local_manager.exists():
-        print("❌ Error: manager.py not found in target directory.")
+        print("ERROR: Error: manager.py not found in target directory.")
         sys.exit(1)
 
     # Interactive Inputs (only if not provided)
@@ -604,7 +604,7 @@ def install(args):
 
     identity_provided = args.token or args.email
     if not all([args.device_name, args.registration_key]) or not identity_provided:
-        print("❌ Error: Device name, registration key, and an identity (--email or --token) are required.")
+        print("ERROR: Error: Device name, registration key, and an identity (--email or --token) are required.")
         sys.exit(1)
 
     # Define helper to run commands inside the new repo
@@ -648,7 +648,7 @@ def install(args):
             print(f"\nInstallation complete. To run later:\n  cd {install_dir}\n  uv run manager.py run")
 
     except subprocess.CalledProcessError as e:
-        print(f"\n❌ Installation step failed (Exit Code: {e.returncode})")
+        print(f"\nERROR: Installation step failed (Exit Code: {e.returncode})")
         sys.exit(e.returncode)
 
 
@@ -801,7 +801,7 @@ def main():
     if args.command == "register":
         identity_provided = args.token or args.email
         if not args.device_name or not args.registration_key or not identity_provided:
-            print("❌ Error: Missing required arguments (name, registration-key, and email or token).")
+            print("ERROR: Error: Missing required arguments (name, registration-key, and email or token).")
             sys.exit(1)
 
         cmd = [
@@ -834,7 +834,7 @@ def main():
         elif args.registration_key:
             cmd.extend(["--registration-key", args.registration_key])
         else:
-            print("❌ Error: activate requires either --api-key or --registration-key")
+            print("ERROR: Error: activate requires either --api-key or --registration-key")
             sys.exit(1)
 
         if args.device_type:
@@ -845,7 +845,7 @@ def main():
 
     elif args.command == "run":
         if not CONFIG_FILE.exists():
-            print("❌ Error: Device not configured. Run 'register' first.")
+            print("ERROR: Error: Device not configured. Run 'register' first.")
             sys.exit(1)
 
         cmd = [sys.executable, str(AGENT_SCRIPT)]
@@ -872,7 +872,7 @@ if __name__ == "__main__":
         print("\nOperation cancelled by user.")
         sys.exit(0)
     except subprocess.CalledProcessError as e:
-        print(f"\n❌ Command execution failed (Exit Code: {e.returncode})")
+        print(f"\nERROR: Command execution failed (Exit Code: {e.returncode})")
 
         cmd_str = str(e.cmd)
         if "agent.py" in cmd_str:
@@ -884,6 +884,6 @@ if __name__ == "__main__":
 
         sys.exit(e.returncode)
     except Exception as e:
-        print(f"\n❌ An unexpected error occurred: {e}")
+        print(f"\nERROR: An unexpected error occurred: {e}")
         raise e
         sys.exit(1)
