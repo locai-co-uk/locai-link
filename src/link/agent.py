@@ -21,7 +21,7 @@ from rich import print
 import link.logger as logger
 from link.analytics import send_agent_error, send_model_downloaded
 from link.logger import link_logger
-from link.server import ModelServer
+from link.serving import ModelServer
 from link.utils import (
     AGENT_CONFIG_PATH,
     CONFIGS_DIR,

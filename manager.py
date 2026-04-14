@@ -2,15 +2,12 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import argparse
-import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
-import tarfile
-import urllib.request
-import zipfile
+import tempfile
 from pathlib import Path
 
 # --- Constants ---
@@ -28,6 +25,10 @@ DEFAULT_BRANCH = "main"
 # Pinned llama.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
 LLAMA_CPP_RELEASE = "b8705"
+
+# Pinned whisper.cpp release — update manually after vetting a new release.
+# Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
+WHISPER_CPP_RELEASE = "v1.8.4"
 
 # Exit code the agent uses to signal "update and restart me"
 EXIT_CODE_UPDATE = 42
@@ -113,155 +114,234 @@ def ensure_venv_execution():
         sys.exit(1)
 
 
-def install_deps_from_source():
-    """Downloads and installs the official llama.cpp binaries from GitHub Releases."""
-    print_step("Installing AI Inference Engine")
-
-    # Ensure bin directory exists
-    bin_dir = VENV_PATH / "bin-llama"
-    bin_dir.mkdir(parents=True, exist_ok=True)
+def install_git(required_for=None):
+    """Prompts to install git via the system package manager."""
+    context = f" to build {required_for}" if required_for else ""
+    print(f"\ngit is missing and required{context}.")
 
     system = platform.system()
-    machine = platform.machine()
-
-    # 1. Determine Asset
-    asset_keyword = ""
-    expected_ext = ""
 
     if system == "Darwin":
-        expected_ext = ".tar.gz"
-        if machine == "arm64":
-            asset_keyword = "macos-arm64"
+        if command_exists("brew"):
+            install_cmd = ["brew", "install", "git"]
+            install_desc = "brew install git"
         else:
-            asset_keyword = "macos-x64"
-
-    elif system == "Windows":
-        expected_ext = ".zip"
-        has_gpu = False
-        if command_exists("nvidia-smi"):
-            try:
-                res = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
-                if res.returncode == 0 and len(res.stdout.strip()) > 0:
-                    has_gpu = True
-            except Exception:
-                pass
-
-        if has_gpu:
-            print("NVIDIA GPU detected.")
-            asset_keyword = "bin-win-cuda-12"
-        else:
-            print("No GPU detected. Using CPU build.")
-            asset_keyword = "bin-win-cpu-x64"
+            print("   Install via Xcode Command Line Tools:  xcode-select --install")
+            print("   Or install Homebrew first: https://brew.sh")
+            sys.exit(1)
 
     elif system == "Linux":
-        expected_ext = ".tar.gz"
-
-        # Check for NVIDIA GPU
-        if command_exists("nvidia-smi"):
-            print("NVIDIA GPU detected.")
-            print("(Official CUDA binaries are not distributed for Linux due to driver compatibility)")
-            print("Switched target to **Vulkan** build (supports NVIDIA GPUs).")
-            asset_keyword = "bin-ubuntu-vulkan-x64"
+        if command_exists("apt-get"):
+            install_cmd = ["sudo", "apt-get", "install", "-y", "git"]
+            install_desc = "sudo apt-get install -y git"
+        elif command_exists("dnf"):
+            install_cmd = ["sudo", "dnf", "install", "-y", "git"]
+            install_desc = "sudo dnf install -y git"
+        elif command_exists("pacman"):
+            install_cmd = ["sudo", "pacman", "-S", "--noconfirm", "git"]
+            install_desc = "sudo pacman -S --noconfirm git"
         else:
-            print("No GPU detected. Using CPU build.")
-            asset_keyword = "bin-ubuntu-x64"
+            print("❌ No supported package manager found (apt-get, dnf, pacman).")
+            print("   Install git manually: https://git-scm.com/downloads")
+            sys.exit(1)
+
+    elif system == "Windows":
+        if command_exists("winget"):
+            install_cmd = ["winget", "install", "--id", "Git.Git", "-e", "--source", "winget"]
+            install_desc = "winget install --id Git.Git"
+        elif command_exists("choco"):
+            install_cmd = ["choco", "install", "git", "-y"]
+            install_desc = "choco install git"
+        else:
+            print("❌ No package manager found (winget, choco).")
+            print("   Install git from: https://git-scm.com/downloads/win")
+            sys.exit(1)
 
     else:
-        print(f"❌ Unsupported platform: {system} {machine}")
+        print(f"❌ Cannot auto-install git on {system}.")
+        print("   Install git manually: https://git-scm.com/downloads")
         sys.exit(1)
 
-    print(f"Targeting Release Asset: *{asset_keyword}*")
-
-    # 2. Fetch Release Info
+    print(f"This will run: {install_desc}")
     try:
-        print(f"Fetching release info for llama.cpp {LLAMA_CPP_RELEASE}...")
-        gh_token = os.environ.get("GITHUB_TOKEN")
-        api_headers = {"Accept": "application/vnd.github+json"}
-        if gh_token:
-            api_headers["Authorization"] = f"Bearer {gh_token}"
-        api_req = urllib.request.Request(
-            f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{LLAMA_CPP_RELEASE}",
-            headers=api_headers,
-        )
-        with urllib.request.urlopen(api_req) as response:
-            release_data = json.loads(response.read().decode())
+        confirm = input("Install git now? [Y/n] ").strip().lower()
+    except EOFError:
+        confirm = ""  # non-interactive — treat as yes
 
-        assets = release_data.get("assets", [])
-        download_url = None
-        asset_name = None
+    if confirm not in ("", "y", "yes"):
+        print("git installation skipped. Install it manually and re-run.")
+        sys.exit(0)
 
-        for asset in assets:
-            name = asset["name"]
-            if asset_keyword in name and name.endswith(expected_ext) and name.startswith("llama-"):
-                download_url = asset["browser_download_url"]
-                asset_name = name
-                break
+    try:
+        subprocess.run(install_cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ git installation failed: {e}")
+        sys.exit(1)
 
-        if not download_url:
-            print(f"❌ Could not find a suitable binary for {asset_keyword}")
-            # Fallback for Linux: If Vulkan is missing, try standard CPU
-            if "vulkan" in asset_keyword:
-                print("   Falling back to standard CPU build...")
-                fallback_keyword = "bin-ubuntu-x64"
-                for asset in assets:
-                    name = asset["name"]
-                    if fallback_keyword in name and name.endswith(expected_ext):
-                        download_url = asset["browser_download_url"]
-                        asset_name = name
-                        break
+    if not command_exists("git"):
+        print("❌ git still not found after installation. You may need to open a new terminal.")
+        sys.exit(1)
 
-            if not download_url:
+    print("✅ git installed successfully.")
+
+
+def install_cmake(required_for=None):
+    """Installs cmake into the project venv via uv pip."""
+    context = f" to build {required_for}" if required_for else ""
+    print(f"\ncmake is missing and required{context}.")
+    print("It can be installed into the project environment (.venv) via uv — no sudo required.")
+
+    try:
+        confirm = input("Install cmake now? [Y/n] ").strip().lower()
+    except EOFError:
+        confirm = ""  # non-interactive — treat as yes
+
+    if confirm not in ("", "y", "yes"):
+        print("cmake installation skipped. Install it manually and re-run.")
+        sys.exit(0)
+
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(VENV_PATH)
+
+    try:
+        subprocess.run(["uv", "pip", "install", "cmake"], env=env, cwd=PROJECT_ROOT, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ cmake installation failed: {e}")
+        sys.exit(1)
+
+    # Add venv bin to PATH so cmake is usable immediately in this process
+    venv_bin = VENV_PATH / ("Scripts" if platform.system() == "Windows" else "bin")
+    os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    if not command_exists("cmake"):
+        print("❌ cmake still not found after installation. Re-run this command.")
+        sys.exit(1)
+
+    print("✅ cmake installed into .venv successfully.")
+
+
+def _detect_gpu_cmake_flags():
+    """Returns cmake GPU-acceleration flags for the current machine."""
+    flags = []
+    if platform.system() == "Linux" and command_exists("nvidia-smi"):
+        try:
+            res = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                if command_exists("nvcc"):
+                    print("NVIDIA GPU + CUDA Toolkit detected — enabling CUDA.")
+                    flags.append("-DGGML_CUDA=ON")
+                else:
+                    print("NVIDIA GPU detected but CUDA Toolkit (nvcc) not found — building CPU-only.")
+                    print(
+                        "   To enable CUDA: install the CUDA Toolkit from https://developer.nvidia.com/cuda-downloads"
+                    )
+        except Exception:
+            pass
+    # macOS Metal is auto-detected by cmake on Apple Silicon — no flag needed
+    return flags
+
+
+def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir):
+    """Clone repo at tag, build one binary target with cmake, and install it to bin_dir."""
+    if not command_exists("git"):
+        install_git(required_for=display_name)
+
+    if not command_exists("cmake"):
+        install_cmake(required_for=display_name)
+
+    system = platform.system()
+    binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
+    cpu_count = os.cpu_count() or 2
+
+    print(f"Cloning {display_name} {tag}...")
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src_dir = Path(tmp_dir) / "src"
+            build_dir = src_dir / "build"
+
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", tag, repo_url, str(src_dir)],
+                check=True,
+            )
+
+            print("Configuring...")
+            subprocess.run(["cmake", "-B", str(build_dir)] + cmake_flags, cwd=str(src_dir), check=True)
+
+            print(f"Building {binary_name} with {cpu_count} cores (this may take a few minutes)...")
+            subprocess.run(
+                [
+                    "cmake",
+                    "--build",
+                    str(build_dir),
+                    "--config",
+                    "Release",
+                    "--target",
+                    binary_name,
+                    f"-j{cpu_count}",
+                ],
+                check=True,
+            )
+
+            # Binary location varies by platform/generator — search recursively
+            found = next(build_dir.rglob(binary_filename), None)
+            if not found:
+                print(f"❌ {binary_filename} not found in build output.")
                 sys.exit(1)
 
-        # 3. Download
-        dest_file = bin_dir / asset_name
-        print(f"Downloading {asset_name}...")
-        urllib.request.urlretrieve(download_url, dest_file)
+            dest = bin_dir / binary_filename
+            shutil.copy2(found, dest)
+            if system != "Windows":
+                dest.chmod(0o755)
 
-        # 4. Extract
-        print("Extracting...")
-        if dest_file.suffix == ".zip":
-            with zipfile.ZipFile(dest_file, "r") as zip_ref:
-                zip_ref.extractall(bin_dir)
+            print(f"✅ {display_name} installed to {bin_dir}")
 
-        elif dest_file.name.endswith(".tar.gz") or dest_file.suffix == ".tar":
-            with tarfile.open(dest_file, "r:*") as tar_ref:
-                tar_ref.extractall(bin_dir)
-
-        os.remove(dest_file)
-
-        # 5. Flatten & Cleanup (Critical for finding libs!)
-        print("Flattening directory structure...")
-        # Move EVERYTHING from subfolders to BIN_DIR root
-        for root, dirs, files in os.walk(bin_dir):
-            if Path(root) == bin_dir:
-                continue
-
-            for file in files:
-                src = Path(root) / file
-                dst = bin_dir / file
-                if not dst.exists():
-                    shutil.move(src, dst)
-
-        # Cleanup empty folders
-        for child in bin_dir.iterdir():
-            if child.is_dir() and child.name.startswith("llama-"):
-                try:
-                    shutil.rmtree(child)
-                except OSError:
-                    pass
-
-        # 6. Permissions
-        if system != "Windows":
-            print("Setting permissions...")
-            for f in bin_dir.glob("llama-*"):
-                f.chmod(0o755)
-
-        print(f"Inference Engine installed successfully in {bin_dir}")
-
-    except Exception as e:
-        print(f"❌ Failed to install Inference Engine: {e}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Build failed (exit {e.returncode}).")
         sys.exit(1)
+    except Exception as e:
+        print(f"❌ Failed to install {display_name}: {e}")
+        sys.exit(1)
+
+
+def install_llama_server():
+    """Builds and installs llama-server from llama.cpp source."""
+    print_step("Building LLM Inference Engine (llama.cpp)")
+    bin_dir = VENV_PATH / "bin-llama"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _cmake_build(
+        display_name="llama.cpp",
+        repo_url="https://github.com/ggml-org/llama.cpp.git",
+        tag=LLAMA_CPP_RELEASE,
+        cmake_flags=[
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DLLAMA_BUILD_TESTS=OFF",
+        ]
+        + _detect_gpu_cmake_flags(),
+        binary_name="llama-server",
+        bin_dir=bin_dir,
+    )
+
+
+def install_whisper_server():
+    """Builds and installs whisper-server from whisper.cpp source."""
+    print_step("Building Whisper Transcription Engine (whisper.cpp)")
+    bin_dir = VENV_PATH / "bin-whisper"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    _cmake_build(
+        display_name="whisper.cpp",
+        repo_url="https://github.com/ggml-org/whisper.cpp.git",
+        tag=WHISPER_CPP_RELEASE,
+        cmake_flags=[
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DWHISPER_BUILD_SERVER=ON",
+            "-DWHISPER_BUILD_EXAMPLES=ON",
+            "-DBUILD_SHARED_LIBS=OFF",
+        ]
+        + _detect_gpu_cmake_flags(),
+        binary_name="whisper-server",
+        bin_dir=bin_dir,
+    )
 
 
 # --- Main Commands ---
@@ -279,7 +359,8 @@ def setup(extras=None):
         print("Creating virtual environment...")
         subprocess.run(["uv", "venv", "--python", PYTHON_VERSION, ".venv"], cwd=PROJECT_ROOT, check=True)
 
-    install_deps_from_source()
+    install_llama_server()
+    install_whisper_server()
 
     print_step("Installing Project Dependencies")
     install_target = f"-e .[{extras}]" if extras else "-e ."
@@ -324,8 +405,8 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
     print_step("Checking for Updates")
 
     if not command_exists("git"):
-        print("❌ git is not installed — cannot check for updates.")
-        return False
+        install_git(required_for="updates")
+
 
     # Use the actual current branch rather than the default, so running
     # install/update on a dev branch doesn't pull main into it.
@@ -441,8 +522,7 @@ def install(args):
         is_fresh_clone = True
 
     if not command_exists("git"):
-        print("❌ Error: git is not installed.")
-        sys.exit(1)
+        install_git()
 
     if is_fresh_clone:
         if install_dir.exists():
@@ -630,7 +710,7 @@ def main():
     act_parser.add_argument("--api-url", help="Override API URL")
 
     # 6. Install Deps (binary only, no venv creation)
-    subparsers.add_parser("install-deps", help="Download llama.cpp server binary")
+    subparsers.add_parser("install-deps", help="Download/build llama-server and whisper-server binaries")
 
     # 7. Update
     update_parser = subparsers.add_parser("update", help="Pull latest code and update dependencies")
@@ -658,7 +738,8 @@ def main():
         return
 
     elif args.command == "install-deps":
-        install_deps_from_source()
+        install_llama_server()
+        install_whisper_server()
         return
 
     elif args.command == "update":
@@ -727,7 +808,8 @@ def main():
             if result.returncode == EXIT_CODE_UPDATE:
                 print_step("OTA Update Requested")
                 update(PROJECT_ROOT, DEFAULT_BRANCH)
-                install_deps_from_source()
+                install_llama_server()
+                install_whisper_server()
                 print("Restarting agent...")
             else:
                 # Normal exit or crash — don't restart

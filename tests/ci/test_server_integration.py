@@ -20,7 +20,7 @@ import psutil
 import pytest
 import requests
 
-from link.server import ModelServer
+from link.serving import ModelServer
 
 # -- Constants ----------------------------------------------------------------
 TEMP_DIR = Path(__file__).parent / "temp_models"

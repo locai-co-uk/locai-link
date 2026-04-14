@@ -17,6 +17,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 .benchmarks/
+.claude
 
 # Environment variables
 .env

@@ -37,7 +37,7 @@ def mock_paths(mocker):
     mock_models = mock_root / "models"
     mock_agent_cfg = mock_configs / "agent_config.json"
 
-    targets = ["link.utils", "link.agent", "link.server", "link.inference.dispatcher"]
+    targets = ["link.utils", "link.agent", "link.serving.base_server", "link.serving.llm_server", "link.serving.whisper_server", "link.inference.dispatcher"]
 
     for module in targets:
         mocker.patch(f"{module}.PROJECT_ROOT", mock_root, create=True)
