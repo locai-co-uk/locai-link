@@ -21,7 +21,7 @@ from rich import print
 import link.logger as logger
 from link.analytics import send_agent_error, send_model_downloaded
 from link.logger import link_logger
-from link.serving import ModelServer
+from link.serving import LLMServer, WhisperServer
 from link.utils import (
     AGENT_CONFIG_PATH,
     CONFIGS_DIR,
@@ -713,7 +713,11 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
         serving_model_id = payload.get("model_id")
         serving_device_id = config.get("device_id")
         try:
-            server = ModelServer(payload)
+            model_type = payload.get("model_type", "language_models")
+            if model_type == "audio_transcription":
+                server = WhisperServer(payload)
+            else:
+                server = LLMServer(payload)
 
             if not getattr(server, "is_valid", False) and not getattr(server, "is_running", lambda: False)():
                 msg = "Server initialization failed (check config/logs)."
@@ -752,7 +756,11 @@ def execute_command(command_obj, api_key, config) -> tuple[str, str]:
 
     elif command_type == "stop_serving":
         try:
-            server = ModelServer(payload)
+            model_type = payload.get("model_type", "language_models")
+            if model_type == "audio_transcription":
+                server = WhisperServer(payload)
+            else:
+                server = LLMServer(payload)
             server.stop()
             return link_logger.ok("Model Serving stopped.")
         except Exception as e:

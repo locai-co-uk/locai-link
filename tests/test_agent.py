@@ -85,13 +85,27 @@ def test_deploy_model(mocker, mock_paths, device_config):
 
 
 def test_execute_start_serving(mocker, mock_paths, device_config):
-    """Test start_serving command."""
-    mock_server_class = mocker.patch("link.agent.ModelServer")
+    """Test start_serving routes to LLMServer for language_models (the default)."""
+    mock_server_class = mocker.patch("link.agent.LLMServer")
     mock_instance = mock_server_class.return_value
     mock_instance.is_valid = True
     mock_instance.is_running.return_value = True
 
-    command = {"id": "c1", "data": {"command_type": "start_serving", "payload": {}}}
+    command = {"id": "c1", "data": {"command_type": "start_serving", "payload": {"model_type": "language_models"}}}
+
+    status, msg = agent.execute_command(command, "key", device_config)
+    assert status == "completed"
+    mock_instance.start.assert_called_once()
+
+
+def test_execute_start_serving_whisper(mocker, mock_paths, device_config):
+    """Test start_serving routes to WhisperServer for audio_transcription."""
+    mock_server_class = mocker.patch("link.agent.WhisperServer")
+    mock_instance = mock_server_class.return_value
+    mock_instance.is_valid = True
+    mock_instance.is_running.return_value = True
+
+    command = {"id": "c3", "data": {"command_type": "start_serving", "payload": {"model_type": "audio_transcription"}}}
 
     status, msg = agent.execute_command(command, "key", device_config)
     assert status == "completed"
@@ -99,11 +113,23 @@ def test_execute_start_serving(mocker, mock_paths, device_config):
 
 
 def test_execute_stop_serving(mocker, mock_paths, device_config):
-    """Test stop_serving command."""
-    mock_server_class = mocker.patch("link.agent.ModelServer")
+    """Test stop_serving routes to LLMServer for language_models (the default)."""
+    mock_server_class = mocker.patch("link.agent.LLMServer")
     mock_instance = mock_server_class.return_value
 
-    command = {"id": "c2", "data": {"command_type": "stop_serving", "payload": {}}}
+    command = {"id": "c2", "data": {"command_type": "stop_serving", "payload": {"model_type": "language_models"}}}
+
+    status, msg = agent.execute_command(command, "key", device_config)
+    assert status == "completed"
+    mock_instance.stop.assert_called_once()
+
+
+def test_execute_stop_serving_whisper(mocker, mock_paths, device_config):
+    """Test stop_serving routes to WhisperServer for audio_transcription."""
+    mock_server_class = mocker.patch("link.agent.WhisperServer")
+    mock_instance = mock_server_class.return_value
+
+    command = {"id": "c4", "data": {"command_type": "stop_serving", "payload": {"model_type": "audio_transcription"}}}
 
     status, msg = agent.execute_command(command, "key", device_config)
     assert status == "completed"

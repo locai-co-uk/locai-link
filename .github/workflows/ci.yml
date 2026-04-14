@@ -143,10 +143,8 @@ jobs:
         uv venv
         uv pip install -e ".[dev]"
 
-    - name: Install llama-server binary
+    - name: Build llama-server and whisper-server
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: uv run python manager.py install-deps
 
     - name: Run Smoke Tests

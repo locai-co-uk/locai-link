@@ -75,15 +75,18 @@ def test_server_lifecycle(server_binary):
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
     try:
         # Wait for server to become ready
         health_url = f"http://127.0.0.1:{TEST_PORT}/health"
-        deadline = time.time() + 60
+        deadline = time.time() + 120
         ready = False
         while time.time() < deadline:
+            if process.poll() is not None:
+                break  # process crashed — stop waiting
             try:
                 resp = requests.get(health_url, timeout=2)
                 if resp.status_code == 200:
@@ -93,7 +96,10 @@ def test_server_lifecycle(server_binary):
                 pass
             time.sleep(1)
 
-        assert ready, "Server did not become healthy within 60 seconds"
+        exit_code = process.poll()
+        if not ready and exit_code is not None:
+            assert False, f"Server crashed on startup (exit code {exit_code})"
+        assert ready, "Server did not become healthy within 120 seconds"
         print("[CI] Health check passed")
 
         # Send a chat completion
@@ -112,15 +118,20 @@ def test_server_lifecycle(server_binary):
         assert len(content) > 0, "Model returned an empty response"
 
     finally:
-        # Clean shutdown
+        # Clean shutdown — communicate() drains the pipe and waits for exit
         print("\n[CI] Stopping server...")
         pid = process.pid
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         try:
-            process.wait(timeout=10)
+            out, _ = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5)
+            out, _ = process.communicate()
+
+        if out:
+            tail = out[-3000:]
+            print(f"[CI] Server output:\n{tail}")
 
         time.sleep(1)
         assert not psutil.pid_exists(pid), "Server process did not exit cleanly"
