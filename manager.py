@@ -7,7 +7,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 # --- Constants ---
@@ -29,6 +28,10 @@ LLAMA_CPP_RELEASE = "b8705"
 # Pinned whisper.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
 WHISPER_CPP_RELEASE = "v1.8.4"
+
+# Persistent cmake build cache — survives between runs for incremental builds.
+# Lives inside .venv so it is cleaned up by `manager.py reset`.
+BUILD_CACHE_DIR = VENV_PATH / "build-cache"
 
 # Exit code the agent uses to signal "update and restart me"
 EXIT_CODE_UPDATE = 42
@@ -242,7 +245,12 @@ def _detect_gpu_cmake_flags():
 
 
 def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir):
-    """Clone repo at tag, build one binary target with cmake, and install it to bin_dir."""
+    """Clone repo at tag, build one binary target with cmake, and install it to bin_dir.
+
+    Uses a persistent build cache under .venv/build-cache/ so subsequent runs with
+    the same tag are skipped entirely, and tag-change rebuilds are incremental where
+    possible.  ccache and Ninja are used automatically when available.
+    """
     if not command_exists("git"):
         install_git(required_for=display_name)
 
@@ -253,47 +261,89 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
     binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
     cpu_count = os.cpu_count() or 2
 
-    print(f"Cloning {display_name} {tag}...")
-    try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            src_dir = Path(tmp_dir) / "src"
-            build_dir = src_dir / "build"
+    # Persistent per-project cache directory
+    safe_name = display_name.replace(" ", "_").replace(".", "_")
+    cache_dir = BUILD_CACHE_DIR / safe_name
+    src_dir = cache_dir / "src"
+    build_dir = cache_dir / "build"
+    tag_file = cache_dir / "tag"
 
+    # --- Early-exit: already installed at this exact tag ---
+    cached_tag = tag_file.read_text().strip() if tag_file.exists() else None
+    binary_dest = bin_dir / binary_filename
+    if binary_dest.exists() and cached_tag == tag:
+        print(f"✅ {display_name} already installed ({tag}) — skipping build.")
+        return
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # --- Source checkout ---
+        if cached_tag != tag and src_dir.exists():
+            print(f"Tag changed ({cached_tag} → {tag}) — re-cloning {display_name}...")
+            shutil.rmtree(src_dir)
+            if build_dir.exists():
+                shutil.rmtree(build_dir)
+
+        if not src_dir.exists():
+            print(f"Cloning {display_name} {tag}...")
             subprocess.run(
                 ["git", "clone", "--depth", "1", "--branch", tag, repo_url, str(src_dir)],
                 check=True,
             )
 
-            print("Configuring...")
-            subprocess.run(["cmake", "-B", str(build_dir)] + cmake_flags, cwd=str(src_dir), check=True)
+        # --- Build acceleration ---
+        configure_flags = list(cmake_flags)
 
-            print(f"Building {binary_name} with {cpu_count} cores (this may take a few minutes)...")
-            subprocess.run(
-                [
-                    "cmake",
-                    "--build",
-                    str(build_dir),
-                    "--config",
-                    "Release",
-                    "--target",
-                    binary_name,
-                    f"-j{cpu_count}",
-                ],
-                check=True,
-            )
+        # Ninja: faster dependency resolution than Make
+        if command_exists("ninja"):
+            configure_flags = ["-G", "Ninja"] + configure_flags
 
-            # Binary location varies by platform/generator — search recursively
-            found = next(build_dir.rglob(binary_filename), None)
-            if not found:
-                print(f"❌ {binary_filename} not found in build output.")
-                sys.exit(1)
+        # ccache: object-level compiler cache — big win on repeated/incremental builds
+        if command_exists("ccache"):
+            configure_flags += [
+                "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+            ]
 
-            dest = bin_dir / binary_filename
-            shutil.copy2(found, dest)
-            if system != "Windows":
-                dest.chmod(0o755)
+        # --- Configure ---
+        print("Configuring...")
+        subprocess.run(
+            ["cmake", "-S", str(src_dir), "-B", str(build_dir)] + configure_flags,
+            check=True,
+        )
 
-            print(f"✅ {display_name} installed to {bin_dir}")
+        # --- Build ---
+        print(f"Building {binary_name} with {cpu_count} cores (this may take a few minutes)...")
+        subprocess.run(
+            [
+                "cmake",
+                "--build",
+                str(build_dir),
+                "--config",
+                "Release",
+                "--target",
+                binary_name,
+                f"-j{cpu_count}",
+            ],
+            check=True,
+        )
+
+        # --- Install ---
+        # Binary location varies by platform/generator — search recursively
+        found = next(build_dir.rglob(binary_filename), None)
+        if not found:
+            print(f"❌ {binary_filename} not found in build output.")
+            sys.exit(1)
+
+        shutil.copy2(found, binary_dest)
+        if system != "Windows":
+            binary_dest.chmod(0o755)
+
+        # Record the installed tag so future runs can skip the build
+        tag_file.write_text(tag)
+
+        print(f"✅ {display_name} installed to {bin_dir}")
 
     except subprocess.CalledProcessError as e:
         print(f"❌ Build failed (exit {e.returncode}).")
