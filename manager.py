@@ -244,6 +244,42 @@ def _detect_gpu_cmake_flags():
     return flags
 
 
+def _copy_mingw_runtime_dlls(dest_dir: Path):
+    """Copy MinGW runtime DLLs alongside a freshly built Windows binary.
+
+    Windows DLL search checks the binary's own directory before PATH entries,
+    so placing the exact runtime versions used at compile time there prevents
+    STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) caused by an older system-level
+    DLL shadowing the MinGW one.
+    """
+    runtime_dlls = [
+        "libstdc++-6.dll",
+        "libgcc_s_seh-1.dll",
+        "libwinpthread-1.dll",
+    ]
+    # Prefer the directory of whichever gcc is on PATH (matches the compiler used),
+    # then fall back to common MinGW installation directories.
+    search_dirs = []
+    gcc = shutil.which("gcc")
+    if gcc:
+        search_dirs.append(Path(gcc).parent)
+    search_dirs += [
+        Path("C:/mingw64/bin"),
+        Path("C:/msys64/mingw64/bin"),
+        Path("C:/msys64/ucrt64/bin"),
+    ]
+
+    for dll_name in runtime_dlls:
+        for src_dir in search_dirs:
+            src = src_dir / dll_name
+            if src.exists():
+                dst = dest_dir / dll_name
+                if not dst.exists():
+                    shutil.copy2(src, dst)
+                    print(f"  Copied {dll_name} from {src_dir}")
+                break
+
+
 def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir):
     """Clone repo at tag, build one binary target with cmake, and install it to bin_dir.
 
@@ -272,6 +308,8 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
     cached_tag = tag_file.read_text().strip() if tag_file.exists() else None
     binary_dest = bin_dir / binary_filename
     if binary_dest.exists() and cached_tag == tag:
+        if system == "Windows":
+            _copy_mingw_runtime_dlls(bin_dir)  # idempotent — skips DLLs already present
         print(f"OK: {display_name} already installed ({tag}) — skipping build.")
         return
 
@@ -339,6 +377,8 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
         shutil.copy2(found, binary_dest)
         if system != "Windows":
             binary_dest.chmod(0o755)
+        else:
+            _copy_mingw_runtime_dlls(bin_dir)
 
         # Record the installed tag so future runs can skip the build
         tag_file.write_text(tag)
