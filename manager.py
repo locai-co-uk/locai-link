@@ -232,35 +232,21 @@ def _install_pip_tool(tool_name: str, pip_package: str, required_for: str | None
 
 
 def _install_windows_compiler():
-    """Installs MinGW-w64 (GCC) on Windows via choco or MSYS2/winget."""
-    if command_exists("choco"):
-        print("Installing MinGW-w64 via Chocolatey (this may take a few minutes)...")
-        try:
-            subprocess.run(["choco", "install", "mingw", "-y"], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: MinGW installation failed: {e}")
-            sys.exit(1)
-        # Choco shims land in its own bin dir; add it in case the PATH update hasn't propagated.
-        choco_bin = Path("C:/ProgramData/chocolatey/bin")
-        if choco_bin.exists():
-            os.environ["PATH"] = str(choco_bin) + os.pathsep + os.environ.get("PATH", "")
+    """Installs MinGW-w64 (GCC) on Windows.
 
-    elif command_exists("winget"):
+    Prefers winget because it can trigger a UAC elevation prompt itself.
+    Choco is tried as a fallback but requires the terminal to already be
+    running as Administrator — it has no UAC popup of its own.
+    """
+    if command_exists("winget"):
         print("Installing MSYS2 via winget (this may take a few minutes)...")
-        print("Note: You may be prompted for administrator permissions.")
+        print("Note: A User Account Control (UAC) prompt may appear — click Yes to continue.")
         try:
             subprocess.run(
                 [
-                    "winget",
-                    "install",
-                    "--id",
-                    "MSYS2.MSYS2",
-                    "-e",
-                    "--source",
-                    "winget",
-                    "--silent",
-                    "--accept-package-agreements",
-                    "--accept-source-agreements",
+                    "winget", "install", "--id", "MSYS2.MSYS2", "-e",
+                    "--source", "winget", "--silent",
+                    "--accept-package-agreements", "--accept-source-agreements",
                 ],
                 check=True,
             )
@@ -289,6 +275,20 @@ def _install_windows_compiler():
         gcc_bin = Path("C:/msys64/ucrt64/bin")
         if gcc_bin.exists():
             os.environ["PATH"] = str(gcc_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    elif command_exists("choco"):
+        print("Installing MinGW-w64 via Chocolatey (this may take a few minutes)...")
+        print("Note: Chocolatey requires an administrator terminal.")
+        result = subprocess.run(["choco", "install", "mingw", "-y"])
+        if result.returncode != 0:
+            print("ERROR: MinGW installation via Chocolatey failed.")
+            print("   Chocolatey requires administrator rights. Try one of:")
+            print("   - Re-run this setup from an Administrator command prompt or PowerShell.")
+            print("   - Or install MinGW-w64 manually: https://www.mingw-w64.org/downloads/")
+            sys.exit(1)
+        choco_bin = Path("C:/ProgramData/chocolatey/bin")
+        if choco_bin.exists():
+            os.environ["PATH"] = str(choco_bin) + os.pathsep + os.environ.get("PATH", "")
 
     else:
         print("ERROR: No package manager found (winget or choco).")
