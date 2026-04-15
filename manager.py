@@ -188,74 +188,80 @@ def install_git(required_for=None):
     print("OK: git installed successfully.")
 
 
-def install_ninja(required_for=None):
-    """Installs ninja into the project venv via uv pip."""
+def _venv_env() -> dict:
+    """Returns a copy of the environment with VIRTUAL_ENV set to the project venv."""
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(VENV_PATH)
+    return env
+
+
+def _add_venv_to_path():
+    """Prepends the venv's bin/Scripts directory to PATH for the current process."""
+    venv_bin = VENV_PATH / ("Scripts" if platform.system() == "Windows" else "bin")
+    os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
+
+
+def _install_pip_tool(tool_name: str, pip_package: str, required_for: str | None = None):
+    """Installs a tool into the project venv via uv pip and adds it to PATH."""
     context = f" to build {required_for}" if required_for else ""
-    print(f"\nninja is missing and required{context}.")
+    print(f"\n{tool_name} is missing and required{context}.")
     print("It can be installed into the project environment (.venv) via uv — no sudo required.")
 
     try:
-        confirm = input("Install ninja now? [Y/n] ").strip().lower()
+        confirm = input(f"Install {tool_name} now? [Y/n] ").strip().lower()
     except EOFError:
         confirm = ""  # non-interactive — treat as yes
 
     if confirm not in ("", "y", "yes"):
-        print("ninja installation skipped. Install it manually and re-run.")
+        print(f"{tool_name} installation skipped. Install it manually and re-run.")
         sys.exit(0)
 
-    env = os.environ.copy()
-    env["VIRTUAL_ENV"] = str(VENV_PATH)
-
     try:
-        subprocess.run(["uv", "pip", "install", "ninja"], env=env, cwd=PROJECT_ROOT, check=True)
+        subprocess.run(["uv", "pip", "install", pip_package], env=_venv_env(), cwd=PROJECT_ROOT, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: ninja installation failed: {e}")
+        print(f"ERROR: {tool_name} installation failed: {e}")
         sys.exit(1)
 
-    # Add venv bin to PATH so ninja is usable immediately in this process
-    venv_bin = VENV_PATH / ("Scripts" if platform.system() == "Windows" else "bin")
-    os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
+    _add_venv_to_path()
 
-    if not command_exists("ninja"):
-        print("ERROR: ninja still not found after installation. Re-run this command.")
+    if not command_exists(tool_name):
+        print(f"ERROR: {tool_name} still not found after installation. Re-run this command.")
         sys.exit(1)
 
-    print("OK: ninja installed into .venv successfully.")
+    print(f"OK: {tool_name} installed into .venv successfully.")
 
 
-def install_cmake(required_for=None):
-    """Installs cmake into the project venv via uv pip."""
-    context = f" to build {required_for}" if required_for else ""
-    print(f"\ncmake is missing and required{context}.")
-    print("It can be installed into the project environment (.venv) via uv — no sudo required.")
+def _check_compiler():
+    """Verifies a C/C++ compiler is available; exits with instructions if not.
 
-    try:
-        confirm = input("Install cmake now? [Y/n] ").strip().lower()
-    except EOFError:
-        confirm = ""  # non-interactive — treat as yes
-
-    if confirm not in ("", "y", "yes"):
-        print("cmake installation skipped. Install it manually and re-run.")
-        sys.exit(0)
-
-    env = os.environ.copy()
-    env["VIRTUAL_ENV"] = str(VENV_PATH)
-
-    try:
-        subprocess.run(["uv", "pip", "install", "cmake"], env=env, cwd=PROJECT_ROOT, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: cmake installation failed: {e}")
-        sys.exit(1)
-
-    # Add venv bin to PATH so cmake is usable immediately in this process
-    venv_bin = VENV_PATH / ("Scripts" if platform.system() == "Windows" else "bin")
-    os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
-
-    if not command_exists("cmake"):
-        print("ERROR: cmake still not found after installation. Re-run this command.")
-        sys.exit(1)
-
-    print("OK: cmake installed into .venv successfully.")
+    cmake and ninja are build-system tools — they still need a compiler (GCC or MSVC)
+    to do the actual compilation.  On Linux/macOS this is almost always present; on
+    Windows it is commonly missing.
+    """
+    system = platform.system()
+    if system == "Windows":
+        if not command_exists("gcc") and not command_exists("cl"):
+            print("\nERROR: No C/C++ compiler found.")
+            print("   cmake and ninja are installed, but they need a compiler to build from source.")
+            print("   Install MinGW-w64 (GCC for Windows) via one of:")
+            print("")
+            print("   Option A — winget (recommended):")
+            print("     winget install --id MSYS2.MSYS2")
+            print("     # Then open the MSYS2 terminal and run:")
+            print("     pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc")
+            print("     # Then add C:\\msys64\\ucrt64\\bin to your PATH")
+            print("")
+            print("   Option B — direct MinGW-w64 installer:")
+            print("     https://www.mingw-w64.org/downloads/")
+            print("")
+            print("   After installing, open a new terminal and re-run: uv run manager.py setup")
+            sys.exit(1)
+    elif system == "Linux":
+        if not command_exists("gcc") and not command_exists("cc"):
+            print("\nERROR: No C/C++ compiler found.")
+            print("   Install build-essential:  sudo apt-get install -y build-essential")
+            sys.exit(1)
+    # macOS: Xcode CLT provides clang; cmake will error naturally if missing.
 
 
 def _detect_gpu_cmake_flags():
@@ -273,8 +279,8 @@ def _detect_gpu_cmake_flags():
                     print(
                         "   To enable CUDA: install the CUDA Toolkit from https://developer.nvidia.com/cuda-downloads"
                     )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 — non-critical GPU detection, never fail the build
+            _ = e
     # macOS Metal is auto-detected by cmake on Apple Silicon — no flag needed
     return flags
 
@@ -326,11 +332,13 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
         install_git(required_for=display_name)
 
     if not command_exists("cmake"):
-        install_cmake(required_for=display_name)
+        _install_pip_tool("cmake", "cmake", required_for=display_name)
 
     # On Windows, Ninja must be present — CMake's default (NMake) requires MSVC.
     if platform.system() == "Windows" and not command_exists("ninja"):
-        install_ninja(required_for=display_name)
+        _install_pip_tool("ninja", "ninja", required_for=display_name)
+
+    _check_compiler()
 
     system = platform.system()
     binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
@@ -473,6 +481,11 @@ def install_whisper_server():
     )
 
 
+def _effective_api_url(args) -> str:
+    """Returns the API URL from args, falling back to the production default."""
+    return args.api_url if args.api_url else PROD_API_URL
+
+
 # --- Main Commands ---
 
 
@@ -488,15 +501,20 @@ def setup(extras=None):
         print("Creating virtual environment...")
         subprocess.run(["uv", "venv", "--python", PYTHON_VERSION, ".venv"], cwd=PROJECT_ROOT, check=True)
 
+    # Install build tools (cmake, ninja) and all other deps before building from source.
+    # cmake and ninja must be on PATH before _cmake_build runs.
+    all_extras = f"build,{extras}" if extras else "build"
+    print_step("Installing Project Dependencies")
+    subprocess.run(
+        ["uv", "pip", "install", "-e", f".[{all_extras}]"],
+        cwd=PROJECT_ROOT,
+        env=_venv_env(),
+        check=True,
+    )
+    _add_venv_to_path()  # make cmake/ninja available to this process immediately
+
     install_llama_server()
     install_whisper_server()
-
-    print_step("Installing Project Dependencies")
-    install_target = f"-e .[{extras}]" if extras else "-e ."
-
-    env = os.environ.copy()
-    env["VIRTUAL_ENV"] = str(VENV_PATH)
-    subprocess.run(["uv", "pip", "install"] + install_target.split(), cwd=PROJECT_ROOT, env=env, check=True)
 
     print("\nSetup Complete.")
 
@@ -604,9 +622,7 @@ def update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
 
     # Re-install dependencies in case pyproject.toml changed
     print("Updating dependencies...")
-    env = os.environ.copy()
-    env["VIRTUAL_ENV"] = str(VENV_PATH)
-    subprocess.run(["uv", "pip", "install", "-e", "."], cwd=repo_dir, env=env, check=True)
+    subprocess.run(["uv", "pip", "install", "-e", "."], cwd=repo_dir, env=_venv_env(), check=True)
 
     new_ver = get_local_version()
     print(f"OK: Update complete{f' — now at v{new_ver}' if new_ver else ''}.")
@@ -634,7 +650,7 @@ def install(args):
 
         user_input = input("Enter Target API URL: ").strip()
         if not user_input:
-            print("ERROR: Error: API URL is required when using --dev.")
+            print("ERROR: API URL is required when using --dev.")
             sys.exit(1)
         target_api_url = user_input
         print(f"Selected Custom URL: {target_api_url}")
@@ -670,7 +686,7 @@ def install(args):
 
     local_manager = install_dir / "manager.py"
     if not local_manager.exists():
-        print("ERROR: Error: manager.py not found in target directory.")
+        print("ERROR: manager.py not found in target directory.")
         sys.exit(1)
 
     # Interactive Inputs (only if not provided)
@@ -683,7 +699,7 @@ def install(args):
 
     identity_provided = args.token or args.email
     if not all([args.device_name, args.registration_key]) or not identity_provided:
-        print("ERROR: Error: Device name, registration key, and an identity (--email or --token) are required.")
+        print("ERROR: Device name, registration key, and an identity (--email or --token) are required.")
         sys.exit(1)
 
     # Define helper to run commands inside the new repo
@@ -880,7 +896,7 @@ def main():
     if args.command == "register":
         identity_provided = args.token or args.email
         if not args.device_name or not args.registration_key or not identity_provided:
-            print("ERROR: Error: Missing required arguments (name, registration-key, and email or token).")
+            print("ERROR: Missing required arguments (name, registration-key, and email or token).")
             sys.exit(1)
 
         cmd = [
@@ -893,7 +909,7 @@ def main():
             "--device-type",
             args.device_type,
             "--api-url",
-            args.api_url if args.api_url else PROD_API_URL,
+            _effective_api_url(args),
         ]
         if args.token:
             cmd += ["--token", args.token]
@@ -913,18 +929,18 @@ def main():
         elif args.registration_key:
             cmd.extend(["--registration-key", args.registration_key])
         else:
-            print("ERROR: Error: activate requires either --api-key or --registration-key")
+            print("ERROR: activate requires either --api-key or --registration-key")
             sys.exit(1)
 
         if args.device_type:
             cmd.extend(["--device-type", args.device_type])
 
-        cmd.extend(["--api-url", args.api_url if args.api_url else PROD_API_URL])
+        cmd.extend(["--api-url", _effective_api_url(args)])
         subprocess.run(cmd, check=True)
 
     elif args.command == "run":
         if not CONFIG_FILE.exists():
-            print("ERROR: Error: Device not configured. Run 'register' first.")
+            print("ERROR: Device not configured. Run 'register' first.")
             sys.exit(1)
 
         cmd = [sys.executable, str(AGENT_SCRIPT)]
@@ -964,5 +980,4 @@ if __name__ == "__main__":
         sys.exit(e.returncode)
     except Exception as e:
         print(f"\nERROR: An unexpected error occurred: {e}")
-        raise e
-        sys.exit(1)
+        raise
