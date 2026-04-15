@@ -231,31 +231,101 @@ def _install_pip_tool(tool_name: str, pip_package: str, required_for: str | None
     print(f"OK: {tool_name} installed into .venv successfully.")
 
 
-def _check_compiler():
-    """Verifies a C/C++ compiler is available; exits with instructions if not.
-
-    cmake and ninja are build-system tools — they still need a compiler (GCC or MSVC)
-    to do the actual compilation.  On Linux/macOS this is almost always present; on
-    Windows it is commonly missing.
-    """
-    system = platform.system()
-    if system == "Windows":
-        if not command_exists("gcc") and not command_exists("cl"):
-            print("\nERROR: No C/C++ compiler found.")
-            print("   cmake and ninja are installed, but they need a compiler to build from source.")
-            print("   Install MinGW-w64 (GCC for Windows) via one of:")
-            print("")
-            print("   Option A — winget (recommended):")
-            print("     winget install --id MSYS2.MSYS2")
-            print("     # Then open the MSYS2 terminal and run:")
-            print("     pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc")
-            print("     # Then add C:\\msys64\\ucrt64\\bin to your PATH")
-            print("")
-            print("   Option B — direct MinGW-w64 installer:")
-            print("     https://www.mingw-w64.org/downloads/")
-            print("")
-            print("   After installing, open a new terminal and re-run: uv run manager.py setup")
+def _install_windows_compiler():
+    """Installs MinGW-w64 (GCC) on Windows via choco or MSYS2/winget."""
+    if command_exists("choco"):
+        print("Installing MinGW-w64 via Chocolatey (this may take a few minutes)...")
+        try:
+            subprocess.run(["choco", "install", "mingw", "-y"], check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: MinGW installation failed: {e}")
             sys.exit(1)
+        # Choco shims land in its own bin dir; add it in case the PATH update hasn't propagated.
+        choco_bin = Path("C:/ProgramData/chocolatey/bin")
+        if choco_bin.exists():
+            os.environ["PATH"] = str(choco_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    elif command_exists("winget"):
+        print("Installing MSYS2 via winget (this may take a few minutes)...")
+        print("Note: You may be prompted for administrator permissions.")
+        try:
+            subprocess.run(
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "MSYS2.MSYS2",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ],
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: MSYS2 installation failed: {e}")
+            sys.exit(1)
+
+        msys2_bash = Path("C:/msys64/usr/bin/bash.exe")
+        if not msys2_bash.exists():
+            print("ERROR: MSYS2 installed but not found at the expected location (C:\\msys64).")
+            print("   Open the MSYS2 terminal manually and run:")
+            print("     pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc")
+            print("   Then add C:\\msys64\\ucrt64\\bin to your PATH and re-run setup.")
+            sys.exit(1)
+
+        print("Installing GCC via pacman (this may take a few minutes)...")
+        try:
+            subprocess.run(
+                [str(msys2_bash), "-l", "-c", "pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc"],
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: GCC installation via pacman failed: {e}")
+            sys.exit(1)
+
+        gcc_bin = Path("C:/msys64/ucrt64/bin")
+        if gcc_bin.exists():
+            os.environ["PATH"] = str(gcc_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    else:
+        print("ERROR: No package manager found (winget or choco).")
+        print("   Install MinGW-w64 manually: https://www.mingw-w64.org/downloads/")
+        sys.exit(1)
+
+    if not command_exists("gcc"):
+        print("WARNING: gcc not found in PATH after installation.")
+        print("   Add the MinGW bin directory to your PATH and re-run: uv run manager.py setup")
+        sys.exit(1)
+
+    print("OK: MinGW-w64 (gcc) installed successfully.")
+
+
+def _check_compiler():
+    """Verifies a C/C++ compiler is available; prompts to install on Windows if not."""
+    system = platform.system()
+
+    if system == "Windows":
+        if command_exists("gcc") or command_exists("cl"):
+            return
+
+        print("\nA C/C++ compiler is required to build llama.cpp and whisper.cpp.")
+        print("MinGW-w64 (GCC for Windows) can be installed automatically.")
+
+        try:
+            confirm = input("Install MinGW-w64 now? [Y/n] ").strip().lower()
+        except EOFError:
+            confirm = ""
+
+        if confirm not in ("", "y", "yes"):
+            print("MinGW-w64 installation skipped.")
+            print("Install manually and re-run: uv run manager.py setup")
+            sys.exit(0)
+
+        _install_windows_compiler()
+
     elif system == "Linux":
         if not command_exists("gcc") and not command_exists("cc"):
             print("\nERROR: No C/C++ compiler found.")
