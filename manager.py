@@ -244,9 +244,16 @@ def _install_windows_compiler():
         try:
             subprocess.run(
                 [
-                    "winget", "install", "--id", "MSYS2.MSYS2", "-e",
-                    "--source", "winget", "--silent",
-                    "--accept-package-agreements", "--accept-source-agreements",
+                    "winget",
+                    "install",
+                    "--id",
+                    "MSYS2.MSYS2",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
                 ],
                 check=True,
             )
