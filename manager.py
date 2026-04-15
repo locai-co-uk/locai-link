@@ -7,6 +7,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 
 # --- Constants ---
@@ -23,13 +25,11 @@ DEFAULT_BRANCH = "main"
 
 # Pinned llama.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
-LLAMA_CPP_RELEASE = "b8705"
+LLAMA_CPP_RELEASE = "b8799"
 
-# Pinned whisper.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
 WHISPER_CPP_RELEASE = "v1.8.4"
 
-# Persistent cmake build cache — survives between runs for incremental builds.
 # Lives inside .venv so it is cleaned up by `manager.py reset`.
 BUILD_CACHE_DIR = VENV_PATH / "build-cache"
 
@@ -231,114 +231,100 @@ def _install_pip_tool(tool_name: str, pip_package: str, required_for: str | None
     print(f"OK: {tool_name} installed into .venv successfully.")
 
 
-def _install_windows_compiler():
-    """Installs MinGW-w64 (GCC) on Windows.
+def _prebuilt_url(project: str, tag: str) -> str | None:
+    """Returns the platform-appropriate prebuilt release URL, or None if unavailable.
 
-    Prefers winget because it can trigger a UAC elevation prompt itself.
-    Choco is tried as a fallback but requires the terminal to already be
-    running as Administrator — it has no UAC popup of its own.
+    llama.cpp release assets:  https://github.com/ggml-org/llama.cpp/releases
+    whisper.cpp release assets: https://github.com/ggml-org/whisper.cpp/releases
     """
-    if command_exists("winget"):
-        print("Installing MSYS2 via winget (this may take a few minutes)...")
-        print("Note: A User Account Control (UAC) prompt may appear — click Yes to continue.")
-        try:
-            subprocess.run(
-                [
-                    "winget",
-                    "install",
-                    "--id",
-                    "MSYS2.MSYS2",
-                    "-e",
-                    "--source",
-                    "winget",
-                    "--silent",
-                    "--accept-package-agreements",
-                    "--accept-source-agreements",
-                ],
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: MSYS2 installation failed: {e}")
-            sys.exit(1)
-
-        msys2_bash = Path("C:/msys64/usr/bin/bash.exe")
-        if not msys2_bash.exists():
-            print("ERROR: MSYS2 installed but not found at the expected location (C:\\msys64).")
-            print("   Open the MSYS2 terminal manually and run:")
-            print("     pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc")
-            print("   Then add C:\\msys64\\ucrt64\\bin to your PATH and re-run setup.")
-            sys.exit(1)
-
-        print("Installing GCC via pacman (this may take a few minutes)...")
-        try:
-            subprocess.run(
-                [str(msys2_bash), "-l", "-c", "pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc"],
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: GCC installation via pacman failed: {e}")
-            sys.exit(1)
-
-        gcc_bin = Path("C:/msys64/ucrt64/bin")
-        if gcc_bin.exists():
-            os.environ["PATH"] = str(gcc_bin) + os.pathsep + os.environ.get("PATH", "")
-
-    elif command_exists("choco"):
-        print("Installing MinGW-w64 via Chocolatey (this may take a few minutes)...")
-        print("Note: Chocolatey requires an administrator terminal.")
-        result = subprocess.run(["choco", "install", "mingw", "-y"])
-        if result.returncode != 0:
-            print("ERROR: MinGW installation via Chocolatey failed.")
-            print("   Chocolatey requires administrator rights. Try one of:")
-            print("   - Re-run this setup from an Administrator command prompt or PowerShell.")
-            print("   - Or install MinGW-w64 manually: https://www.mingw-w64.org/downloads/")
-            sys.exit(1)
-        choco_bin = Path("C:/ProgramData/chocolatey/bin")
-        if choco_bin.exists():
-            os.environ["PATH"] = str(choco_bin) + os.pathsep + os.environ.get("PATH", "")
-
-    else:
-        print("ERROR: No package manager found (winget or choco).")
-        print("   Install MinGW-w64 manually: https://www.mingw-w64.org/downloads/")
-        sys.exit(1)
-
-    if not command_exists("gcc"):
-        print("WARNING: gcc not found in PATH after installation.")
-        print("   Add the MinGW bin directory to your PATH and re-run: uv run manager.py setup")
-        sys.exit(1)
-
-    print("OK: MinGW-w64 (gcc) installed successfully.")
-
-
-def _check_compiler():
-    """Verifies a C/C++ compiler is available; prompts to install on Windows if not."""
     system = platform.system()
+    machine = platform.machine().lower()
+    is_arm = machine in ("arm64", "aarch64")
 
-    if system == "Windows":
-        if command_exists("gcc") or command_exists("cl"):
-            return
+    if project == "llama":
+        base = f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}"
+        if system == "Windows":
+            return f"{base}/llama-{tag}-bin-win-avx2-x64.zip"
+        elif system == "Darwin":
+            arch = "arm64" if is_arm else "x64"
+            return f"{base}/llama-{tag}-bin-macos-{arch}.zip"
+        elif system == "Linux":
+            return f"{base}/llama-{tag}-bin-ubuntu-x64.zip"
 
-        print("\nA C/C++ compiler is required to build llama.cpp and whisper.cpp.")
-        print("MinGW-w64 (GCC for Windows) can be installed automatically.")
+    elif project == "whisper":
+        base = f"https://github.com/ggml-org/whisper.cpp/releases/download/{tag}"
+        if system == "Windows":
+            return f"{base}/whisper-cpp-{tag}-bin-win-x64.zip"
+        elif system == "Darwin":
+            arch = "arm64" if is_arm else "x64"
+            return f"{base}/whisper-cpp-{tag}-bin-macos-{arch}.zip"
+        elif system == "Linux":
+            return f"{base}/whisper-cpp-{tag}-bin-ubuntu-x64.zip"
 
-        try:
-            confirm = input("Install MinGW-w64 now? [Y/n] ").strip().lower()
-        except EOFError:
-            confirm = ""
+    return None
 
-        if confirm not in ("", "y", "yes"):
-            print("MinGW-w64 installation skipped.")
-            print("Install manually and re-run: uv run manager.py setup")
-            sys.exit(0)
 
-        _install_windows_compiler()
+def _install_prebuilt(display_name: str, url: str, binary_name: str, bin_dir: Path, tag: str) -> bool:
+    """Download a prebuilt release zip and install the binary (plus any DLLs) to bin_dir.
 
-    elif system == "Linux":
-        if not command_exists("gcc") and not command_exists("cc"):
-            print("\nERROR: No C/C++ compiler found.")
-            print("   Install build-essential:  sudo apt-get install -y build-essential")
-            sys.exit(1)
-    # macOS: Xcode CLT provides clang; cmake will error naturally if missing.
+    Returns True on success, False on download/extraction failure so the caller
+    can fall back to a cmake build.  Uses a tag file to skip re-download when
+    already at the correct version.
+    """
+    system = platform.system()
+    binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
+    binary_dest = bin_dir / binary_filename
+
+    # --- Early-exit: already at this tag ---
+    safe_name = display_name.replace(" ", "_").replace(".", "_")
+    cache_dir = BUILD_CACHE_DIR / safe_name
+    tag_file = cache_dir / "tag"
+    if binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag:
+        print(f"OK: {display_name} already installed ({tag}) — skipping download.")
+        return True
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = cache_dir / url.split("/")[-1]
+
+    print(f"Downloading {display_name} prebuilt binary...")
+    try:
+        urllib.request.urlretrieve(url, archive_path)
+    except Exception as e:
+        print(f"WARNING: Download failed: {e}")
+        archive_path.unlink(missing_ok=True)
+        return False
+
+    print("Extracting...")
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            names = zf.namelist()
+
+            binary_matches = [n for n in names if Path(n).name.lower() == binary_filename.lower()]
+            if not binary_matches:
+                print(f"WARNING: {binary_filename} not found in archive.")
+                return False
+
+            # Extract the binary itself
+            to_extract = set(binary_matches)
+            # On Windows, pull all DLLs too (ggml.dll, llama.dll, etc.)
+            if system == "Windows":
+                to_extract |= {n for n in names if n.lower().endswith(".dll")}
+
+            for member in to_extract:
+                dest = bin_dir / Path(member).name
+                dest.write_bytes(zf.read(member))
+
+            if system != "Windows":
+                binary_dest.chmod(0o755)
+    except Exception as e:
+        print(f"WARNING: Extraction failed: {e}")
+        return False
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+    tag_file.write_text(tag)
+    print(f"OK: {display_name} installed to {bin_dir}")
+    return True
 
 
 def _detect_gpu_cmake_flags():
@@ -362,42 +348,6 @@ def _detect_gpu_cmake_flags():
     return flags
 
 
-def _copy_mingw_runtime_dlls(dest_dir: Path):
-    """Copy MinGW runtime DLLs alongside a freshly built Windows binary.
-
-    Windows DLL search checks the binary's own directory before PATH entries,
-    so placing the exact runtime versions used at compile time there prevents
-    STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) caused by an older system-level
-    DLL shadowing the MinGW one.
-    """
-    runtime_dlls = [
-        "libstdc++-6.dll",
-        "libgcc_s_seh-1.dll",
-        "libwinpthread-1.dll",
-    ]
-    # Prefer the directory of whichever gcc is on PATH (matches the compiler used),
-    # then fall back to common MinGW installation directories.
-    search_dirs = []
-    gcc = shutil.which("gcc")
-    if gcc:
-        search_dirs.append(Path(gcc).parent)
-    search_dirs += [
-        Path("C:/mingw64/bin"),
-        Path("C:/msys64/mingw64/bin"),
-        Path("C:/msys64/ucrt64/bin"),
-    ]
-
-    for dll_name in runtime_dlls:
-        for src_dir in search_dirs:
-            src = src_dir / dll_name
-            if src.exists():
-                dst = dest_dir / dll_name
-                if not dst.exists():
-                    shutil.copy2(src, dst)
-                    print(f"  Copied {dll_name} from {src_dir}")
-                break
-
-
 def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir):
     """Clone repo at tag, build one binary target with cmake, and install it to bin_dir.
 
@@ -411,11 +361,8 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
     if not command_exists("cmake"):
         _install_pip_tool("cmake", "cmake", required_for=display_name)
 
-    # On Windows, Ninja must be present — CMake's default (NMake) requires MSVC.
-    if platform.system() == "Windows" and not command_exists("ninja"):
+    if not command_exists("ninja"):
         _install_pip_tool("ninja", "ninja", required_for=display_name)
-
-    _check_compiler()
 
     system = platform.system()
     binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
@@ -432,8 +379,6 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
     cached_tag = tag_file.read_text().strip() if tag_file.exists() else None
     binary_dest = bin_dir / binary_filename
     if binary_dest.exists() and cached_tag == tag:
-        if system == "Windows":
-            _copy_mingw_runtime_dlls(bin_dir)  # idempotent — skips DLLs already present
         print(f"OK: {display_name} already installed ({tag}) — skipping build.")
         return
 
@@ -466,15 +411,6 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
             configure_flags += [
                 "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
                 "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
-            ]
-
-        # On Windows with MinGW, GCC does not define _WIN32_WINNT by default.
-        # cpp-httplib (vendored in llama.cpp/whisper.cpp) requires Windows 10+ (0x0A00).
-        if system == "Windows":
-            win_flags = "-D_WIN32_WINNT=0x0A00"
-            configure_flags += [
-                f"-DCMAKE_C_FLAGS={win_flags}",
-                f"-DCMAKE_CXX_FLAGS={win_flags}",
             ]
 
         # --- Configure ---
@@ -510,8 +446,6 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
         shutil.copy2(found, binary_dest)
         if system != "Windows":
             binary_dest.chmod(0o755)
-        else:
-            _copy_mingw_runtime_dlls(bin_dir)
 
         # Record the installed tag so future runs can skip the build
         tag_file.write_text(tag)
@@ -527,10 +461,21 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
 
 
 def install_llama_server():
-    """Builds and installs llama-server from llama.cpp source."""
-    print_step("Building LLM Inference Engine (llama.cpp)")
+    """Installs llama-server: prebuilt on Windows, prebuilt-or-source on Linux/macOS."""
+    print_step("Installing LLM Inference Engine (llama.cpp)")
     bin_dir = VENV_PATH / "bin-llama"
     bin_dir.mkdir(parents=True, exist_ok=True)
+
+    url = _prebuilt_url("llama", LLAMA_CPP_RELEASE)
+    if url:
+        if _install_prebuilt("llama.cpp", url, "llama-server", bin_dir, LLAMA_CPP_RELEASE):
+            return
+        if platform.system() == "Windows":
+            print("ERROR: Failed to download llama.cpp prebuilt.")
+            print(f"   Download manually: https://github.com/ggml-org/llama.cpp/releases/tag/{LLAMA_CPP_RELEASE}")
+            sys.exit(1)
+        print("Prebuilt download failed — falling back to building from source.")
+
     _cmake_build(
         display_name="llama.cpp",
         repo_url="https://github.com/ggml-org/llama.cpp.git",
@@ -547,10 +492,21 @@ def install_llama_server():
 
 
 def install_whisper_server():
-    """Builds and installs whisper-server from whisper.cpp source."""
-    print_step("Building Whisper Transcription Engine (whisper.cpp)")
+    """Installs whisper-server: prebuilt on Windows, prebuilt-or-source on Linux/macOS."""
+    print_step("Installing Whisper Transcription Engine (whisper.cpp)")
     bin_dir = VENV_PATH / "bin-whisper"
     bin_dir.mkdir(parents=True, exist_ok=True)
+
+    url = _prebuilt_url("whisper", WHISPER_CPP_RELEASE)
+    if url:
+        if _install_prebuilt("whisper.cpp", url, "whisper-server", bin_dir, WHISPER_CPP_RELEASE):
+            return
+        if platform.system() == "Windows":
+            print("ERROR: Failed to download whisper.cpp prebuilt.")
+            print(f"   Download manually: https://github.com/ggml-org/whisper.cpp/releases/tag/{WHISPER_CPP_RELEASE}")
+            sys.exit(1)
+        print("Prebuilt download failed — falling back to building from source.")
+
     _cmake_build(
         display_name="whisper.cpp",
         repo_url="https://github.com/ggml-org/whisper.cpp.git",
