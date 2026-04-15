@@ -188,6 +188,41 @@ def install_git(required_for=None):
     print("OK: git installed successfully.")
 
 
+def install_ninja(required_for=None):
+    """Installs ninja into the project venv via uv pip."""
+    context = f" to build {required_for}" if required_for else ""
+    print(f"\nninja is missing and required{context}.")
+    print("It can be installed into the project environment (.venv) via uv — no sudo required.")
+
+    try:
+        confirm = input("Install ninja now? [Y/n] ").strip().lower()
+    except EOFError:
+        confirm = ""  # non-interactive — treat as yes
+
+    if confirm not in ("", "y", "yes"):
+        print("ninja installation skipped. Install it manually and re-run.")
+        sys.exit(0)
+
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(VENV_PATH)
+
+    try:
+        subprocess.run(["uv", "pip", "install", "ninja"], env=env, cwd=PROJECT_ROOT, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: ninja installation failed: {e}")
+        sys.exit(1)
+
+    # Add venv bin to PATH so ninja is usable immediately in this process
+    venv_bin = VENV_PATH / ("Scripts" if platform.system() == "Windows" else "bin")
+    os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
+
+    if not command_exists("ninja"):
+        print("ERROR: ninja still not found after installation. Re-run this command.")
+        sys.exit(1)
+
+    print("OK: ninja installed into .venv successfully.")
+
+
 def install_cmake(required_for=None):
     """Installs cmake into the project venv via uv pip."""
     context = f" to build {required_for}" if required_for else ""
@@ -292,6 +327,10 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
 
     if not command_exists("cmake"):
         install_cmake(required_for=display_name)
+
+    # On Windows, Ninja must be present — CMake's default (NMake) requires MSVC.
+    if platform.system() == "Windows" and not command_exists("ninja"):
+        install_ninja(required_for=display_name)
 
     system = platform.system()
     binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
