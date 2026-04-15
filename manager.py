@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -201,65 +202,86 @@ def _add_venv_to_path():
     os.environ["PATH"] = str(venv_bin) + os.pathsep + os.environ.get("PATH", "")
 
 
-def _install_pip_tool(tool_name: str, pip_package: str, required_for: str | None = None):
-    """Installs a tool into the project venv via uv pip and adds it to PATH."""
-    context = f" to build {required_for}" if required_for else ""
-    print(f"\n{tool_name} is missing and required{context}.")
-    print("It can be installed into the project environment (.venv) via uv — no sudo required.")
+def _detect_cuda_version() -> tuple[int, int] | None:
+    """Returns (major, minor) of the installed CUDA toolkit, or None if not found.
 
-    try:
-        confirm = input(f"Install {tool_name} now? [Y/n] ").strip().lower()
-    except EOFError:
-        confirm = ""  # non-interactive — treat as yes
+    Tries nvcc first (exact toolkit version), then nvidia-smi (driver-reported version).
+    """
+    if command_exists("nvcc"):
+        try:
+            out = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout
+            # "Cuda compilation tools, release 12.4, V12.4.131"
+            for line in out.splitlines():
+                if "release" in line:
+                    token = line.split("release")[1].strip().split(",")[0].strip()
+                    major, minor = token.split(".")[:2]
+                    return (int(major), int(minor))
+        except Exception:
+            pass
 
-    if confirm not in ("", "y", "yes"):
-        print(f"{tool_name} installation skipped. Install it manually and re-run.")
-        sys.exit(0)
+    if command_exists("nvidia-smi"):
+        try:
+            out = subprocess.run(["nvidia-smi"], capture_output=True, text=True).stdout
+            # "| CUDA Version: 12.4  |"
+            for line in out.splitlines():
+                if "CUDA Version:" in line:
+                    token = line.split("CUDA Version:")[1].strip().split()[0]
+                    major, minor = token.split(".")[:2]
+                    return (int(major), int(minor))
+        except Exception:
+            pass
 
-    try:
-        subprocess.run(["uv", "pip", "install", pip_package], env=_venv_env(), cwd=PROJECT_ROOT, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: {tool_name} installation failed: {e}")
-        sys.exit(1)
-
-    _add_venv_to_path()
-
-    if not command_exists(tool_name):
-        print(f"ERROR: {tool_name} still not found after installation. Re-run this command.")
-        sys.exit(1)
-
-    print(f"OK: {tool_name} installed into .venv successfully.")
+    return None
 
 
 def _prebuilt_url(project: str, tag: str) -> str | None:
     """Returns the platform-appropriate prebuilt release URL, or None if unavailable.
 
+    CUDA is detected automatically and used when available.
     llama.cpp release assets:  https://github.com/ggml-org/llama.cpp/releases
     whisper.cpp release assets: https://github.com/ggml-org/whisper.cpp/releases
     """
     system = platform.system()
     machine = platform.machine().lower()
     is_arm = machine in ("arm64", "aarch64")
+    cuda = _detect_cuda_version()
 
     if project == "llama":
         base = f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}"
         if system == "Windows":
-            return f"{base}/llama-{tag}-bin-win-avx2-x64.zip"
+            if cuda:
+                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
+                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
+                return f"{base}/llama-{tag}-bin-win-{cuda_tag}-x64.zip"
+            return f"{base}/llama-{tag}-bin-win-cpu-x64.zip"
         elif system == "Darwin":
             arch = "arm64" if is_arm else "x64"
-            return f"{base}/llama-{tag}-bin-macos-{arch}.zip"
+            return f"{base}/llama-{tag}-bin-macos-{arch}.tar.gz"
         elif system == "Linux":
-            return f"{base}/llama-{tag}-bin-ubuntu-x64.zip"
+            if cuda:
+                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
+                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
+                return f"{base}/llama-{tag}-bin-ubuntu-{cuda_tag}-x64.tar.gz"
+            arch = "arm64" if is_arm else "x64"
+            return f"{base}/llama-{tag}-bin-ubuntu-{arch}.tar.gz"
 
     elif project == "whisper":
         base = f"https://github.com/ggml-org/whisper.cpp/releases/download/{tag}"
         if system == "Windows":
+            if cuda:
+                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
+                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
+                return f"{base}/whisper-cpp-{tag}-bin-win-{cuda_tag}-x64.zip"
             return f"{base}/whisper-cpp-{tag}-bin-win-x64.zip"
         elif system == "Darwin":
             arch = "arm64" if is_arm else "x64"
-            return f"{base}/whisper-cpp-{tag}-bin-macos-{arch}.zip"
+            return f"{base}/whisper-cpp-{tag}-bin-macos-{arch}.tar.gz"
         elif system == "Linux":
-            return f"{base}/whisper-cpp-{tag}-bin-ubuntu-x64.zip"
+            if cuda:
+                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
+                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
+                return f"{base}/whisper-cpp-{tag}-bin-ubuntu-{cuda_tag}-x64.tar.gz"
+            return f"{base}/whisper-cpp-{tag}-bin-ubuntu-x64.tar.gz"
 
     return None
 
@@ -296,26 +318,37 @@ def _install_prebuilt(display_name: str, url: str, binary_name: str, bin_dir: Pa
 
     print("Extracting...")
     try:
-        with zipfile.ZipFile(archive_path, "r") as zf:
-            names = zf.namelist()
-
-            binary_matches = [n for n in names if Path(n).name.lower() == binary_filename.lower()]
-            if not binary_matches:
-                print(f"WARNING: {binary_filename} not found in archive.")
-                return False
-
-            # Extract the binary itself
-            to_extract = set(binary_matches)
-            # On Windows, pull all DLLs too (ggml.dll, llama.dll, etc.)
-            if system == "Windows":
-                to_extract |= {n for n in names if n.lower().endswith(".dll")}
-
-            for member in to_extract:
-                dest = bin_dir / Path(member).name
-                dest.write_bytes(zf.read(member))
-
-            if system != "Windows":
-                binary_dest.chmod(0o755)
+        is_targz = archive_path.name.endswith(".tar.gz")
+        if is_targz:
+            with tarfile.open(archive_path, "r:gz") as tf:
+                members = tf.getmembers()
+                names = [m.name for m in members]
+                binary_matches = [n for n in names if Path(n).name.lower() == binary_filename.lower()]
+                if not binary_matches:
+                    print(f"WARNING: {binary_filename} not found in archive.")
+                    return False
+                to_extract = set(binary_matches)
+                for m in members:
+                    if m.name in to_extract:
+                        f = tf.extractfile(m)
+                        if f:
+                            (bin_dir / Path(m.name).name).write_bytes(f.read())
+            binary_dest.chmod(0o755)
+        else:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                names = zf.namelist()
+                binary_matches = [n for n in names if Path(n).name.lower() == binary_filename.lower()]
+                if not binary_matches:
+                    print(f"WARNING: {binary_filename} not found in archive.")
+                    return False
+                to_extract = set(binary_matches)
+                # On Windows, pull all DLLs too (ggml.dll, llama.dll, etc.)
+                if system == "Windows":
+                    to_extract |= {n for n in names if n.lower().endswith(".dll")}
+                for member in to_extract:
+                    (bin_dir / Path(member).name).write_bytes(zf.read(member))
+                if system != "Windows":
+                    binary_dest.chmod(0o755)
     except Exception as e:
         print(f"WARNING: Extraction failed: {e}")
         return False
@@ -357,12 +390,6 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
     """
     if not command_exists("git"):
         install_git(required_for=display_name)
-
-    if not command_exists("cmake"):
-        _install_pip_tool("cmake", "cmake", required_for=display_name)
-
-    if not command_exists("ninja"):
-        _install_pip_tool("ninja", "ninja", required_for=display_name)
 
     system = platform.system()
     binary_filename = f"{binary_name}.exe" if system == "Windows" else binary_name
