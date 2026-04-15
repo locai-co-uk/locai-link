@@ -266,22 +266,17 @@ def _prebuilt_url(project: str, tag: str) -> str | None:
             return f"{base}/llama-{tag}-bin-ubuntu-{arch}.tar.gz"
 
     elif project == "whisper":
+        # whisper.cpp only provides Windows prebuilts; Linux/macOS must build from source.
         base = f"https://github.com/ggml-org/whisper.cpp/releases/download/{tag}"
         if system == "Windows":
             if cuda:
-                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
-                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
-                return f"{base}/whisper-cpp-{tag}-bin-win-{cuda_tag}-x64.zip"
-            return f"{base}/whisper-cpp-{tag}-bin-win-x64.zip"
-        elif system == "Darwin":
-            arch = "arm64" if is_arm else "x64"
-            return f"{base}/whisper-cpp-{tag}-bin-macos-{arch}.tar.gz"
-        elif system == "Linux":
-            if cuda:
-                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
-                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
-                return f"{base}/whisper-cpp-{tag}-bin-ubuntu-{cuda_tag}-x64.tar.gz"
-            return f"{base}/whisper-cpp-{tag}-bin-ubuntu-x64.tar.gz"
+                # CUDA 12.4 build is forward-compatible with CUDA 13.x via driver compatibility.
+                cuda_zip = "11.8.0" if cuda[0] <= 11 else "12.4.0"
+                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using cublas-{cuda_zip} build.")
+                return f"{base}/whisper-cublas-{cuda_zip}-bin-x64.zip"
+            # BLAS build: better CPU performance than the plain bin via OpenBLAS.
+            return f"{base}/whisper-blas-bin-x64.zip"
+        # Linux and macOS: no prebuilts available — caller will fall back to cmake.
 
     return None
 
