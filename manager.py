@@ -468,6 +468,15 @@ def _cmake_build(display_name, repo_url, tag, cmake_flags, binary_name, bin_dir)
                 "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
             ]
 
+        # On Windows with MinGW, GCC does not define _WIN32_WINNT by default.
+        # cpp-httplib (vendored in llama.cpp/whisper.cpp) requires Windows 10+ (0x0A00).
+        if system == "Windows":
+            win_flags = "-D_WIN32_WINNT=0x0A00"
+            configure_flags += [
+                f"-DCMAKE_C_FLAGS={win_flags}",
+                f"-DCMAKE_CXX_FLAGS={win_flags}",
+            ]
+
         # --- Configure ---
         print("Configuring...")
         subprocess.run(
