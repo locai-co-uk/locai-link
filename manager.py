@@ -342,6 +342,19 @@ def _install_prebuilt(display_name: str, url: str, binary_name: str, bin_dir: Pa
                         dest.write_bytes(f.read())
                         dest.chmod(0o755)
 
+                # Second pass: create symlinks (versioned .so/.dylib names like
+                # libmtmd.0.dylib → libmtmd.dylib must exist or the binary crashes).
+                for m in members:
+                    if not m.issym():
+                        continue
+                    link_path = bin_dir / Path(m.name).name
+                    target_name = Path(m.linkname).name
+                    if not link_path.exists():
+                        try:
+                            link_path.symlink_to(target_name)
+                        except OSError:
+                            pass
+
             # macOS: strip quarantine attribute so Gatekeeper doesn't block execution
             if system == "Darwin":
                 subprocess.run(
