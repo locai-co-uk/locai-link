@@ -98,7 +98,13 @@ def test_server_lifecycle(server_binary):
 
         exit_code = process.poll()
         if not ready and exit_code is not None:
-            assert False, f"Server crashed on startup (exit code {exit_code})"
+            output = ""
+            try:
+                out, _ = process.communicate(timeout=5)
+                output = f"\n--- server output ---\n{out[-2000:]}" if out else ""
+            except Exception:
+                pass
+            assert False, f"Server crashed on startup (exit code {exit_code}){output}"
         assert ready, "Server did not become healthy within 120 seconds"
         print("[CI] Health check passed")
 

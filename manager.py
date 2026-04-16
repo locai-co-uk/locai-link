@@ -26,7 +26,7 @@ DEFAULT_BRANCH = "main"
 
 # Pinned llama.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
-LLAMA_CPP_RELEASE = "b8799"
+LLAMA_CPP_RELEASE = "b8808"
 
 # Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
 WHISPER_CPP_RELEASE = "v1.8.4"
@@ -258,10 +258,16 @@ def _prebuilt_url(project: str, tag: str) -> str | None:
             arch = "arm64" if is_arm else "x64"
             return f"{base}/llama-{tag}-bin-macos-{arch}.tar.gz"
         elif system == "Linux":
-            if cuda:
-                cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
-                print(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
-                return f"{base}/llama-{tag}-bin-ubuntu-{cuda_tag}-x64.tar.gz"
+            if cuda and command_exists("nvcc"):
+                # Full CUDA toolkit present — cmake build enables GGML_CUDA for best GPU performance.
+                # nvidia-smi alone only reports the driver's max supported CUDA, not the toolkit.
+                print(f"CUDA {cuda[0]}.{cuda[1]} + nvcc detected — building from source for CUDA acceleration.")
+                return None
+            # GPU present but no full CUDA toolkit → Vulkan prebuilt beats CPU-only cmake build.
+            has_gpu = command_exists("nvidia-smi") or command_exists("rocm-smi")
+            if has_gpu and not is_arm:
+                print("GPU detected — using Vulkan-accelerated prebuilt.")
+                return f"{base}/llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz"
             arch = "arm64" if is_arm else "x64"
             return f"{base}/llama-{tag}-bin-ubuntu-{arch}.tar.gz"
 
@@ -322,13 +328,26 @@ def _install_prebuilt(display_name: str, url: str, binary_name: str, bin_dir: Pa
                 if not binary_matches:
                     print(f"WARNING: {binary_filename} not found in archive.")
                     return False
-                to_extract = set(binary_matches)
+
+                # Extract ALL regular files — the binary is dynamically linked and
+                # the tarball includes the .so/.dylib files it depends on.
+                # Binaries are typically built with RPATH=$ORIGIN so they find libs
+                # in their own directory.
                 for m in members:
-                    if m.name in to_extract:
-                        f = tf.extractfile(m)
-                        if f:
-                            (bin_dir / Path(m.name).name).write_bytes(f.read())
-            binary_dest.chmod(0o755)
+                    if not m.isfile():
+                        continue
+                    f = tf.extractfile(m)
+                    if f:
+                        dest = bin_dir / Path(m.name).name
+                        dest.write_bytes(f.read())
+                        dest.chmod(0o755)
+
+            # macOS: strip quarantine attribute so Gatekeeper doesn't block execution
+            if system == "Darwin":
+                subprocess.run(
+                    ["xattr", "-dr", "com.apple.quarantine", str(bin_dir)],
+                    capture_output=True,
+                )
         else:
             with zipfile.ZipFile(archive_path, "r") as zf:
                 names = zf.namelist()
@@ -836,11 +855,11 @@ def reset(hard=False):
             if path == PROJECT_ROOT:
                 continue
 
-            if pattern == VENV_NAME:
+            if pattern == VENV_NAME and platform.system() == "Windows":
                 try:
                     if Path(sys.prefix).resolve() == path.resolve():
-                        print(f"Skipping active virtual environment: {path.name} (Cannot delete while in use)")
-                        print("(To fully reset, exit the process/uv and delete '.venv' manually)")
+                        print(f"Skipping active virtual environment: {path.name} (Windows locks in-use files)")
+                        print("(To fully reset, exit the process and delete '.venv' manually)")
                         continue
                 except Exception:
                     pass

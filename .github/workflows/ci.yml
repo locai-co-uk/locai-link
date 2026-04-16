@@ -141,9 +141,9 @@ jobs:
       shell: bash
       run: |
         uv venv
-        uv pip install -e ".[dev]"
+        uv pip install -e ".[dev,build]"
 
-    - name: Build llama-server and whisper-server
+    - name: Install llama-server and whisper-server
       shell: bash
       run: uv run python manager.py install-deps
 
