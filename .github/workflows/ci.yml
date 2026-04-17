@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: CC0-1.0
+
+name: CI Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+  pull_request:
+    branches:
+      - "main"
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # 0. Version bump check (PRs to main only)
+  version-bump:
+    name: Check Version Bump
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version was bumped
+        run: |
+          PR_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          MAIN_VERSION=$(git show origin/main:pyproject.toml | grep '^version' | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "main:   $MAIN_VERSION"
+          echo "branch: $PR_VERSION"
+          if [ "$PR_VERSION" = "$MAIN_VERSION" ]; then
+            echo "::error::Version has not been bumped. Update the version in pyproject.toml before merging."
+            exit 1
+          fi
+          echo "Version bumped: $MAIN_VERSION -> $PR_VERSION"
+
+  # 1. Standard Unit Tests (Fast)
+  unit-test:
+    name: Unit Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+          - os: macos-latest
+            python: "3.11"
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+        cache-dependency-glob: "pyproject.toml"
+
+    - name: Set up Python ${{ matrix.python }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python }}
+
+    - name: Install Project
+      shell: bash
+      run: |
+        uv venv
+        uv pip install -e ".[dev]"
+
+    - name: Run Unit Tests
+      shell: bash
+      env:
+        DEVICE_MODE: "LOCAL"
+      run: |
+        uv run pytest tests/ -v
+
+  # 2. Linting (Fast)
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Lint Deps
+        run: |
+          uv venv
+          uv pip install ruff
+
+      - name: Check Code
+        run: uv run ruff check .
+
+  # 3. Integration Tests (Plugins — downloads models and binaries)
+  integration-test:
+    name: Integration Test on ${{ matrix.os }}
+    needs: [unit-test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+          - os: macos-latest
+            python: "3.11"
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+        cache-dependency-glob: "**/pyproject.toml"
+
+    - name: Set up Python ${{ matrix.python }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python }}
+
+    # OS-Specific Audio Deps
+    - name: Install System Deps (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libportaudio2
+
+    - name: Install System Deps (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install portaudio
+
+    - name: Install Project and Plugins
+      shell: bash
+      run: |
+        uv venv
+        uv pip install -e ".[dev]"
+        uv pip install -e "plugins/language_model[dev]"
+        uv pip install -e "plugins/image_classifier[dev]"
+        uv pip install -e "plugins/audio_classifier[dev]"
+        uv pip install -e "plugins/audio_transcriber[dev]"
+
+    - name: Install Llama Server
+      shell: bash
+      run: uv run python plugins/language_model/install.py
+
+    - name: Install Whisper Server
+      shell: bash
+      run: uv run python plugins/audio_transcriber/install.py
+
+    - name: Test Audio Classifier
+      shell: bash
+      run: uv run pytest plugins/audio_classifier/ -v -s -m ""
+
+    - name: Test Image Classifier
+      shell: bash
+      run: uv run pytest plugins/image_classifier/ -v -s -m ""
+
+    - name: Test Language Model
+      shell: bash
+      run: uv run pytest plugins/language_model/ -v -s -m ""
+
+    - name: Test Audio Transcriber
+      shell: bash
+      run: uv run pytest plugins/audio_transcriber/ -v -s -m ""

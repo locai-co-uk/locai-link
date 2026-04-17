@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "link-language-model"
+version = "0.1.1"
+description = "Local LLM inference using Llama.cpp for Loc.ai"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.32.0", "colorama>=0.4.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.0", "pytest-mock>=3.15.0", "psutil>=7.0.0"]
+
+[project.entry-points."locai.plugins"]
+language_model = "link_language_model.adapter:LanguageModel"
+
+[tool.hatch.build.targets.wheel]
+packages = [] # Disable auto-discovery
+
+[tool.hatch.build.targets.wheel.force-include]
+"adapter.py" = "link_language_model/adapter.py"
+"server.py" = "link_language_model/server.py"
+"client.py" = "link_language_model/client.py"
+"__init__.py" = "link_language_model/__init__.py"

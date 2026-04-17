@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "link-audio-transcriber"
+version = "0.1.0"
+description = "Local audio transcription using whisper.cpp for Loc.ai"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.32.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.0", "pytest-mock>=3.15.0", "psutil>=7.0.0"]
+
+[project.entry-points."locai.plugins"]
+audio_transcriber = "link_audio_transcriber.adapter:AudioTranscriber"
+
+[tool.hatch.build.targets.wheel]
+packages = [] # Disable auto-discovery
+
+[tool.hatch.build.targets.wheel.force-include]
+"adapter.py" = "link_audio_transcriber/adapter.py"
+"server.py" = "link_audio_transcriber/server.py"
+"__init__.py" = "link_audio_transcriber/__init__.py"

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "link-audio-classifier"
+version = "0.1.0"
+description = "Real-time YAMNet Audio Classification for Loc.ai"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.21.0",
+    "requests>=2.32.4",
+    "sounddevice>=0.5.0",
+    "ai-edge-litert>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.0", "pytest-mock>=3.15.0"]
+
+[project.entry-points."locai.plugins"]
+audio_classifier = "link_audio_classifier.adapter:AudioClassifier"
+
+[tool.hatch.build.targets.wheel]
+packages = [] # Disable auto-discovery
+
+[tool.hatch.build.targets.wheel.force-include]
+"adapter.py" = "link_audio_classifier/adapter.py"
+"__init__.py" = "link_audio_classifier/__init__.py"

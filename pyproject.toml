@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: CC0-1.0
+
+[build-system]
+requires = ["uv_build>=0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "locai-link"
+version = "0.1.9"
+description = "High-performance modular edge inference agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE.md" }
+authors = [{ name = "Loc.ai Team" }]
+
+dependencies = [
+    "numpy>=1.21.0",
+    "psutil>=7.0.0",
+    "requests>=2.32.4",
+    "pydantic>=2.12.0",
+    "eclipse-zenoh>=1.7.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Linting/Formatting
+    "ruff>=0.14.14",
+    # Testing
+    "pytest>=9.0.0",
+    "pytest-mock>=3.15.0",
+    "pytest-cov>=7.0.0",
+    # Documentation        
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.7.0",
+    "mkdocstrings[python]>=1.0.0",
+]
+tui = ["textual>=7.0.0"]
+
+[project.scripts]
+locai-link = "link.main:main"
+
+[tool.uv.build-backend]
+module-name = "link"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+# Select rules:
+# E, F: Standard Python errors/flakes
+# D: Pydocstyle (Enforces docstrings)
+# I: Isort (Import sorting)
+select = ["E", "F", "I"]
+
+# Ignore specific docstring rules if they are too noisy
+# D100: Missing docstring in public module
+# D104: Missing docstring in public package
+ignore = ["D100", "D104"]
+
+
+[tool.ruff.lint.pydocstyle]
+# Use Google style docstrings
+convention = "google"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q -m 'not ci'"
+pythonpath = ["src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "ci: marks tests that require external binaries or network (skipped locally, run in CI)",
+]

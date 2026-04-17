@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: CC0-1.0
+
+.venv
+.zenoh
+.vscode
+build
+site
+
+pyrefly.toml
+uv.lock
+.coverage
+
+logs
+link_db
+models/**
+!models/README.md
+
+**/__pycache__
+**/.ruff_cache
+**/.pytest_cache
+**/.benchmarks
+**/*.tmp*
+**/.todo
+
+configs/session*.json

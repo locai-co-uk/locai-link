@@ -1,0 +1,299 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
+import json
+import logging
+import queue
+import sys
+import threading
+from typing import Any
+
+import requests
+
+try:
+    import zenoh
+except ImportError:
+    zenoh = None
+
+
+class LinkReporter(logging.Logger):
+    """Custom Logger that provides high-level reporting methods."""
+
+    def report_lifecycle(self, status: str):
+        """Reports Agent Online/Offline status.
+
+        Args:
+            status (str): The lifecycle status ('online' or 'offline').
+        """
+        payload: dict[str, Any] = {"status": status}
+        if status == "offline":
+            payload["metrics"] = {"cpu_usage": 0, "ram_usage": 0, "temperature_celsius": 0, "storage_available_gb": 0}
+
+        # Explicitly use "lifecycle_status" to avoid confusion with standard logs
+        self.info(payload, extra={"route_key": "lifecycle_status"})
+
+    def report_command(self, cmd_id: str, status: str, output: str):
+        """Reports command execution results.
+
+        Args:
+            cmd_id (str): The command ID.
+            status (str): The execution status (e.g., 'completed', 'failed').
+            output (str): The command output or error message.
+        """
+        if not cmd_id:
+            return
+        payload = {"status": status, "output": str(output)}
+
+        self.info(payload, extra={"route_key": "command_status", "context": {"cid": cmd_id}})
+
+    def report_model(self, model_id: str, **kwargs: Any):
+        """Reports model state.
+
+        Args:
+            model_id (str): The model/pipeline ID.
+            **kwargs (Any): Additional model status attributes.
+        """
+        if not model_id:
+            return
+        payload = {k: v for k, v in kwargs.items() if v is not None}
+
+        if payload:
+            self.info(payload, extra={"route_key": "model_status", "context": {"mid": model_id}})
+
+
+# Register BEFORE defining handlers
+logging.setLoggerClass(LinkReporter)
+
+
+class AsyncHandler(logging.Handler):
+    """Base class for non-blocking handlers with template support."""
+
+    def __init__(self, templates: dict[str, str]):
+        super().__init__()
+        self.templates = templates
+        self.queue = queue.Queue(maxsize=1000)
+        self._stop_event = threading.Event()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+
+    def emit(self, record):
+        if self._stop_event.is_set():
+            return
+        try:
+            route_key = getattr(record, "route_key", "logs")
+            context = getattr(record, "context", {})
+            template = self.templates.get(route_key)
+
+            # Fallback for standard logs: if key is "logs" but no template named "logs",
+            if not template and route_key == "logs":
+                template = self.templates.get("url") or self.templates.get("topic")
+
+            if not template:
+                return
+
+            try:
+                target = template.format(**context)
+            except KeyError as e:
+                print(f"❌ CONFIG ERROR: Template requires {e}, but context has {list(context.keys())}")
+                print(f"   Route: {route_key}")
+                print(f"   Template: {template}")
+                return
+
+            # 3. Payload Preparation
+            if isinstance(record.msg, dict):
+                # Structured data (Reporter) -> Send as JSON
+                raw_payload = record.msg
+                payload = json.dumps(raw_payload, default=str)
+            else:
+                # Text log -> Wrap in JSON structure
+                raw_payload = {
+                    "timestamp": record.created,
+                    "level": record.levelname,
+                    "message": record.getMessage(),
+                    "logger": record.name,
+                }
+                payload = json.dumps(raw_payload, default=str)
+
+            self.queue.put_nowait((target, payload, raw_payload, route_key))
+        except queue.Full:
+            pass
+        except Exception:
+            self.handleError(record)
+
+    def _worker_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                target, payload, raw_payload, route_key = self.queue.get(timeout=1.0)
+                try:
+                    self._transport_emit(target, payload, raw_payload, route_key)
+                except Exception as e:
+                    sys.stderr.write(f"Link Logger Error ({route_key}): {e}\n")
+                self.queue.task_done()
+            except queue.Empty:
+                continue
+
+    def _transport_emit(self, target, payload, raw_payload, route_key):
+        pass
+
+    def close(self):
+        self._stop_event.set()
+        if self._worker.is_alive():
+            self._worker.join(timeout=1.0)
+        super().close()
+
+
+class AsyncZenohHandler(AsyncHandler):
+    """Logging handler that publishes logs to Zenoh asynchronously."""
+
+    def __init__(self, session: Any, args: dict[str, Any]):
+        """Initialises the Zenoh handler.
+
+        Args:
+            session (Any): The Zenoh session.
+            args (dict): Configuration arguments (templates).
+        """
+        self.session = session
+        templates = {k: str(v) for k, v in args.items()}
+        super().__init__(templates)
+
+    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str):
+        """Emits the log payload to Zenoh.
+
+        Args:
+            target (str): The Zenoh key expression.
+            payload (str): The JSON payload.
+            raw_payload (Any): The raw log record data.
+            route_key (str): The routing key (log type).
+        """
+        if self.session:
+            try:
+                self.session.put(target, payload)
+            except Exception as e:
+                if "closed" in str(e).lower():
+                    return
+                raise e
+
+
+class AsyncHTTPHandler(AsyncHandler):
+    """Logging handler that sends logs via HTTP requests asynchronously."""
+
+    def __init__(self, args: dict[str, Any]):
+        """Initialises the HTTP handler.
+
+        Args:
+            args (dict): Configuration arguments (api_key, templates).
+        """
+        self.headers = {}
+        if args.get("api_key"):
+            self.headers["Authorization"] = f"Bearer {args['api_key']}"
+
+        templates = {k: str(v) for k, v in args.items()}
+        super().__init__(templates)
+
+    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str):
+        """Emits the log payload via HTTP POST/PUT.
+
+        Args:
+            target (str): The taret URL.
+            payload (str): The JSON string payload.
+            raw_payload (Any): The raw log record data.
+            route_key (str): The routing key (log type).
+        """
+        # Strict Method Selection
+        if route_key == "lifecycle_status":
+            method = requests.put
+        else:
+            # Everything else ("logs", "command_status", "model_status") uses POST
+            method = requests.post
+
+        json_data = raw_payload if isinstance(raw_payload, dict) else None
+        data = payload if not json_data else None
+
+        resp = method(target, json=json_data, data=data, headers=self.headers, timeout=5.0)
+
+        resp.raise_for_status()
+
+
+class CleanFormatter(logging.Formatter):
+    def format(self, record):
+        if isinstance(record.msg, dict):
+            record.msg = json.dumps(record.msg, default=str)
+        return super().format(record)
+
+
+class PrettyFormatter(logging.Formatter):
+    ICONS = {logging.INFO: "ℹ️", logging.WARNING: "⚠️", logging.ERROR: "⛔️", logging.CRITICAL: "📛"}
+
+    def format(self, record):
+        original_msg = record.msg
+        if isinstance(record.msg, dict):
+            record.msg = f"📡 {json.dumps(record.msg, default=str)}"
+        else:
+            icon = self.ICONS.get(record.levelno, "")
+            if icon:
+                record.msg = f"{icon}  {record.msg}"
+        result = super().format(record)
+        record.msg = original_msg
+        return result
+
+
+def setup_logging(
+    logging_config: Any = None, reporting_config: Any = None, zenoh_session: Any = None
+) -> logging.Logger:
+    """Configures the root logger and the special reporter logger.
+
+    Args:
+        logging_config (Any): Configuration for general logging.
+        reporting_config (Any): Configuration for status reporting.
+        zenoh_session (Any): Optional Zenoh session for transport.
+
+    Returns:
+        logging.Logger: The configured root logger.
+    """
+    _configure_logger(None, logging_config, zenoh_session)
+    _configure_logger("link.reporter", reporting_config, zenoh_session)
+    return logging.getLogger()
+
+
+def _configure_logger(name, config, session):
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        logger.handlers.clear()
+
+    if name == "link.reporter":
+        logger.propagate = False
+
+    handlers = getattr(config, "handlers", []) if config else []
+    level_str = getattr(config, "level", "INFO") if config else "INFO"
+    target_level = getattr(logging, level_str.upper(), logging.INFO)
+
+    logger.setLevel(target_level)
+
+    if not name and not handlers:
+        handlers = [{"type": "console"}]
+
+    for h in handlers:
+        h_data = h.model_dump() if hasattr(h, "model_dump") else h
+        h_type = h_data.get("type", "").lower()
+        args = h_data.get("args", {})
+
+        if not isinstance(args, dict):
+            args = {}
+
+        if h_type == "console":
+            console = logging.StreamHandler(sys.stdout)
+            console.setFormatter(PrettyFormatter("%(message)s"))
+            console.setLevel(target_level)
+            logger.addHandler(console)
+
+        elif h_type.startswith("zenoh") and zenoh and session:
+            z = AsyncZenohHandler(session, args)
+            z.setFormatter(CleanFormatter())
+            z.setLevel(target_level)
+            logger.addHandler(z)
+
+        elif h_type == "http":
+            h = AsyncHTTPHandler(args)
+            h.setFormatter(CleanFormatter())
+            h.setLevel(target_level)
+            logger.addHandler(h)
