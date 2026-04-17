@@ -7,7 +7,6 @@ import pytest
 
 from link.app import updater
 
-
 # --- get_local_version ---
 
 
