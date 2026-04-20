@@ -4,10 +4,12 @@
 import getpass
 import logging
 import platform
+from typing import Any
 
 import requests
 
 from link.config.models import (
+    SCHEMA_VERSION,
     AgentConfig,
     GenericConfig,
     IdentityConfig,
@@ -16,6 +18,7 @@ from link.config.models import (
     ReportingConfig,
     TransportConfig,
 )
+from link.config.templating import resolve_templates
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +118,12 @@ def register_device(
         resp.raise_for_status()
         data = resp.json()
 
-        return _bootstrap_config(
-            device_id=data["device_id"], device_name=name, api_key=data["api_key"], api_url=api_url
+        return _resolve_agent_config(
+            server_config=data.get("config"),
+            device_id=data["device_id"],
+            device_name=name,
+            api_key=data["api_key"],
+            api_url=api_url,
         )
 
     except Exception as e:
@@ -144,9 +151,8 @@ def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:
         resp.raise_for_status()
         data = resp.json()
 
-        # TODO: will get the transport protocol from the server
-
-        return _bootstrap_config(
+        return _resolve_agent_config(
+            server_config=data.get("config"),
             device_id=device_id,
             device_name="recovered-device",  # Name is already on server
             api_key=data["api_key"],
@@ -156,6 +162,104 @@ def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:
     except Exception as e:
         logger.critical(f"Activation failed: {e}")
         raise
+
+
+def _resolve_agent_config(
+    server_config: dict[str, Any] | None,
+    device_id: str,
+    device_name: str,
+    api_key: str,
+    api_url: str,
+) -> AgentConfig:
+    """Select and resolve the AgentConfig for this device.
+
+    Preference order:
+      1. A backend-provided config (delivered in the registration response).
+      2. The built-in hardcoded defaults from `_bootstrap_config`.
+
+    If a backend config is present but cannot be resolved (wrong schema version,
+    fails Pydantic validation, etc.), this logs a loud error and falls back to
+    defaults so registration still succeeds — operators can investigate via the
+    backend admin surface without bricking the device.
+
+    Args:
+        server_config: Raw `config` dict from the backend response, or None.
+        device_id: Device identifier from the registration response.
+        device_name: Device name (from the client-side registration request).
+        api_key: API key from the registration response.
+        api_url: Base URL the agent was started with.
+
+    Returns:
+        A validated `AgentConfig` ready to hand to the state manager.
+    """
+    if server_config is None:
+        logger.info("No config from backend — using built-in defaults.")
+        return _bootstrap_config(device_id, device_name, api_key, api_url)
+
+    try:
+        return _apply_server_config(server_config, device_id, device_name, api_key, api_url)
+    except Exception as e:
+        # Loud, critical — the operator needs to see this. But don't brick
+        # registration: fall back to known-good defaults.
+        logger.critical(
+            f"Backend config rejected ({e}). Falling back to built-in defaults — "
+            "check the template on the control plane."
+        )
+        return _bootstrap_config(device_id, device_name, api_key, api_url)
+
+
+def _apply_server_config(
+    raw: dict[str, Any], device_id: str, device_name: str, api_key: str, api_url: str
+) -> AgentConfig:
+    """Resolve templates, inject identity, and validate a backend config.
+
+    Args:
+        raw: The raw config dict from the backend response.
+        device_id: Device identifier from the registration response.
+        device_name: Device name (from the client-side registration request).
+        api_key: API key from the registration response.
+        api_url: Base URL the agent was started with.
+
+    Returns:
+        A validated `AgentConfig`.
+
+    Raises:
+        ValueError: If the schema version is unknown or validation fails.
+    """
+    # Strict version check. Unknown versions could mean the backend is ahead of
+    # the agent, in which case we can't safely interpret the config.
+    raw_version = raw.get("version")
+    if raw_version != SCHEMA_VERSION:
+        raise ValueError(f"Unsupported config schema version {raw_version!r} — this agent requires {SCHEMA_VERSION}")
+
+    context = {
+        "identity": {
+            "device_id": device_id,
+            "device_name": device_name,
+            "api_key": api_key,
+            "api_url": api_url,
+        },
+        "api_url": api_url,
+    }
+    resolved = resolve_templates(raw, context)
+
+    # Always inject our known identity, regardless of what the template declared.
+    # The backend shouldn't be overriding the client's view of its own identity.
+    resolved["identity"] = {
+        "device_id": device_id,
+        "device_name": device_name,
+        "api_key": api_key,
+        "api_url": api_url,
+    }
+
+    config = AgentConfig(**resolved)
+    logger.info(
+        f"Applied backend config: {len(config.pipelines)} pipeline(s), "
+        f"transport={config.transport.type if config.transport else 'http'}, "
+        f"{len(config.logging.handlers)} logging handler(s), "
+        f"{len(config.reporting.handlers)} reporting handler(s)."
+    )
+    return config
 
 
 def _bootstrap_config(device_id: str, device_name: str, api_key: str, api_url: str) -> AgentConfig:
@@ -184,10 +288,9 @@ def _bootstrap_config(device_id: str, device_name: str, api_key: str, api_url: s
         logging=LoggingConfig(
             level="INFO",
             handlers=[
-                GenericConfig(type="console", level="INFO"),
+                GenericConfig(type="console"),
                 GenericConfig(
                     type="http",
-                    level="INFO",
                     args={
                         # Standard Logs (POST)
                         "url": f"{api_url}/agent/{device_id}/logs",

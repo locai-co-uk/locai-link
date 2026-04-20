@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-# pyrefly: disable=bad-override-mutable-attribute
-
 """Config schema for Loc.ai:Link agents.
 
 This module defines the canonical `AgentConfig` schema the backend sends to an
@@ -188,7 +186,7 @@ class TransportConfig(GenericConfig):
         }
     )
 
-    type: Literal["http", "zenoh"] = Field(
+    type: Literal["http", "zenoh"] = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
         description="Transport implementation to use for pipeline sources and sinks.",
     )
 
@@ -205,10 +203,15 @@ class LoggingConfig(BaseModel):
     Routes Python log records from the agent to one or more sinks. Each handler
     is a `GenericConfig` whose `type` selects an implementation:
 
-    - `console` — print to stdout (no args).
+    - `console` — print to stdout.
     - `http`    — async POST to a URL. Required `args.url`. Optional `args.api_key`
       (sent as `Authorization: Bearer …`).
     - `zenoh`   — async publish to a topic. Required `args.topic`.
+
+    Any handler may set `args.level` (`"DEBUG" | "INFO" | "WARNING" | "ERROR"`)
+    to override the parent `LoggingConfig.level` for that single handler. This
+    lets you route DEBUG logs to console but only ship WARNING+ to a remote
+    endpoint, for example.
 
     If `handlers` is empty, the agent installs a default `console` handler.
     """
@@ -219,10 +222,11 @@ class LoggingConfig(BaseModel):
                 {
                     "level": "INFO",
                     "handlers": [
-                        {"type": "console"},
+                        {"type": "console", "args": {"level": "DEBUG"}},
                         {
                             "type": "http",
                             "args": {
+                                "level": "WARNING",
                                 "url": "https://api.loc.ai/api/v1/agent/${identity.device_id}/logs",
                                 "api_key": "${identity.api_key}",
                             },
@@ -235,13 +239,17 @@ class LoggingConfig(BaseModel):
 
     level: LogLevel = Field(
         default="INFO",
-        description="Minimum severity to emit. Records below this level are dropped.",
+        description=(
+            "Minimum severity to emit at the logger level. Handlers without their "
+            "own `args.level` inherit this; handlers with `args.level` set can go "
+            "higher or lower."
+        ),
     )
     handlers: list[GenericConfig] = Field(
         default_factory=list,
         description=(
             "Fan-out targets for log records. Each handler is instantiated once "
-            "at startup and receives every record that clears `level`."
+            "at startup and receives every record that clears its effective level."
         ),
     )
 

@@ -280,20 +280,26 @@ def _configure_logger(name, config, session):
         if not isinstance(args, dict):
             args = {}
 
+        # Per-handler level override: args.level ("DEBUG"|"INFO"|"WARNING"|"ERROR").
+        # When absent, the handler inherits the parent logger's level.
+        handler_level = target_level
+        if "level" in args:
+            handler_level = getattr(logging, str(args["level"]).upper(), target_level)
+
         if h_type == "console":
             console = logging.StreamHandler(sys.stdout)
             console.setFormatter(PrettyFormatter("%(message)s"))
-            console.setLevel(target_level)
+            console.setLevel(handler_level)
             logger.addHandler(console)
 
         elif h_type.startswith("zenoh") and zenoh and session:
             z = AsyncZenohHandler(session, args)
             z.setFormatter(CleanFormatter())
-            z.setLevel(target_level)
+            z.setLevel(handler_level)
             logger.addHandler(z)
 
         elif h_type == "http":
             h = AsyncHTTPHandler(args)
             h.setFormatter(CleanFormatter())
-            h.setLevel(target_level)
+            h.setLevel(handler_level)
             logger.addHandler(h)
