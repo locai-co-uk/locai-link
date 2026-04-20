@@ -57,8 +57,9 @@ def test_whisper_serve_mode_lifecycle():
 
     time.sleep(5)
 
+    pid = None
     try:
-        assert agent.server.running
+        assert agent.server.running, "Server failed to start — check whisper-server logs"
         pid = agent.server.process.pid
         assert psutil.pid_exists(pid), "Server process should exist"
 
@@ -88,8 +89,9 @@ def test_whisper_serve_mode_lifecycle():
         agent.stop()
         time.sleep(2)
 
-        assert not psutil.pid_exists(pid), "Zombie process detected! Server did not exit cleanly."
-        assert not agent.server.monitor_thread.is_alive()
+        if pid is not None:
+            assert not psutil.pid_exists(pid), "Zombie process detected! Server did not exit cleanly."
+            assert not agent.server.monitor_thread.is_alive()
 
 
 def test_whisper_transcribe_mode():
@@ -104,11 +106,16 @@ def test_whisper_transcribe_mode():
     )
 
     try:
+        assert agent.server.running, "Server failed to start — check whisper-server logs"
+
         # Wait for the transcription to complete
         result = None
         deadline = time.time() + 60
         while time.time() < deadline:
-            result = agent()
+            try:
+                result = agent()
+            except StopIteration:
+                pytest.fail("Transcriber thread exited before producing a result")
             if result is not None:
                 break
             time.sleep(1)

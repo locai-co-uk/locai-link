@@ -35,7 +35,7 @@ class AudioTranscriber:
         self,
         model_path,
         mode="serve",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8003,
         alias=None,
         audio_path=None,

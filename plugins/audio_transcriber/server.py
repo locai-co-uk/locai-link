@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class WhisperServer:
     """Manages the whisper-server background process."""
 
-    def __init__(self, model_path, host="0.0.0.0", port=8003, **kwargs):
+    def __init__(self, model_path, host="127.0.0.1", port=8003, **kwargs):
         self.model_path = Path(model_path)
         self.host = host
         self.port = int(port)
