@@ -93,7 +93,10 @@ def test_latest_session_picked(tmp_path):
     mgr.STATE_DIR = tmp_path
 
     result = mgr.load_state()
-    assert result["identity"]["device_id"] == "20260101_120000"  # pyright: ignore[reportOptionalSubscript]
+
+    assert result is not None
+
+    assert result["identity"]["device_id"] == "20260101_120000"
 
 
 def test_set_pipeline_status(tmp_path):
@@ -112,8 +115,10 @@ def test_set_pipeline_status(tmp_path):
 
     mgr.set_pipeline_status("p1", True)
 
+    assert mgr.current_session_path is not None
+
     # Re-read from disk
-    data = json.loads(mgr.current_session_path.read_text())  # pyright: ignore[reportOptionalMemberAccess]
+    data = json.loads(mgr.current_session_path.read_text())
     assert data["pipelines"][0]["active"] is True
 
 
@@ -160,7 +165,9 @@ def test_update_full_config_preserves_active_flag(tmp_path):
     )
     mgr.update_full_config(new_cfg)
 
-    data = json.loads(mgr.current_session_path.read_text())  # pyright: ignore[reportOptionalMemberAccess]
+    assert mgr.current_session_path is not None
+
+    data = json.loads(mgr.current_session_path.read_text())
     pipelines = {p["id"]: p for p in data["pipelines"]}
     assert pipelines["p1"]["active"] is True, "p1 was running, should still be active"
     assert pipelines["p3"]["active"] is False, "p3 is new, defaults to inactive"
@@ -192,5 +199,7 @@ def test_update_full_config_replaces_non_pipeline_fields(tmp_path):
     )
     mgr.update_full_config(new_cfg)
 
-    data = json.loads(mgr.current_session_path.read_text())  # pyright: ignore[reportOptionalMemberAccess]
+    assert mgr.current_session_path is not None
+
+    data = json.loads(mgr.current_session_path.read_text())
     assert data["reporting"]["interval"] == 120
