@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Agent runtime — owns the pipeline lifecycle, command dispatch, and shutdown flow."""
+
 import logging
 import signal
 import threading
@@ -49,6 +51,9 @@ class AgentRuntime:
         self.running = True
         self.shutdown_event = threading.Event()
         self.update_requested = False
+        # Set by `reconfigure.apply_agent_config` when a hot-swap fails to
+        # revert cleanly and a process restart is the only safe recovery path.
+        self.config_restart_requested = False
 
         if threading.current_thread() is threading.main_thread():
             try:
@@ -193,6 +198,17 @@ class AgentRuntime:
                 self.update_requested = True
                 self.running = False
                 self.shutdown_event.set()
+
+            elif cmd_type == "UPDATE_AGENT_CONFIG":
+                from link.app.reconfigure import apply_agent_config
+
+                new_cfg_raw = payload.get("agent_config")
+                if not isinstance(new_cfg_raw, dict):
+                    self.status_logger.report_command(cmd_id, "failed", "Missing or malformed agent_config in payload")
+                    return
+                result = apply_agent_config(self, new_cfg_raw)
+                status = "completed" if (result.ok or result.scheduled_restart) else "failed"
+                self.status_logger.report_command(cmd_id, status, result.message)
 
             else:
                 logger.warning(f"Unknown command: {cmd_type}")
@@ -545,17 +561,12 @@ class AgentRuntime:
             route = out_def.get("route", "console")
 
             if route == "agent":
-                if hasattr(self.agent_config, "identity"):
-                    api_url = self.agent_config.identity.api_url
-                    device_id = self.agent_config.identity.device_id
-                    api_key = self.agent_config.identity.api_key
-                else:
-                    api_url = getattr(self.agent_config, "api_url", "")
-                    device_id = getattr(self.agent_config, "device_id", "")
-                    api_key = getattr(self.agent_config, "api_key", "")
-
-                url = f"{api_url}/agent/model_results/{device_id}/create_from_agent"
-                sink_conf = GenericConfig(type="http_post", args={"url": url, "api_key": api_key, "timeout": 10})
+                identity = self.agent_config.identity
+                url = f"{identity.api_url}/agent/model_results/{identity.device_id}/create_from_agent"
+                sink_conf = GenericConfig(
+                    type="http_post",
+                    args={"url": url, "api_key": identity.api_key, "timeout": 10},
+                )
 
         return PipelineConfig(
             id=pipeline_id,

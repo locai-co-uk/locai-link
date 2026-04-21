@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Cross-platform OS service manager (systemd, launchd, Windows Service)."""
+
 import getpass
 import logging
 import platform

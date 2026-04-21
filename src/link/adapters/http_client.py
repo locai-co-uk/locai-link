@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""HTTP client adapter with typed errors — distinguishes retryable vs fatal failures."""
+
 import logging
 from typing import Any
 
@@ -13,6 +15,7 @@ class HttpError(Exception):
     """Raised when an HTTP request fails with actionable context."""
 
     def __init__(self, status: int | None, reason: str, retryable: bool):
+        """Attach the HTTP status code, reason text, and retryability hint."""
         self.status = status
         self.reason = reason
         self.retryable = retryable

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Zenoh Python API wrapper — session setup and pub/sub helpers."""
+
 import json
 import logging
 from typing import Any

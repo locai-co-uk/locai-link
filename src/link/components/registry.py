@@ -119,21 +119,16 @@ class ComponentRegistry:
         if plugin_dir:
             cls._install_plugin_dependencies(name, plugin_dir)
 
-        # 3. Try Loading via Entry Point (Modern Standard)
+        # 3. Load via Entry Point (Modern Standard)
         cls._refresh_entry_points()
         plugin_cls = cls._get_entry_point_class(name)
 
-        # 4. Fallback: Legacy File Loading
-        if not plugin_cls and plugin_dir:
-            logger.debug(f"No entry point for '{name}'. Falling back to legacy file import.")
-            plugin_cls = cls._load_legacy_adapter(name, plugin_dir)
-
         if not plugin_cls:
             raise ValueError(
-                f"Could not load plugin '{name}'. Ensure it has a pyproject.toml with entry-points or an adapter.py."
+                f"Could not load plugin '{name}'. Ensure it has a pyproject.toml with 'locai.plugins' entry-points."
             )
 
-        # 5. Instantiate
+        # 4. Instantiate
         try:
             return plugin_cls(**args)
         except Exception as e:
@@ -232,9 +227,4 @@ class ComponentRegistry:
             if ep.name == plugin_name or normalized_dist.endswith(f"plugin_{plugin_name}"):
                 logger.info(f"Loaded {plugin_name} via entry point: {ep.name}")
                 return ep.load()
-        return None
-
-    @staticmethod
-    def _load_legacy_adapter(name: str, plugin_dir: Path) -> type | None:
-        print(f"Legacy adapter deprecated for {name}.")
         return None

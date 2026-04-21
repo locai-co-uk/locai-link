@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Zenoh pub/sub components — publisher (sink) and listener (source)."""
+
 import json
 import logging
 import queue

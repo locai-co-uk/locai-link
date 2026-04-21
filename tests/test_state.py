@@ -70,7 +70,9 @@ def test_bootstrap_creates_session_file(tmp_path):
     mgr = StateManager()
     mgr.STATE_DIR = tmp_path
 
-    config = AgentConfig(version=2.1, identity={"device_id": "new-dev", "device_name": "test"}, pipelines=[])
+    config = AgentConfig.model_validate(
+        {"version": 2.1, "identity": {"device_id": "new-dev", "device_name": "test"}, "pipelines": []}
+    )
     mgr.bootstrap(config)
 
     assert mgr.current_session_path is not None
@@ -91,7 +93,7 @@ def test_latest_session_picked(tmp_path):
     mgr.STATE_DIR = tmp_path
 
     result = mgr.load_state()
-    assert result["identity"]["device_id"] == "20260101_120000"
+    assert result["identity"]["device_id"] == "20260101_120000"  # pyright: ignore[reportOptionalSubscript]
 
 
 def test_set_pipeline_status(tmp_path):
@@ -99,17 +101,19 @@ def test_set_pipeline_status(tmp_path):
     mgr = StateManager()
     mgr.STATE_DIR = tmp_path
 
-    config = AgentConfig(
-        version=2.1,
-        identity={"device_id": "d"},
-        pipelines=[{"id": "p1", "source": {"type": "clock_tick"}}],
+    config = AgentConfig.model_validate(
+        {
+            "version": 2.1,
+            "identity": {"device_id": "d"},
+            "pipelines": [{"id": "p1", "source": {"type": "clock_tick"}}],
+        }
     )
     mgr.bootstrap(config)
 
     mgr.set_pipeline_status("p1", True)
 
     # Re-read from disk
-    data = json.loads(mgr.current_session_path.read_text())
+    data = json.loads(mgr.current_session_path.read_text())  # pyright: ignore[reportOptionalMemberAccess]
     assert data["pipelines"][0]["active"] is True
 
 
@@ -122,3 +126,71 @@ def test_corrupted_json(tmp_path):
     mgr.STATE_DIR = tmp_path
 
     assert mgr.load_state() is None
+
+
+def test_update_full_config_preserves_active_flag(tmp_path):
+    """Swapping the full config shouldn't reset active flags on pipelines that still exist."""
+    mgr = StateManager()
+    mgr.STATE_DIR = tmp_path
+
+    original = AgentConfig.model_validate(
+        {
+            "version": 2.1,
+            "identity": {"device_id": "d"},
+            "pipelines": [
+                {"id": "p1", "source": {"type": "clock_tick"}},
+                {"id": "p2", "source": {"type": "clock_tick"}},
+            ],
+        }
+    )
+    mgr.bootstrap(original)
+    # Simulate p1 being activated at runtime
+    mgr.set_pipeline_status("p1", True)
+
+    # New config keeps p1, removes p2, adds p3
+    new_cfg = AgentConfig.model_validate(
+        {
+            "version": 2.1,
+            "identity": {"device_id": "d"},
+            "pipelines": [
+                {"id": "p1", "source": {"type": "clock_tick"}},
+                {"id": "p3", "source": {"type": "clock_tick"}},
+            ],
+        }
+    )
+    mgr.update_full_config(new_cfg)
+
+    data = json.loads(mgr.current_session_path.read_text())  # pyright: ignore[reportOptionalMemberAccess]
+    pipelines = {p["id"]: p for p in data["pipelines"]}
+    assert pipelines["p1"]["active"] is True, "p1 was running, should still be active"
+    assert pipelines["p3"]["active"] is False, "p3 is new, defaults to inactive"
+    assert "p2" not in pipelines
+
+
+def test_update_full_config_replaces_non_pipeline_fields(tmp_path):
+    """Full-config swap replaces top-level fields like reporting."""
+    mgr = StateManager()
+    mgr.STATE_DIR = tmp_path
+
+    original = AgentConfig.model_validate(
+        {
+            "version": 2.1,
+            "identity": {"device_id": "d"},
+            "reporting": {"interval": 30},
+            "pipelines": [],
+        }
+    )
+    mgr.bootstrap(original)
+
+    new_cfg = AgentConfig.model_validate(
+        {
+            "version": 2.1,
+            "identity": {"device_id": "d"},
+            "reporting": {"interval": 120},
+            "pipelines": [],
+        }
+    )
+    mgr.update_full_config(new_cfg)
+
+    data = json.loads(mgr.current_session_path.read_text())  # pyright: ignore[reportOptionalMemberAccess]
+    assert data["reporting"]["interval"] == 120

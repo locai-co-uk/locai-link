@@ -1,3 +1,5 @@
+"""Session state persistence — timestamped JSON files for crash recovery."""
+
 import glob
 import json
 import logging
@@ -101,6 +103,30 @@ class StateManager:
                     p["active"] = False
 
         self._cache = data
+        self._flush()
+
+    def update_full_config(self, config: AgentConfig) -> None:
+        """Atomically replace the cached config and flush to disk.
+
+        Preserves the runtime `active` flag for pipelines that exist in both
+        the old and new config, so a hot-swap doesn't reset a running pipeline
+        to inactive.
+
+        Args:
+            config (AgentConfig): The new full agent configuration.
+        """
+        self._ensure_loaded()
+        assert self._cache is not None
+
+        old_active = {p["id"]: p.get("active", False) for p in self._cache.get("pipelines", [])}
+        new_data = config.model_dump()
+        for p in new_data.get("pipelines", []):
+            if p["id"] in old_active:
+                p["active"] = old_active[p["id"]]
+            elif "active" not in p:
+                p["active"] = False
+
+        self._cache = new_data
         self._flush()
 
     def update_pipeline_config(self, pipeline_config: PipelineConfig):

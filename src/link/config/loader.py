@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""JSON config loader with self-referential template placeholder resolution."""
+
 import json
 import logging
 from pathlib import Path

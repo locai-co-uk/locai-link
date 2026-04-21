@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Built-in pipeline components — clock, random generator, console sink."""
+
 import logging
 import random
 import time

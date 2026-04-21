@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Structured logging — LinkReporter, async handlers, route-keyed event dispatch."""
+
 import json
 import logging
 import queue
@@ -215,16 +217,22 @@ class AsyncHTTPHandler(AsyncHandler):
 
 
 class CleanFormatter(logging.Formatter):
+    """Formatter for machine-readable transports — serialises dict records as JSON."""
+
     def format(self, record):
+        """Render the record, converting dict messages to JSON strings first."""
         if isinstance(record.msg, dict):
             record.msg = json.dumps(record.msg, default=str)
         return super().format(record)
 
 
 class PrettyFormatter(logging.Formatter):
+    """Formatter for console output — prefixes records with severity-icon emoji."""
+
     ICONS = {logging.INFO: "ℹ️", logging.WARNING: "⚠️", logging.ERROR: "⛔️", logging.CRITICAL: "📛"}
 
     def format(self, record):
+        """Render the record with icon prefix (text) or 📡 emoji (dict payloads)."""
         original_msg = record.msg
         if isinstance(record.msg, dict):
             record.msg = f"📡 {json.dumps(record.msg, default=str)}"
@@ -253,6 +261,34 @@ def setup_logging(
     _configure_logger(None, logging_config, zenoh_session)
     _configure_logger("link.reporter", reporting_config, zenoh_session)
     return logging.getLogger()
+
+
+def rebuild_handlers(logging_config: Any, reporting_config: Any, zenoh_session: Any = None) -> None:
+    """Tear down existing handlers and reattach from new configs.
+
+    Safe to call while pipelines are running — the root logger reference is
+    preserved; only its handler set is swapped. AsyncHandler worker threads
+    are stopped via `.close()` before the handlers are dropped.
+
+    Note: in-flight records in AsyncHandler queues may be dropped at close time.
+    Plugins that add handlers directly to `logging.getLogger(...)` will have
+    those handlers removed too — plugins should not install their own handlers.
+
+    Args:
+        logging_config: New `LoggingConfig` (or dict).
+        reporting_config: New `ReportingConfig` (or dict).
+        zenoh_session: Optional Zenoh session, reused across the swap.
+    """
+    for lg_name in (None, "link.reporter"):
+        lg = logging.getLogger(lg_name)
+        for h in list(lg.handlers):
+            try:
+                h.close()
+            except Exception:
+                pass
+        lg.handlers.clear()
+    _configure_logger(None, logging_config, zenoh_session)
+    _configure_logger("link.reporter", reporting_config, zenoh_session)
 
 
 def _configure_logger(name, config, session):

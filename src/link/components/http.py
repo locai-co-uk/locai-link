@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""HTTP pipeline components — polling source and publishing sink."""
+
 import logging
 import time
 from typing import Any

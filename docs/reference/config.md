@@ -5,5 +5,6 @@ SPDX-License-Identifier: CC0-1.0
 
 # Configuration
 
-::: link.config.loader
 ::: link.config.models
+::: link.config.loader
+::: link.config.templating

@@ -5,11 +5,10 @@ SPDX-License-Identifier: CC0-1.0
 
 # Components
 
+::: link.components.registry
+::: link.components.pipeline
 ::: link.components.basic
-::: link.components.buffers
 ::: link.components.command
 ::: link.components.http
-::: link.components.pipeline
-::: link.components.registry
 ::: link.components.system
 ::: link.components.zenoh

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Infrastructure utilities — platform/arch detection for binary selection."""
+
 import logging
 import platform
 

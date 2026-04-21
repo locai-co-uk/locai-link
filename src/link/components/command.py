@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Sink that routes pipeline data to the agent's command handler."""
+
 import logging
 
 from link.components.registry import ComponentRegistry, Sink
@@ -22,31 +24,17 @@ class AgentCommand(Sink):
         """
         self.callback = callback
 
-    def __call__(self, data: dict) -> bool | None:
-        """Processes the command data.
-
-        Args:
-            data (dict): The command data (single or list).
-        """
+    def __call__(self, data: dict | list[dict]) -> bool | None:
+        """Dispatches one or more commands to the runtime callback."""
         if not data:
-            return
+            return None
+        cmds = data if isinstance(data, list) else [data]
+        return all(self._dispatch(cmd) for cmd in cmds)
 
-        # Determine if data is a list of commands or a single command
-        if isinstance(data, list):
-            return all(self._dispatch(cmd) for cmd in data)
-        else:
-            return self._dispatch(data)
-
-    def _dispatch(self, cmd):
-        """Dispatches a single command to the callback.
-
-        Args:
-            cmd (dict): The command to dispatch.
-        """
+    def _dispatch(self, cmd: dict) -> bool:
         try:
-            if self.callback:
-                self.callback(cmd)
-                return True
+            self.callback(cmd)
+            return True
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
             return False

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Textual-based TUI — optional interactive agent management interface."""
+
 import json
 import re
 from datetime import datetime

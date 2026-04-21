@@ -1,3 +1,5 @@
+"""CLI entry point — dispatches setup, run, install, reset, stop, TUI subcommands."""
+
 import argparse
 import os
 import shutil
@@ -287,12 +289,16 @@ def run(args: argparse.Namespace):
             zenoh_session.close()
             logger.info("Zenoh session closed.")
 
-    # D. OTA Update & Re-exec
-    # If the runtime exited because of an UPDATE_AGENT command, pull the latest
-    # code, refresh plugin binaries, and re-exec this Python process in place.
-    # The PID is preserved, so systemd/launchd see a continuously running service.
+    # D. OTA Update / Config restart & Re-exec
+    # - `update_requested` → pull latest code + refresh binaries, then execv.
+    # - `config_restart_requested` → execv only (no git pull) to pick up a
+    #   persisted-but-unapplied AgentConfig after a hot-swap failure.
+    # Code update takes priority — if both are set, git pull covers the config too.
     if runtime.update_requested:
         _apply_update_and_reexec(cwd)
+    elif runtime.config_restart_requested:
+        logger.info("Restarting agent to pick up persisted config...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def _apply_update_and_reexec(repo_dir: Path):
@@ -429,6 +435,7 @@ def reset(hard: bool = False):
 
 
 def main():
+    """CLI entry point — parses arguments and dispatches to subcommands."""
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
 

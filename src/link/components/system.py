@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""SystemMonitor source — CPU, RAM, storage, temperature metrics via psutil."""
+
 import logging
 import time
 
@@ -20,6 +22,9 @@ class SystemMonitor(Source):
 
     # Registry of available keys for validation/reference
     AVAILABLE_METRICS = {"cpu_usage", "ram_usage", "storage_available_gb", "temperature_celsius"}
+
+    # Sensor names to probe (first hit wins) when reading CPU temperature.
+    _TEMP_SENSOR_KEYS = ("cpu_thermal", "coretemp", "k10temp", "soc_thermal")
 
     def __init__(self, interval: float = 1.0, metrics: list[str] | None = None):
         """Initialises the SystemMonitor.
@@ -81,15 +86,13 @@ class SystemMonitor(Source):
 
         # 5. Temperature
         if "temperature_celsius" in self.enabled_metrics:
-            data["temperature_celsius"] = 0.0
             try:
-                temps = psutil.sensors_temperatures()
-                if temps:
-                    for key in ["cpu_thermal", "coretemp", "k10temp", "soc_thermal"]:
-                        if key in temps and temps[key]:
-                            data["temperature_celsius"] = temps[key][0].current
-                            break
+                temps = psutil.sensors_temperatures() or {}
+                data["temperature_celsius"] = next(
+                    (temps[k][0].current for k in self._TEMP_SENSOR_KEYS if temps.get(k)),
+                    0.0,
+                )
             except (AttributeError, IndexError):
-                pass
+                data["temperature_celsius"] = 0.0
 
         return data

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Device registration and activation against the Loc.ai control plane."""
+
 import getpass
 import logging
 import platform

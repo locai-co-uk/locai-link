@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Zenoh router process management — spawn, monitor, session factory."""
+
 import json
 import logging
 import platform

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Storage backends: Zenoh (network pub/sub) and SQLite (local buffering)."""
+
 import json
 import logging
 import sqlite3
@@ -23,9 +25,8 @@ class StorageBackend(ABC):
         """
         pass
 
-    @abstractmethod
     def close(self):
-        """Closes the storage connection."""
+        """Closes the storage connection. Default: no-op — override if needed."""
         pass
 
 
@@ -60,9 +61,8 @@ class ZenohStorageBackend(StorageBackend):
         except Exception as e:
             logger.warning(f"Zenoh Put Failed: {e}")
 
-    def close(self):
-        """No-op as session is managed by InfrastructureManager."""
-        pass  # Session managed by InfrastructureManager
+    # close() inherits from base: no-op. Session lifetime is managed by
+    # InfrastructureManager, not by this backend.
 
 
 class SQLiteStorageBackend(StorageBackend):

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Binary provisioning — downloads pinned Zenoh and plugin artefacts."""
+
 import logging
 import os
 import platform

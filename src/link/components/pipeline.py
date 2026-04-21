@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+"""Pipeline thread — connects a source to a sink with cooperative shutdown."""
+
 import logging
 import threading
 import time

@@ -37,7 +37,7 @@ plugins:
       default_handler: python
       handlers:
         python:
-          paths: [src]  # Critical: Tells mkdocs where your code lives
+          paths: [src] # Critical: Tells mkdocs where your code lives
           options:
             docstring_style: google
             show_source: true
