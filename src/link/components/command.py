@@ -24,10 +24,10 @@ class AgentCommand(Sink):
         """
         self.callback = callback
 
-    def __call__(self, data: dict | list[dict]) -> bool | None:
+    def __call__(self, data: dict | list[dict]) -> bool:
         """Dispatches one or more commands to the runtime callback."""
         if not data:
-            return None
+            return True
         cmds = data if isinstance(data, list) else [data]
         return all(self._dispatch(cmd) for cmd in cmds)
 

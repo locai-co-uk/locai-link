@@ -235,8 +235,6 @@ def _apply_server_config(
     if raw_version != SCHEMA_VERSION:
         raise ValueError(f"Unsupported config schema version {raw_version!r} — this agent requires {SCHEMA_VERSION}")
 
-    print(raw)
-
     context = {
         "identity": {
             "device_id": device_id,
