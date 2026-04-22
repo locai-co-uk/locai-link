@@ -250,13 +250,17 @@ class ModelServer:
             if self.process is not None and self.process.poll() is not None:
                 return False
             try:
-                requests.get(url, timeout=1)
-                return True
+                resp = requests.get(url, timeout=1)
+                # llama-server returns 503 while the model is still loading. Only
+                # 2xx means the model is actually resident and ready for requests.
+                if resp.ok:
+                    return True
             except requests.RequestException:
-                # Sleep that's interruptible via stop() — so a STOP_SERVING during
-                # startup cancels the watcher instead of waiting out the full timeout.
-                if self._stop_event.wait(timeout=1.0):
-                    return False
+                pass
+            # Sleep that's interruptible via stop() — so a STOP_SERVING during
+            # startup cancels the watcher instead of waiting out the full timeout.
+            if self._stop_event.wait(timeout=1.0):
+                return False
         return False
 
     def stop(self):
