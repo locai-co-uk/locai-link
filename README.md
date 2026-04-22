@@ -35,7 +35,7 @@ curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install
 The installer will prompt securely for your platform password. If you omit any required argument, the installer will prompt for it interactively.
 
 ## Build from Source
-This guide covers setting up a device to run the Loc.ai agent from source (this repository).
+This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
 
 ### Installation
 First clone the repository (or download release):
