@@ -62,7 +62,8 @@ class HttpClient:
             resp.raise_for_status()
             return resp.json()
         except requests.Timeout:
-            logger.warning(f"HTTP GET Timeout ({url})")
+            # Self-healing: next poll retries. Keep at debug to avoid log spam on flaky networks.
+            logger.debug(f"HTTP GET Timeout ({url})")
             return None
         except requests.ConnectionError:
             logger.warning(f"HTTP GET Connection Failed ({url})")

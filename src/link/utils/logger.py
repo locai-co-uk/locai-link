@@ -8,10 +8,17 @@ import logging
 import queue
 import sys
 import threading
+import time
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import requests
 from pydantic import BaseModel
+
+try:
+    _AGENT_VERSION: str | None = version("locai-link")
+except PackageNotFoundError:
+    _AGENT_VERSION = None
 
 _SEVERITY_MAP = {
     "DEBUG": "info",
@@ -37,6 +44,8 @@ class LinkReporter(logging.Logger):
             status (str): The lifecycle status ('online' or 'offline').
         """
         payload: dict[str, Any] = {"status": status}
+        if _AGENT_VERSION:
+            payload["agent_version"] = _AGENT_VERSION
         if status == "offline":
             payload["metrics"] = {"cpu_usage": 0, "ram_usage": 0, "temperature_celsius": 0, "storage_available_gb": 0}
 
@@ -187,41 +196,58 @@ class AsyncZenohHandler(AsyncHandler):
 class AsyncHTTPHandler(AsyncHandler):
     """Logging handler that sends logs via HTTP requests asynchronously."""
 
+    _MAX_RETRIES = 2  # 3 total attempts (initial + 2 retries)
+
     def __init__(self, args: dict[str, Any]):
         """Initialises the HTTP handler.
 
         Args:
-            args (dict): Configuration arguments (api_key, templates).
+            args (dict): Configuration arguments (api_key, timeout, templates).
         """
         self.headers = {}
         if args.get("api_key"):
             self.headers["Authorization"] = f"Bearer {args['api_key']}"
 
+        # Split connect (fast-fail) and read (tolerant) timeouts. The read timeout
+        # is configurable via args.timeout — slow networks can bump it from config.
+        read_timeout = float(args.get("timeout", 10))
+        self.timeout: tuple[float, float] = (3.0, read_timeout)
+
         templates = {k: str(v) for k, v in args.items()}
         super().__init__(templates)
 
     def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str):
-        """Emits the log payload via HTTP POST/PUT.
+        """Emits the log payload via HTTP POST/PUT with bounded retry.
+
+        Retries timeouts, connection errors, and 5xx responses with exponential
+        backoff. 4xx responses are fatal — raised immediately so the worker logs
+        them once and moves on.
 
         Args:
-            target (str): The taret URL.
+            target (str): The target URL.
             payload (str): The JSON string payload.
             raw_payload (Any): The raw log record data.
             route_key (str): The routing key (log type).
         """
-        # Strict Method Selection
-        if route_key == "lifecycle_status":
-            method = requests.put
-        else:
-            # Everything else ("logs", "command_status", "model_status") uses POST
-            method = requests.post
-
+        method = requests.put if route_key == "lifecycle_status" else requests.post
         json_data = raw_payload if isinstance(raw_payload, dict) else None
         data = payload if not json_data else None
 
-        resp = method(target, json=json_data, data=data, headers=self.headers, timeout=5.0)
+        for attempt in range(self._MAX_RETRIES + 1):
+            retryable_err: Exception
+            try:
+                resp = method(target, json=json_data, data=data, headers=self.headers, timeout=self.timeout)
+                if resp.status_code < 500:
+                    # 2xx success or 4xx fatal — raise_for_status handles both.
+                    resp.raise_for_status()
+                    return
+                retryable_err = requests.HTTPError(f"{resp.status_code} {resp.reason}")
+            except (requests.Timeout, requests.ConnectionError) as e:
+                retryable_err = e
 
-        resp.raise_for_status()
+            if attempt >= self._MAX_RETRIES:
+                raise retryable_err
+            time.sleep(0.5 * (3**attempt))  # 0.5s, 1.5s
 
 
 class CleanFormatter(logging.Formatter):
