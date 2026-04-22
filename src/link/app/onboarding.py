@@ -228,11 +228,14 @@ def _apply_server_config(
     Raises:
         ValueError: If the schema version is unknown or validation fails.
     """
+
     # Strict version check. Unknown versions could mean the backend is ahead of
     # the agent, in which case we can't safely interpret the config.
     raw_version = raw.get("version")
     if raw_version != SCHEMA_VERSION:
         raise ValueError(f"Unsupported config schema version {raw_version!r} — this agent requires {SCHEMA_VERSION}")
+
+    print(raw)
 
     context = {
         "identity": {

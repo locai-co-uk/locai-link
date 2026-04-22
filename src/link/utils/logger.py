@@ -11,6 +11,15 @@ import threading
 from typing import Any
 
 import requests
+from pydantic import BaseModel
+
+_SEVERITY_MAP = {
+    "DEBUG": "info",
+    "INFO": "info",
+    "WARNING": "warning",
+    "ERROR": "error",
+    "CRITICAL": "critical",
+}
 
 try:
     import zenoh
@@ -107,12 +116,11 @@ class AsyncHandler(logging.Handler):
                 raw_payload = record.msg
                 payload = json.dumps(raw_payload, default=str)
             else:
-                # Text log -> Wrap in JSON structure
+                # Text log -> shape to backend LogCreate schema
                 raw_payload = {
-                    "timestamp": record.created,
-                    "level": record.levelname,
                     "message": record.getMessage(),
-                    "logger": record.name,
+                    "severity": _SEVERITY_MAP.get(record.levelname, "info"),
+                    "category": getattr(record, "category", "other"),
                 }
                 payload = json.dumps(raw_payload, default=str)
 
@@ -309,7 +317,7 @@ def _configure_logger(name, config, session):
         handlers = [{"type": "console"}]
 
     for h in handlers:
-        h_data = h.model_dump() if hasattr(h, "model_dump") else h
+        h_data = h.model_dump() if isinstance(h, BaseModel) else h
         h_type = h_data.get("type", "").lower()
         args = h_data.get("args", {})
 

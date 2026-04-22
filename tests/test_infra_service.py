@@ -10,7 +10,6 @@ def mock_linux_env(mocker, tmp_path):
     """Sets up a fake Linux environment."""
     mocker.patch("platform.system", return_value="linux")
     mocker.patch("pathlib.Path.home", return_value=tmp_path / "home")
-    # FIX: Mock getpass.getuser to avoid CI failures
     mocker.patch("getpass.getuser", return_value="ci_user")
 
     # Mock subprocess
