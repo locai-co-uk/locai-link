@@ -241,6 +241,8 @@ def _cmake_build(tag, cmake_flags, bin_dir):
             subprocess.run(
                 [
                     "git",
+                    "-c",
+                    "advice.detachedHead=false",
                     "clone",
                     "--depth",
                     "1",
@@ -310,15 +312,22 @@ def install_inference_engine():
             sys.exit(1)
         logger.info("Prebuilt download failed — falling back to building from source.")
 
+    cmake_flags = [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DWHISPER_BUILD_SERVER=ON",
+        "-DWHISPER_BUILD_EXAMPLES=ON",
+        "-DBUILD_SHARED_LIBS=OFF",
+    ]
+
+    # AppleClang rejects `-mcpu=native`, which ggml falls back to when ARM feature
+    # detection fails. Disable ggml's native detection on macOS so it picks safe
+    # baseline flags — Metal + Accelerate handle the perf-critical paths anyway.
+    if platform.system() == "Darwin":
+        cmake_flags.append("-DGGML_NATIVE=OFF")
+
     _cmake_build(
         tag=tag,
-        cmake_flags=[
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DWHISPER_BUILD_SERVER=ON",
-            "-DWHISPER_BUILD_EXAMPLES=ON",
-            "-DBUILD_SHARED_LIBS=OFF",
-        ]
-        + _detect_gpu_cmake_flags(),
+        cmake_flags=cmake_flags + _detect_gpu_cmake_flags(),
         bin_dir=BIN_WHISPER_DIR,
     )
 

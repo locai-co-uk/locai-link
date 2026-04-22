@@ -295,22 +295,23 @@ def run(args: argparse.Namespace):
     #   persisted-but-unapplied AgentConfig after a hot-swap failure.
     # Code update takes priority — if both are set, git pull covers the config too.
     if runtime.update_requested:
-        _apply_update_and_reexec(cwd)
+        _apply_update_and_reexec(cwd, agent_config)
     elif runtime.config_restart_requested:
         logger.info("Restarting agent to pick up persisted config...")
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def _apply_update_and_reexec(repo_dir: Path):
+def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
     """Applies an OTA update and re-execs the current Python process.
 
     Args:
         repo_dir (Path): The project root (git repository).
+        config (AgentConfig): The active config — used to pick which plugins refresh.
     """
     logger.info("Applying OTA update...")
     try:
         pull_and_update(repo_dir)
-        reinstall_plugin_binaries(repo_dir)
+        reinstall_plugin_binaries(repo_dir, config)
     except Exception as e:
         logger.critical(f"Update failed: {e}")
         sys.exit(1)

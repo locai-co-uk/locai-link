@@ -6,6 +6,26 @@ import subprocess
 import pytest
 
 from link.app import updater
+from link.config.models import AgentConfig
+
+
+def _config_with_types(*types: str) -> AgentConfig:
+    """Build a minimal AgentConfig whose pipelines reference the given component types."""
+    pipelines = [{"id": f"p{i}", "source": {"type": t}, "sink": {"type": "command"}} for i, t in enumerate(types)]
+    return AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "dev"}, "pipelines": pipelines})
+
+
+def _write_plugin(plugins_dir, name: str, entry_point_type: str | None = None):
+    """Create a fake plugin dir with install.py and optional pyproject entry-point."""
+    pdir = plugins_dir / name
+    pdir.mkdir(parents=True)
+    (pdir / "install.py").write_text(f"# {name}")
+    if entry_point_type:
+        (pdir / "pyproject.toml").write_text(
+            '[project]\nname = "x"\nversion = "0"\n'
+            f'[project.entry-points."locai.plugins"]\n{entry_point_type} = "x:Y"\n'
+        )
+
 
 # --- get_local_version ---
 
@@ -175,37 +195,43 @@ def test_pull_uses_current_branch_over_default(tmp_path, mocker):
 
 def test_reinstall_plugin_binaries_no_plugins_dir(tmp_path, mocker):
     mock_run = mocker.patch("link.app.updater.subprocess.run")
-    updater.reinstall_plugin_binaries(tmp_path)
+    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("alpha"))
     mock_run.assert_not_called()
 
 
-def test_reinstall_plugin_binaries_runs_each_install_script(tmp_path, mocker):
+def test_reinstall_plugin_binaries_runs_only_referenced_plugins(tmp_path, mocker):
     plugins = tmp_path / "plugins"
-    (plugins / "alpha").mkdir(parents=True)
-    (plugins / "alpha" / "install.py").write_text("# alpha")
-    (plugins / "bravo").mkdir(parents=True)
-    (plugins / "bravo" / "install.py").write_text("# bravo")
-    (plugins / "no_installer").mkdir(parents=True)  # Should be skipped
+    _write_plugin(plugins, "alpha", entry_point_type="alpha")
+    _write_plugin(plugins, "bravo", entry_point_type="bravo")
+    (plugins / "no_installer").mkdir(parents=True)  # Should be skipped (no install.py)
 
     mock_run = mocker.patch("link.app.updater.subprocess.run")
     mock_run.return_value = subprocess.CompletedProcess([], 0)
 
-    updater.reinstall_plugin_binaries(tmp_path)
+    # Config only references "alpha" — bravo should be skipped even though it has install.py
+    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("alpha"))
 
-    # Should have been called twice (alpha + bravo), skipping no_installer
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 1
     called_scripts = [str(call.args[0][-1]) for call in mock_run.call_args_list]
     assert any("alpha" in s for s in called_scripts)
-    assert any("bravo" in s for s in called_scripts)
+    assert not any("bravo" in s for s in called_scripts)
+
+
+def test_reinstall_plugin_skips_plugin_without_pyproject(tmp_path, mocker):
+    """A plugin with no pyproject.toml has no declared entry points → always skipped."""
+    plugins = tmp_path / "plugins"
+    _write_plugin(plugins, "orphan", entry_point_type=None)  # no pyproject
+
+    mock_run = mocker.patch("link.app.updater.subprocess.run")
+    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("orphan"))
+    mock_run.assert_not_called()
 
 
 def test_reinstall_plugin_continues_on_failure(tmp_path, mocker):
     """One plugin failing should not stop the others."""
     plugins = tmp_path / "plugins"
-    (plugins / "alpha").mkdir(parents=True)
-    (plugins / "alpha" / "install.py").write_text("# alpha")
-    (plugins / "bravo").mkdir(parents=True)
-    (plugins / "bravo" / "install.py").write_text("# bravo")
+    _write_plugin(plugins, "alpha", entry_point_type="alpha")
+    _write_plugin(plugins, "bravo", entry_point_type="bravo")
 
     def fake_run(cmd, **kwargs):
         if "alpha" in str(cmd):
@@ -215,4 +241,4 @@ def test_reinstall_plugin_continues_on_failure(tmp_path, mocker):
     mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
 
     # Should not raise
-    updater.reinstall_plugin_binaries(tmp_path)
+    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("alpha", "bravo"))

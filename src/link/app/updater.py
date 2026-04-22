@@ -11,7 +11,10 @@ re-execs the Python process via `os.execv()` to load the new code.
 import logging
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
+
+from link.config.models import AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -151,25 +154,66 @@ def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
     return True
 
 
-def reinstall_plugin_binaries(repo_dir: Path) -> None:
-    """Re-runs every plugin's install.py to refresh pinned binaries.
+def reinstall_plugin_binaries(repo_dir: Path, config: AgentConfig) -> None:
+    """Re-runs install.py only for plugins referenced by the active config.
 
-    Plugins use tag-based caching, so this is cheap when versions haven't changed.
+    Each plugin declares its component type(s) via `[project.entry-points."locai.plugins"]`
+    in its `pyproject.toml`. A plugin is installed only if at least one of those
+    entry-point names appears as `source.type` or `sink.type` in the config's
+    pipelines. Built-in component types (http_poll, http_post, command, etc.)
+    have no plugin dir and are silently skipped.
+
+    Plugins use tag-based caching internally, so re-runs for active plugins are
+    cheap when versions haven't changed.
 
     Args:
-        repo_dir (Path): The path to the project root.
+        repo_dir: The path to the project root.
+        config: The active agent config — determines which plugins to refresh.
     """
     plugins_dir = repo_dir / "plugins"
     if not plugins_dir.exists():
         logger.debug("No plugins/ directory — skipping binary refresh.")
         return
 
+    referenced = _referenced_component_types(config)
+
     for plugin_dir in sorted(plugins_dir.iterdir()):
         install_script = plugin_dir / "install.py"
         if not install_script.is_file():
             continue
+
+        declared = _plugin_entry_point_names(plugin_dir)
+        if not declared & referenced:
+            logger.debug(f"Skipping plugin '{plugin_dir.name}' — not used by active config.")
+            continue
+
         logger.info(f"Refreshing binaries for plugin '{plugin_dir.name}'...")
         try:
             subprocess.run(["uv", "run", "python", str(install_script)], cwd=repo_dir, check=True)
         except subprocess.CalledProcessError as e:
             logger.warning(f"Plugin '{plugin_dir.name}' install failed (exit {e.returncode}) — continuing.")
+
+
+def _referenced_component_types(config: AgentConfig) -> set[str]:
+    """Collects all source/sink component types referenced by the config's pipelines."""
+    types: set[str] = set()
+    for pipeline in config.pipelines:
+        if pipeline.source and pipeline.source.type:
+            types.add(pipeline.source.type)
+        if pipeline.sink and pipeline.sink.type:
+            types.add(pipeline.sink.type)
+    return types
+
+
+def _plugin_entry_point_names(plugin_dir: Path) -> set[str]:
+    """Reads the 'locai.plugins' entry-point names from a plugin's pyproject.toml."""
+    pyproject = plugin_dir / "pyproject.toml"
+    if not pyproject.is_file():
+        return set()
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"Could not parse {pyproject}: {e}")
+        return set()
+    entries = data.get("project", {}).get("entry-points", {}).get("locai.plugins", {})
+    return set(entries.keys())
