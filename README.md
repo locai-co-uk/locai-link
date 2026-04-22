@@ -35,6 +35,7 @@ curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install
 The installer prompts interactively for anything you omit, including your platform password.
 
 ## Build from Source
+This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
 
 ### Installation
 Clone the repository and install dependencies. `main.py setup` will install `uv` itself if needed.

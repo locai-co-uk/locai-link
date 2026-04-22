@@ -72,13 +72,18 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
         return ApplyResult(False, f"Invalid config: {e}")
 
     # 3. Identity drift guard — defence in depth.
+    #    Only device_id is checked here. api_url and api_key are intentionally
+    #    excluded: api_url is controlled by the --api-url CLI arg and the
+    #    backend may store a different value (e.g. prod URL) in the identity
+    #    section than what the agent resolved at startup; api_key immutability
+    #    is already enforced by the backend before the command is queued.
     new_identity = new_cfg.identity
-    if (
-        new_identity.device_id != cur_identity.device_id
-        or new_identity.api_url != cur_identity.api_url
-        or new_identity.api_key != cur_identity.api_key
-    ):
-        return ApplyResult(False, "Identity drift — rejected")
+    if new_identity.device_id != cur_identity.device_id:
+        return ApplyResult(
+            False,
+            f"Identity drift — device_id mismatch: "
+            f"expected {cur_identity.device_id!r}, got {new_identity.device_id!r}",
+        )
 
     # 4. Snapshot current state for revert.
     snapshot_cfg = runtime.agent_config.model_copy(deep=True)
