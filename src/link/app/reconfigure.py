@@ -81,8 +81,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
     if new_identity.device_id != cur_identity.device_id:
         return ApplyResult(
             False,
-            f"Identity drift — device_id mismatch: "
-            f"expected {cur_identity.device_id!r}, got {new_identity.device_id!r}",
+            f"Identity drift — device_id mismatch: expected {cur_identity.device_id!r}, got {new_identity.device_id!r}",
         )
 
     # 4. Snapshot current state for revert.
