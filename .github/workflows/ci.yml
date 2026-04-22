@@ -140,8 +140,12 @@ jobs:
     - name: Install System Deps (Linux)
       if: runner.os == 'Linux'
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libportaudio2
+        # GitHub-hosted runners point to azure.archive.ubuntu.com which is
+        # often flaky — without short timeouts apt hangs for minutes retrying
+        # each Ign'd InRelease before falling back to archive.ubuntu.com.
+        APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
+        sudo apt-get $APT_OPTS update
+        sudo apt-get $APT_OPTS install -y libportaudio2
 
     - name: Install System Deps (macOS)
       if: runner.os == 'macOS'

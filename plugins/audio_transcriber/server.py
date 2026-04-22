@@ -174,9 +174,42 @@ class WhisperServer:
             self.ready = True
             logger.info("Whisper server is ready.")
         elif not self._stop_event.is_set():
-            # Genuine health failure — not a stop()-triggered cancellation
+            # Genuine health failure — not a stop()-triggered cancellation.
+            # Surface the server's own log so operators can see WHY it didn't
+            # come up (missing DLL, model-load error, etc.).
             logger.error("Whisper server failed to respond to health check.")
+            self._log_tail()
             self.stop()
+
+    def _log_tail(self, lines: int = 20):
+        """Emit the last N lines of the server's stdout/stderr log to the agent's logger."""
+        try:
+            if not getattr(self, "log_path", None) or not self.log_path.exists():
+                return
+            with open(self.log_path, encoding="utf-8", errors="replace") as f:
+                tail = f.read().splitlines()[-lines:]
+            if tail:
+                logger.error(f"Last {len(tail)} line(s) from {self.log_path.name}:")
+                for line in tail:
+                    logger.error(f"  | {line}")
+        except Exception as e:
+            logger.debug(f"Could not read server log {self.log_path}: {e}")
+
+    def wait_until_ready(self, timeout: float) -> bool:
+        """Blocks until the server is healthy, has died, or `timeout` elapses.
+
+        Use when a caller genuinely needs the server up before proceeding — e.g.
+        an integration test or a one-shot transcribe/inference call. The pipeline
+        loop doesn't need this; it tolerates `ready=False` by emitting nothing.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.ready:
+                return True
+            if not self.running:
+                return False
+            time.sleep(0.2)
+        return False
 
     def _log_monitor_loop(self):
         """Reads server output and writes to log file."""

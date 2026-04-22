@@ -55,7 +55,8 @@ def test_whisper_serve_mode_lifecycle():
 
     agent = AudioTranscriber(model_path=MODEL_PATH, mode="serve", port=TEST_PORT)
 
-    time.sleep(5)
+    # Server.start() is non-blocking; wait for the background health watcher to confirm readiness.
+    assert agent.server.wait_until_ready(timeout=60), "Server did not become ready within 60s"
 
     pid = None
     try:

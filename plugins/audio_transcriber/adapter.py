@@ -147,8 +147,10 @@ class AudioTranscriber:
 
     def _transcribe_loop(self):
         """Transcribes the configured audio file and queues the result."""
-        # Wait for server to be fully ready
-        if not self.server.running:
+        # Previously just checked `server.running` — but with async server start,
+        # the process is up before /health responds. Wait for genuine readiness.
+        if not self.server.wait_until_ready(timeout=180):
+            logger.error("Whisper server did not become ready; transcription aborted.")
             return
 
         result = self.transcribe(self.audio_path)
