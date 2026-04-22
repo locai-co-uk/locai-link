@@ -26,6 +26,8 @@ class WhisperServer:
         self.port = int(port)
         self.process = None
         self.running = False
+        self.ready = False
+        self._stop_event = threading.Event()
 
         self.language = kwargs.get("language")
         self.n_threads = kwargs.get("n_threads")
@@ -147,21 +149,33 @@ class WhisperServer:
                 bufsize=1,
             )
             self.running = True
+            self.ready = False
+            self._stop_event.clear()
 
             # Start background thread to read logs
             self.monitor_thread = threading.Thread(target=self._log_monitor_loop, daemon=True)
             self.monitor_thread.start()
 
-            logger.info(f"Server logs: {self.log_path}")
+            # Health check runs in the background so start() can return immediately —
+            # otherwise slow-loading models (e.g. cold-cache Windows Defender scan)
+            # would block the caller's thread for up to `timeout` seconds.
+            self.health_thread = threading.Thread(target=self._health_watcher, daemon=True)
+            self.health_thread.start()
 
-            if not self._wait_for_health(timeout=120):
-                logger.error("Whisper server failed to respond to health check.")
-                self.stop()
-            else:
-                logger.info("Whisper server is ready.")
+            logger.info(f"Server logs: {self.log_path}")
 
         except Exception as e:
             logger.error(f"Failed to launch whisper server: {e}")
+            self.stop()
+
+    def _health_watcher(self):
+        """Polls /health until the server responds or times out. Runs on a worker thread."""
+        if self._wait_for_health(timeout=120):
+            self.ready = True
+            logger.info("Whisper server is ready.")
+        elif not self._stop_event.is_set():
+            # Genuine health failure — not a stop()-triggered cancellation
+            logger.error("Whisper server failed to respond to health check.")
             self.stop()
 
     def _log_monitor_loop(self):
@@ -183,19 +197,26 @@ class WhisperServer:
         start = time.time()
         url = f"http://{self.host}:{self.port}/health"
         while time.time() - start < timeout:
+            if self._stop_event.is_set():
+                return False
             if self.process is not None and self.process.poll() is not None:
                 return False
             try:
                 requests.get(url, timeout=2)
                 return True
             except requests.RequestException:
-                time.sleep(1)
+                # Sleep that's interruptible via stop() — so a STOP_SERVING during
+                # startup cancels the watcher instead of waiting out the full timeout.
+                if self._stop_event.wait(timeout=1.0):
+                    return False
         return False
 
     def stop(self):
         if not self.running:
             return
         logger.info("Stopping Whisper Server...")
+        self._stop_event.set()  # Cancel any in-flight health check
+        self.ready = False
         if self.process:
             self.process.terminate()
             try:
