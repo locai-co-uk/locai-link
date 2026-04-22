@@ -17,6 +17,7 @@ All notable changes migrating from `locai-link-old` to `locai-link-new`.
 - `src/link/inference/` — `dispatcher.py` and TFLite runners (`language_model_gguf.py`, `image_detection_cpy_tflite.py`, `audio_classification_yamnet_tflite.py`) replaced by plugin adapters.
 - `src/link/logger/` custom module — replaced by `src/link/utils/logger.py` with structured async handlers.
 - `src/link/analytics.py` — analytics now flow through the generic reporting handler system.
+- `src/link/components/buffers.py` — unused `LocalBuffer` stub.
 
 ## Registration & Onboarding
 
@@ -64,6 +65,11 @@ All notable changes migrating from `locai-link-old` to `locai-link-new`.
 - **Config-driven logging and reporting handlers** — `LoggingConfig.handlers` and `ReportingConfig.handlers` accept a list of typed handler configs (console, http, zenoh).
 - **Template substitution** in handler args — `${identity.device_id}`, `{cid}`, `{mid}` are resolved at runtime so a single config serves many devices.
 
+## Pipelines
+
+### Changed
+- **`AgentCommand` sink returns `True` on empty input** (was `None`). The pipeline loop treats non-truthy sink results as failures and warns, so idle poll ticks (`http_poll` returning `[]` because no commands are pending) used to produce a spurious `"Sink is returning False"` warning. An empty dispatch is now a successful no-op.
+
 ## Transport, Logging & Reporting
 
 ### Added
@@ -72,9 +78,13 @@ All notable changes migrating from `locai-link-old` to `locai-link-new`.
   - `AsyncHTTPHandler` — routes events to HTTP endpoints via template lookup (PUT for `lifecycle_status`, POST for everything else).
   - `AsyncZenohHandler` — publishes to Zenoh topics.
 - **`HttpError` exception class** with `status`, `reason`, and `retryable` fields — lets callers distinguish transient failures (timeout, 5xx, connection refused) from non-retryable ones (401, 403, 404). The old `HttpClient` swallowed every error as `None`/`False`.
+- **`agent_version` in lifecycle status payload** — `report_lifecycle()` now includes the agent's installed version (read from `importlib.metadata.version("locai-link")`), matching the backend's `AgentStatusUpdate.agent_version` semver requirement.
 
 ### Changed
 - `HttpClient.get()` / `post()` now classify errors: timeouts/5xx/connection errors return `None`/`False` (retryable); 4xx auth/client errors raise `HttpError`. `HttpPoller` and `HttpPublisher` catch `HttpError` and log with actionable context before re-raising.
+- **HTTP log payload shape** now matches the backend's `LogCreate` schema: `{message, severity, category}`. Severity is lowercase (`DEBUG` maps to `"info"`); category defaults to `"other"` and can be classified via `logger.info("msg", extra={"category": "security"})`. Replaces the previous `{timestamp, level, message, logger}` shape.
+- **`AsyncHTTPHandler` now retries** timeouts, connection errors, and 5xx responses with exponential backoff (`0.5s`, `1.5s`, capped at 2 retries). 4xx responses stay fatal so they aren't retried indefinitely. Timeout is configurable per-handler via `args.timeout` (default `10s`) and split into `(connect=3s, read=timeout)` — fast-fail on unreachable hosts, tolerant on slow responses.
+- **`HttpClient.get()` timeout** demoted from warning to debug — polling is self-healing (next tick retries) and a flaky network was producing console spam at warning level.
 
 ## Service Deployment
 
@@ -90,10 +100,15 @@ All notable changes migrating from `locai-link-old` to `locai-link-new`.
 
 ### Added
 - **`UPDATE_AGENT` command** handled by `AgentRuntime`. On receipt: reports completion, shuts down pipelines cleanly, signals `main.py` to update.
-- **`src/link/app/updater.py`** — `pull_and_update()` (git fetch/stash/pull/pop + `uv pip install -e .`), `reinstall_plugin_binaries()` (iterates plugins), `get_current_branch()`, `get_local_version()`.
+- **`src/link/app/updater.py`** — `pull_and_update()` (git fetch/stash/pull/pop + `uv pip install -e .`), `reinstall_plugin_binaries()` (config-driven, see Changed below), `get_current_branch()`, `get_local_version()`.
 - **In-place restart via `os.execv()`** — the process image is replaced but the PID is preserved. systemd/launchd see a continuously running process with no downtime gap.
 - **Branch-aware updates** — dev branches pull from `origin/<current-branch>`, not `origin/main`.
 - **Stash-safe updates** — dirty working trees are stashed and reapplied around the pull.
+- **`-DGGML_NATIVE=OFF` on macOS** for both llama.cpp and whisper.cpp builds — avoids ggml's `-mcpu=native` fallback, which AppleClang rejects on arm64. Metal + Accelerate carry the perf-critical paths on Apple Silicon, so there's no throughput regression. Linux/Windows unchanged.
+- **Silenced detached-HEAD git advisory** — tagged clones now pass `-c advice.detachedHead=false` inline to remove cosmetic noise from OTA build logs.
+
+### Changed
+- **`reinstall_plugin_binaries()` is now config-driven.** Previously, every plugin under `plugins/` had its `install.py` re-run on every OTA — so a device running only `language_model` still tried to build whisper.cpp, TFLite, etc. Now the updater walks the active `AgentConfig.pipelines[*].source/sink.type`, maps each type to its owning plugin via that plugin's `[project.entry-points."locai.plugins"]` in `pyproject.toml`, and only refreshes plugins whose declared entry-point names are actually referenced. Plugins not in use are silently skipped.
 
 ### Removed
 - The old `EXIT_CODE_UPDATE = 42` + subprocess-loop supervisor in `manager.py`. The new architecture needs no external supervisor.
@@ -140,3 +155,4 @@ main.py tui               # Launch text UI (optional)
 - There is no `manager.py`; all commands run via `main.py`.
 - Plugins must be installed separately as editable packages (`uv pip install -e "plugins/<name>"`). They are not bundled with the core agent.
 - Agent status, command status, and model status payloads flow through the new `LinkReporter` handler system — direct `requests.post` calls to `/agent/{device_id}/status` have been removed.
+- HTTP log payload shape changed from `{timestamp, level, message, logger}` to `{message, severity, category}` to match the backend's `LogCreate` schema. Backends consuming `/logs` must accept the new shape; the old field names are no longer emitted.
