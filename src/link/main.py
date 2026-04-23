@@ -51,7 +51,7 @@ def install(args: argparse.Namespace):
     """Orchestrator: The 'Web Installer' Logic.
 
     Handles cloning the repository, setting up the environment, registering the
-    device, and optionally starting the agent — all in one command.
+    device, and starting the agent — all in one command.
 
     Args:
         args (argparse.Namespace): The parsed command line arguments.
@@ -128,6 +128,7 @@ def install(args: argparse.Namespace):
         run_target(["setup"])
 
         # B. Register & Run
+        logger.info("Registering and starting the agent...")
         reg_args = [
             "run",
             "--device-name",
@@ -143,20 +144,8 @@ def install(args: argparse.Namespace):
             reg_args += ["--email", args.email]
             # Do NOT pass --password here; onboarding will prompt securely via getpass
 
-        start = args.start_running
-        if not start and sys.stdin.isatty():
-            confirm = input("\nDo you want to start the agent now? [Y/n] ").strip().lower()
-            if confirm in ["", "y", "yes"]:
-                start = True
-
-        if start:
-            run_target(reg_args)
-        else:
-            # Register only — run with registration args, then the session is saved for later.
-            # We still need to trigger registration, so we do a dry run that will exit after bootstrap.
-            logger.info("Registering device...")
-            run_target(reg_args)
-            print(f"\nInstallation complete. To run later:\n  cd {install_dir}\n  uv run main.py run")
+        # Directly run without checking any start conditions
+        run_target(reg_args)
 
     except subprocess.CalledProcessError as e:
         logger.critical(f"Installation step failed (Exit Code: {e.returncode})")

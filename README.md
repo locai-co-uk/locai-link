@@ -14,8 +14,7 @@ One-line installer for edge devices — sets up, registers, and activates in a s
 curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
   --device-name "my-edge-device-01" \
   --email "you@example.com" \
-  --registration-key "YOUR_REG_KEY" \
-  --start-running
+  --registration-key "YOUR_REG_KEY"
 ```
 
 **Windows (PowerShell):**
@@ -23,13 +22,12 @@ curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) `
   -DeviceName "my-edge-device-01" `
   -Email "you@example.com" `
-  -RegistrationKey "YOUR_REG_KEY" `
-  -StartRunning
+  -RegistrationKey "YOUR_REG_KEY"
 ```
 
 **Windows (CMD):**
 ```cmd
-curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY" --start-running
+curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
 The installer prompts interactively for anything you omit, including your platform password.
