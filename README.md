@@ -12,17 +12,13 @@ One-line installer for edge devices — sets up, registers, and activates in a s
 **Linux / macOS:**
 ```bash
 curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
-  --device-name "my-edge-device-01" \
-  --email "you@example.com" \
-  --registration-key "YOUR_REG_KEY"
+  --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
 **Windows (PowerShell):**
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) `
-  -DeviceName "my-edge-device-01" `
-  -Email "you@example.com" `
-  -RegistrationKey "YOUR_REG_KEY"
+  -DeviceName "my-edge-device-01" -Email "you@example.com" -RegistrationKey "YOUR_REG_KEY"
 ```
 
 **Windows (CMD):**
@@ -49,9 +45,7 @@ Register a new device with a Registration Key from the Loc.ai dashboard:
 
 ```bash
 uv run main.py run \
-  --device-name "my-edge-device-01" \
-  --email "you@example.com" \
-  --registration-key "YOUR_REG_KEY"
+  --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
 You'll be prompted for your password (or pass `--token <JWT>` to skip). Add `--api-url "<url>"` when pointing at a non-production control plane.
