@@ -106,7 +106,8 @@ class LanguageModel:
             self.server.stop()
         if getattr(self, "remote_conn", None):
             try:
-                self.remote_conn.close()
+                if self.remote_conn is not None:
+                    self.remote_conn.close()
             except Exception:
                 pass
 

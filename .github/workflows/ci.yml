@@ -73,6 +73,9 @@ jobs:
       run: |
         uv venv
         uv pip install -e ".[dev]"
+        # Install language_model plugin so tests/test_language_model_server.py can import it.
+        # No build step — just the Python package; integration tests live in the plugin dir.
+        uv pip install -e "plugins/language_model[dev]"
 
     - name: Run Unit Tests
       shell: bash

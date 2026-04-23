@@ -99,7 +99,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
             runtime.pipeline_configs = {p.id: p for p in new_cfg.pipelines}
             if runtime.state_manager is not None:
                 runtime.state_manager.update_full_config(new_cfg)
-        return ApplyResult(True, f"Applied — {len(new_cfg.pipelines)} pipeline(s)")
+        return ApplyResult(True, f"Applied - {len(new_cfg.pipelines)} pipeline(s)")
 
     except Exception as apply_err:
         logger.error(f"apply_agent_config failed: {apply_err}", exc_info=True)

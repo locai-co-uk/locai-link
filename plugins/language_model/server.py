@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class ModelServer:
     """Manages the llama-server background process."""
 
-    def __init__(self, model_path, host="0.0.0.0", port=8003, on_telemetry=None, **kwargs):
+    def __init__(self, model_path, host="127.0.0.1", port=8003, on_telemetry=None, **kwargs):
         self.model_path = Path(model_path)
         self.host = host
         self.port = int(port)
@@ -102,7 +102,11 @@ class ModelServer:
             logger.error(f"Inference binary not found in {self.bin_dir}. Run install.py")
             return
 
-        logger.info(f"Starting Model Server on http://{self.host}:{self.port}...")
+        # Show a clickable URL in the log. Wildcard binds (0.0.0.0 / ::) aren't
+        # valid connect targets — swap them for `localhost` so the line opens on
+        # Windows terminals and browsers too.
+        display_host = "localhost" if self.host in ("0.0.0.0", "::", "") else self.host
+        logger.info(f"Starting Model Server on http://{display_host}:{self.port}...")
 
         logs_dir = Path.cwd() / "logs"
         logs_dir.mkdir(exist_ok=True)
@@ -243,7 +247,11 @@ class ModelServer:
 
     def _wait_for_health(self, timeout):
         start = time.time()
-        url = f"http://{self.host}:{self.port}/health"
+        # 0.0.0.0 / :: are bind addresses, not connect targets. Linux/macOS quietly
+        # remap them to loopback; Windows' WSAConnect returns WSAEADDRNOTAVAIL.
+        # Always hit the real loopback address for same-host health checks.
+        host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
+        url = f"http://{host}:{self.port}/health"
         while time.time() - start < timeout:
             if self._stop_event.is_set():
                 return False

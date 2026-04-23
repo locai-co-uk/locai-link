@@ -146,7 +146,7 @@ class AgentRuntime:
                     config = self.pipeline_configs.get(pipeline_id)
                     if config:
                         port = payload.get("port", 8100)
-                        host = payload.get("host", "0.0.0.0")
+                        host = payload.get("host", "127.0.0.1")
                         alias = payload.get("model_display_name", "locai-model")
 
                         config.source.args.update({"mode": "serve", "port": port, "host": host, "alias": alias})
@@ -328,7 +328,6 @@ class AgentRuntime:
         with self.lock:
             pipe = self.pipelines.get(pipeline_id)
             if pipe:
-                logger.info(f"Stopping pipeline '{pipeline_id}'...")
                 try:
                     pipe.stop()
                     pipe.join(timeout=2.0)
