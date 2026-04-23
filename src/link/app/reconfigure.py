@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from link.adapters.http_client import HttpClient
 from link.config.models import SCHEMA_VERSION, AgentConfig
 from link.config.templating import resolve_templates
 from link.utils.logger import rebuild_handlers
@@ -99,6 +100,20 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
             runtime.pipeline_configs = {p.id: p for p in new_cfg.pipelines}
             if runtime.state_manager is not None:
                 runtime.state_manager.update_full_config(new_cfg)
+        identity = new_cfg.identity
+        try:
+            client = HttpClient(
+                base_url=identity.api_url,
+                default_headers={"Authorization": f"Bearer {identity.api_key}"},
+                timeout=10.0,
+            )
+            client.post(
+                f"agent/{identity.device_id}/update_applied_agent_config",
+                json_data={"config": new_cfg.model_dump()},
+            )
+            client.close()
+        except Exception as e:
+            logger.warning(f"Could not report applied config to backend: {e}")
         return ApplyResult(True, f"Applied - {len(new_cfg.pipelines)} pipeline(s)")
 
     except Exception as apply_err:
