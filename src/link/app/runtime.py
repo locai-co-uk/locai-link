@@ -13,6 +13,7 @@ import requests
 import zenoh
 
 import link.components  # noqa: F401
+from link.adapters.http_client import HttpClient
 from link.app.state import StateManager
 from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
@@ -405,6 +406,23 @@ class AgentRuntime:
                     self.state_manager.update_pipeline_config(new_pipeline_config)
                 except Exception as e:
                     logger.warning(f"Failed to persist state: {e}")
+            current_pipelines = list(self.pipeline_configs.values())
+
+        current_cfg = self.agent_config.model_copy(update={"pipelines": current_pipelines})
+        identity = current_cfg.identity
+        try:
+            client = HttpClient(
+                base_url=identity.api_url,
+                default_headers={"Authorization": f"Bearer {identity.api_key}"},
+                timeout=10.0,
+            )
+            client.post(
+                f"agent/{identity.device_id}/update_applied_agent_config",
+                json_data={"config": current_cfg.model_dump()},
+            )
+            client.close()
+        except Exception as e:
+            logger.warning(f"Could not report applied config to backend: {e}")
 
         logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
