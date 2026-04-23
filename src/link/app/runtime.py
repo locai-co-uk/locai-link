@@ -51,8 +51,6 @@ class AgentRuntime:
         self.running = True
         self.shutdown_event = threading.Event()
         self.update_requested = False
-        # Set by `reconfigure.apply_agent_config` when a hot-swap fails to
-        # revert cleanly and a process restart is the only safe recovery path.
         self.config_restart_requested = False
 
         if threading.current_thread() is threading.main_thread():
@@ -192,7 +190,7 @@ class AgentRuntime:
                 self._log_status()
 
             elif cmd_type == "UPDATE_AGENT":
-                logger.info("OTA update command received. Preparing to update...")
+                logger.info("OTA update command received. Preparing to update...", extra={"category": "deployment"})
                 self.status_logger.report_command(cmd_id, "completed", "Update accepted — restarting.")
                 # Signal main.py to pull updates and re-exec after shutdown completes
                 self.update_requested = True

@@ -184,7 +184,7 @@ class ModelServer:
             # Genuine health failure — not a stop()-triggered cancellation.
             # Surface the server's own log so operators can see WHY it didn't
             # come up (missing DLL, CUDA runtime mismatch, OOM, etc.).
-            logger.error("Server failed to respond to health check.")
+            logger.error("Server failed to respond to health check.", extra={"category": "health"})
             self._log_tail()
             self.stop()
 

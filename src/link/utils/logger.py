@@ -28,6 +28,43 @@ _SEVERITY_MAP = {
     "CRITICAL": "critical",
 }
 
+# Maps logger-name prefixes to default categories for the backend's LogCreate schema.
+_CATEGORY_BY_MODULE: list[tuple[str, str]] = [
+    ("link.app.onboarding", "authentication"),
+    ("link.app.updater", "deployment"),
+    ("link.app.reconfigure", "configuration"),
+    ("link.app.state", "configuration"),
+    ("link.config", "configuration"),
+    ("link.app.runtime", "execution"),
+    ("link.components", "execution"),
+    ("link.adapters", "health"),
+    ("link.infra", "system"),
+    ("link.utils", "system"),
+    ("link_language_model", "inference"),
+    ("link_audio_transcriber", "inference"),
+    ("link_image_classifier", "inference"),
+    ("link_audio_classifier", "inference"),
+]
+
+
+class CategoryFilter(logging.Filter):
+    """Injects a default `category` on every record based on its logger name.
+
+    Records that already carry a `category` (from `extra={"category": "..."}`)
+    are left untouched, so per-call overrides win over module defaults.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "category"):
+            for prefix, cat in _CATEGORY_BY_MODULE:
+                if record.name.startswith(prefix):
+                    record.category = cat
+                    break
+        return True
+
+
+_category_filter = CategoryFilter()
+
 try:
     import zenoh
 except ImportError:
@@ -208,8 +245,6 @@ class AsyncHTTPHandler(AsyncHandler):
         if args.get("api_key"):
             self.headers["Authorization"] = f"Bearer {args['api_key']}"
 
-        # Split connect (fast-fail) and read (tolerant) timeouts. The read timeout
-        # is configurable via args.timeout — slow networks can bump it from config.
         read_timeout = float(args.get("timeout", 10))
         self.timeout: tuple[float, float] = (3.0, read_timeout)
 
@@ -360,16 +395,19 @@ def _configure_logger(name, config, session):
             console = logging.StreamHandler(sys.stdout)
             console.setFormatter(PrettyFormatter("%(message)s"))
             console.setLevel(handler_level)
+            console.addFilter(_category_filter)
             logger.addHandler(console)
 
         elif h_type.startswith("zenoh") and zenoh and session:
             z = AsyncZenohHandler(session, args)
             z.setFormatter(CleanFormatter())
             z.setLevel(handler_level)
+            z.addFilter(_category_filter)
             logger.addHandler(z)
 
         elif h_type == "http":
             h = AsyncHTTPHandler(args)
             h.setFormatter(CleanFormatter())
             h.setLevel(handler_level)
+            h.addFilter(_category_filter)
             logger.addHandler(h)

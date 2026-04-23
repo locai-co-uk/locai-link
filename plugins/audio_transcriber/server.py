@@ -177,7 +177,7 @@ class WhisperServer:
             # Genuine health failure — not a stop()-triggered cancellation.
             # Surface the server's own log so operators can see WHY it didn't
             # come up (missing DLL, model-load error, etc.).
-            logger.error("Whisper server failed to respond to health check.")
+            logger.error("Whisper server failed to respond to health check.", extra={"category": "health"})
             self._log_tail()
             self.stop()
 

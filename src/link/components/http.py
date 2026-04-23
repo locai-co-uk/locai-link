@@ -53,7 +53,10 @@ class HttpPoller(Source):
         try:
             return self.client.get()
         except HttpError as e:
-            logger.error(f"Command poll rejected ({e.status}): {e.reason}")
+            # 401/403 on the command channel = creds were revoked or rotated.
+            # Surface as authentication so it's findable in the backend UI.
+            category = "authentication" if e.status in (401, 403) else "execution"
+            logger.error(f"Command poll rejected ({e.status}): {e.reason}", extra={"category": category})
             raise
 
 

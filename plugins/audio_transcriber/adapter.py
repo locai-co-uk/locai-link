@@ -140,7 +140,7 @@ class AudioTranscriber:
         """Monitors whisper-server health in serve mode."""
         while self.running:
             if not self.server.running:
-                logger.error("Whisper server process died!")
+                logger.error("Whisper server process died!", extra={"category": "health"})
                 self.running = False
                 break
             time.sleep(10)

@@ -144,7 +144,7 @@ class LanguageModel:
     def _server_heartbeat_loop(self):
         while self.running:
             if not self.server.running:
-                logger.error("Server process died!")
+                logger.error("Server process died!", extra={"category": "health"})
                 self.running = False
                 break
             # status = {
