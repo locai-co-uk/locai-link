@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,7 +25,6 @@ import requests
 pytest.importorskip("link_language_model.server", reason="language_model plugin not installed")
 
 from link_language_model.server import ModelServer  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -131,8 +129,9 @@ def test_wait_until_ready_bails_when_process_dies(make_server):
     srv = make_server(port=19004)
     proc = _alive_proc()
 
-    with patch("subprocess.Popen", return_value=proc), patch(
-        "requests.get", side_effect=requests.RequestException("loading")
+    with (
+        patch("subprocess.Popen", return_value=proc),
+        patch("requests.get", side_effect=requests.RequestException("loading")),
     ):
         srv.start()
         # Flip the process to 'exited' after a short delay.
@@ -203,16 +202,22 @@ def test_health_check_remaps_wildcard_bind_to_loopback(make_server):
     assert not any("0.0.0.0" in u for u in urls)
 
 
-@pytest.mark.parametrize("bind_host,expected_in_url", [
-    ("127.0.0.1", "127.0.0.1"),
-    ("192.168.1.50", "192.168.1.50"),
-])
+@pytest.mark.parametrize(
+    "bind_host,expected_in_url",
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("192.168.1.50", "192.168.1.50"),
+    ],
+)
 def test_health_check_preserves_non_wildcard_hosts(make_server, bind_host, expected_in_url):
     """Explicit hosts (loopback or LAN) must be used verbatim, not remapped."""
     srv = make_server(host=bind_host, port=19008)
     urls: list[str] = []
 
-    with patch("requests.get", side_effect=lambda u, *a, **kw: urls.append(u) or (_ for _ in ()).throw(requests.RequestException())):  # noqa: E501
+    with patch(
+        "requests.get",
+        side_effect=lambda u, *a, **kw: urls.append(u) or (_ for _ in ()).throw(requests.RequestException()),
+    ):  # noqa: E501
         srv._wait_for_health(timeout=0.5)
 
     assert urls and all(expected_in_url in u for u in urls)
