@@ -56,10 +56,6 @@ def install(args: argparse.Namespace):
     Args:
         args (argparse.Namespace): The parsed command line arguments.
     """
-    print("=" * 40)
-    print("  Loc.ai Agent Installer")
-    print("=" * 40)
-
     cwd = Path.cwd()
 
     # Determine API URL
