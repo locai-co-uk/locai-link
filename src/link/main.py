@@ -21,7 +21,7 @@ from link.utils.logger import setup_logging
 
 logger = setup_logging()
 
-DEFAULT_API_URL = "https://api.loc.ai/api/v1"
+DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
 DEFAULT_REPO_URL = "https://github.com/locai-co-uk/locai-link.git"
 DEFAULT_BRANCH = "main"
 
