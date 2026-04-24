@@ -58,11 +58,12 @@ class AudioClassifier:
         self.min_interval = float(min_interval)
 
         self.labels = self._load_labels()
-        self._load_backend()
 
         self.window_size = int(SAMPLE_RATE * PATCH_WINDOW_SECONDS)
         self.hop_size = int(SAMPLE_RATE * PATCH_HOP_SECONDS)
         self.buffer = np.zeros(self.window_size, dtype=np.float32)
+
+        self._load_backend()
 
         self.running = True
         self.stream = None
