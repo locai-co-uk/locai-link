@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: CC0-1.0
 
 [build-system]
-requires = ["uv_build>=0.10.0"]
+requires = ["uv_build>=0.10.0,<0.12"]
 build-backend = "uv_build"
 
 [project]
 name = "locai-link"
-version = "1.0.4"
+version = "1.0.5"
 description = "High-performance modular edge inference agent"
 readme = "README.md"
 requires-python = ">=3.11"
