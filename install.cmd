@@ -32,13 +32,19 @@ if exist "%CD%\main.py" if exist "%CD%\src\link" set "IS_LOCAL=1"
 if "!IS_LOCAL!"=="1" (
     echo Found local repository
 ) else (
-    set "INSTALL_DIR=%CD%\locai-link"
-    if exist "%CD%\locai-link\.git" (
+    set "BASE=%CD%"
+    echo !BASE! | findstr /I /B "%SystemRoot% %ProgramFiles% %ProgramFiles(x86)%" >nul
+    if not errorlevel 1 (
+        echo Current directory ^(!BASE!^) is a system path - installing to %USERPROFILE% instead.
+        set "BASE=%USERPROFILE%"
+    )
+    set "INSTALL_DIR=!BASE!\locai-link"
+    if exist "!BASE!\locai-link\.git" (
         echo Updating existing clone at !INSTALL_DIR!...
-        git -C "%CD%\locai-link" pull --ff-only
+        git -C "!BASE!\locai-link" pull --ff-only
     ) else (
         echo Cloning !LOCAI_REPO_URL! ^(!LOCAI_BRANCH!^) into !INSTALL_DIR!...
-        git clone --depth 1 -b !LOCAI_BRANCH! !LOCAI_REPO_URL! "%CD%\locai-link"
+        git clone --depth 1 -b !LOCAI_BRANCH! !LOCAI_REPO_URL! "!BASE!\locai-link"
     )
 )
 

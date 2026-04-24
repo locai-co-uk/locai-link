@@ -25,7 +25,16 @@ if ((Test-Path ".\main.py") -and (Test-Path ".\src\link")) {
     Write-Host "Found local repository" -ForegroundColor Green
     $InstallDir = (Get-Location).Path
 } else {
-    $InstallDir = Join-Path (Get-Location).Path "locai-link"
+    $Base = (Get-Location).Path
+    $SystemRoots = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+    foreach ($root in $SystemRoots) {
+        if ($Base.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host "Current directory ($Base) is a system path - installing to $HOME instead." -ForegroundColor Yellow
+            $Base = $HOME
+            break
+        }
+    }
+    $InstallDir = Join-Path $Base "locai-link"
     if (Test-Path (Join-Path $InstallDir ".git")) {
         Write-Host "Updating existing clone at $InstallDir..." -ForegroundColor Cyan
         git -C $InstallDir pull --ff-only

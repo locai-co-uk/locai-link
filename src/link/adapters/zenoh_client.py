@@ -5,9 +5,10 @@
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import zenoh
+if TYPE_CHECKING:
+    import zenoh
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +25,13 @@ class ZenohClient:
             args (dict[str, Any] | None): Dictionary from config.transport.args.
         """
         self.args = args or {}
-        self._session = None
+        self._session: "zenoh.Session | None" = None
         self._zenoh_config = self._build_config()
 
-    def _build_config(self) -> zenoh.Config:
-        """Translates args into Zenoh's internal configuration format.
+    def _build_config(self) -> "zenoh.Config":
+        """Translates args into Zenoh's internal configuration format."""
+        import zenoh  # lazy — triggers the native DLL load only when Zenoh is actually used
 
-        Returns:
-            zenoh.Config: The configured Zenoh configuration object.
-        """
         z_conf = zenoh.Config()
 
         # 1. Mode
@@ -50,12 +49,10 @@ class ZenohClient:
 
         return z_conf
 
-    def get_session(self) -> zenoh.Session:
-        """Returns the active session, opening it if necessary.
+    def get_session(self) -> "zenoh.Session":
+        """Returns the active session, opening it if necessary."""
+        import zenoh  # lazy — see module docstring
 
-        Returns:
-            zenoh.Session: The active Zenoh session.
-        """
         if self._session:
             return self._session
 

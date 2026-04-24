@@ -7,10 +7,9 @@ import logging
 import signal
 import threading
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import requests
-import zenoh
 
 import link.components  # noqa: F401
 from link.adapters.http_client import HttpClient
@@ -19,6 +18,9 @@ from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
 from link.config.models import AgentConfig, GenericConfig, PipelineConfig
 from link.utils.logger import LinkReporter
+
+if TYPE_CHECKING:
+    import zenoh
 
 # Standard logger for debug/info text
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ class AgentRuntime:
         self,
         agent_config: AgentConfig,
         state_manager: StateManager | None = None,
-        zenoh_session: zenoh.Session | None = None,
+        zenoh_session: "zenoh.Session | None" = None,
     ):
         """Initialise the runtime with agent configuration and optional managers.
 

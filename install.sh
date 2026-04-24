@@ -29,7 +29,15 @@ if [ -f "main.py" ] && [ -d "src/link" ]; then
     echo "Found local repository"
     INSTALL_DIR="$(pwd)"
 else
-    INSTALL_DIR="$(pwd)/locai-link"
+    BASE="$(pwd)"
+    case "$BASE" in
+        /usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/opt|/opt/*|/etc|/etc/*|\
+        /Library|/Library/*|/System|/System/*|/Applications|/Applications/*|/var|/var/*)
+            echo "Current directory ($BASE) is a system path — installing to \$HOME instead."
+            BASE="$HOME"
+            ;;
+    esac
+    INSTALL_DIR="$BASE/locai-link"
     if [ -d "$INSTALL_DIR/.git" ]; then
         echo "Updating existing clone at $INSTALL_DIR..."
         git -C "$INSTALL_DIR" pull --ff-only || true
