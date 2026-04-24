@@ -3,15 +3,20 @@
 
 import atexit
 import logging
+import os
+import platform
 import queue
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
-import cv2  # type: ignore
-import numpy as np
-import requests
+if platform.system() == "Darwin":
+    os.environ.setdefault("OPENCV_AVFOUNDATION_SKIP_AUTH", "1")
+
+import cv2  # type: ignore  # noqa: E402
+import numpy as np  # noqa: E402
+import requests  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,7 @@ class ImageClassifier:
         show_window=False,
         width=None,
         height=None,
+        camera_warmup_timeout=10.0,
         **kwargs,
     ):
         # 1. Configuration & Paths
@@ -56,6 +62,8 @@ class ImageClassifier:
         self.show_window = show_window
         self.cam_width = width
         self.cam_height = height
+        # macOS cold-opens on a shared camera regularly exceed the old 2s default.
+        self.camera_warmup_timeout = float(camera_warmup_timeout)
 
         # 2. Load Static Resources
         self.labels = self._load_labels()
@@ -81,8 +89,8 @@ class ImageClassifier:
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
 
-        logger.info("Waiting for camera warmup...")
-        if not self._camera_ready.wait(timeout=2.0):
+        logger.info(f"Waiting for camera warmup (up to {self.camera_warmup_timeout:.0f}s)...")
+        if not self._camera_ready.wait(timeout=self.camera_warmup_timeout):
             self.stop()
             error = self._startup_error or "Camera startup timed out (Resource busy?)"
             raise RuntimeError(f"Failed to start camera: {error}")

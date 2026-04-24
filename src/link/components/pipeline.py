@@ -56,6 +56,10 @@ class Pipeline(threading.Thread):
                         # Prevent tight loop if source returns None (e.g. empty queue)
                         time.sleep(0.01)
 
+                except StopIteration as e:
+                    logger.info(f"Pipeline '{self.pipeline_id}' source stopped: {e}")
+                    self.running = False
+                    break
                 except Exception as e:
                     logger.warning(f"Error in pipeline '{self.pipeline_id}': {e}")
                     time.sleep(1)  # Backoff on error

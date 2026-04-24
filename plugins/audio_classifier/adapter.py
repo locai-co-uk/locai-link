@@ -158,8 +158,11 @@ class AudioClassifier:
         self.stream.start()
 
     # --- INFERENCE LOOP (Runs in Python Thread) ---
+    _MAX_CONSECUTIVE_FAILURES = 5
+
     def _inference_loop(self):
         """Consumes audio chunks from queue and runs inference."""
+        consecutive_failures = 0
         while self.running:
             try:
                 # Wait for data from the audio callback
@@ -177,6 +180,7 @@ class AudioClassifier:
 
             try:
                 label, score = self._run_inference(self.buffer)
+                consecutive_failures = 0
 
                 payload = self._process_event_state(label, score)
                 if payload:
@@ -188,7 +192,12 @@ class AudioClassifier:
                     self.output_queue.put(payload)
                     logger.debug(f"Audio Detected: {payload['model_output']} ({payload['model_output_confidence']})")
             except Exception as e:
-                logger.error(f"Inference error: {e}")
+                consecutive_failures += 1
+                logger.error(f"Inference error ({consecutive_failures}/{self._MAX_CONSECUTIVE_FAILURES}): {e}")
+                if consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                    logger.error("Too many consecutive inference failures — stopping inference thread.")
+                    self.running = False
+                    break
 
     # --- HELPER METHODS (Unchanged) ---
     def _resolve_path(self, path_str):
@@ -242,7 +251,11 @@ class AudioClassifier:
 
         logger.info(f"Loading TFLite model: {self.model_path.name}")
         self.interpreter = Interpreter(model_path=str(self.model_path))
+
+        input_idx = self.interpreter.get_input_details()[0]["index"]
+        self.interpreter.resize_tensor_input(input_idx, [self.window_size])
         self.interpreter.allocate_tensors()
+
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
         self.input_idx = self.input_details[0]["index"]
