@@ -4,6 +4,9 @@
 
 set -e
 
+REPO_URL="${LOCAI_REPO_URL:-https://github.com/locai-co-uk/locai-link.git}"
+BRANCH="${LOCAI_BRANCH:-main}"
+
 # 1. Check for uv, install if missing
 if ! command -v uv &> /dev/null; then
     echo "Installing uv package manager..."
@@ -14,15 +17,29 @@ if ! command -v uv &> /dev/null; then
     else export PATH="$HOME/.local/bin:$PATH"; fi
 fi
 
-# 2. Determine source (Local vs Remote)
-if [ -f "main.py" ]; then
-    echo "Found local main.py"
-    MAIN_TARGET="main.py"
-else
-    echo "Downloading remote main.py..."
-    MAIN_TARGET="https://raw.githubusercontent.com/locai-co-uk/locai-link/main/main.py"
+# 2. git is required — main.py is a thin shim that imports `link.*` from ./src,
+#    so the full repo must be on disk before we can run it.
+if ! command -v git &> /dev/null; then
+    echo "Error: git is required for installation but was not found." >&2
+    exit 1
 fi
 
-# 3. Launch Installer
+# 3. Locate or clone the repo
+if [ -f "main.py" ] && [ -d "src/link" ]; then
+    echo "Found local repository"
+    INSTALL_DIR="$(pwd)"
+else
+    INSTALL_DIR="$(pwd)/locai-link"
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        echo "Updating existing clone at $INSTALL_DIR..."
+        git -C "$INSTALL_DIR" pull --ff-only || true
+    else
+        echo "Cloning $REPO_URL ($BRANCH) into $INSTALL_DIR..."
+        git clone --depth 1 -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    fi
+fi
+
+# 4. Launch Installer from inside the repo
 echo "Launching Installer..."
-uv run "$MAIN_TARGET" install "$@"
+cd "$INSTALL_DIR"
+uv run main.py install "$@"

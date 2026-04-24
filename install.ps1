@@ -3,6 +3,9 @@
 
 $ErrorActionPreference = "Stop"
 
+$RepoUrl = if ($env:LOCAI_REPO_URL) { $env:LOCAI_REPO_URL } else { "https://github.com/locai-co-uk/locai-link.git" }
+$Branch  = if ($env:LOCAI_BRANCH)   { $env:LOCAI_BRANCH }   else { "main" }
+
 # 1. Check for uv, install if missing
 if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
     Write-Host "Installing uv package manager..." -ForegroundColor Cyan
@@ -10,15 +13,33 @@ if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
     $env:PATH += ";$HOME\.local\bin;$HOME\.cargo\bin"
 }
 
-# 2. Determine source (Local vs Remote)
-if (Test-Path ".\main.py") {
-    Write-Host "Found local main.py" -ForegroundColor Green
-    $MainTarget = "main.py"
-} else {
-    Write-Host "Downloading remote main.py..." -ForegroundColor Cyan
-    $MainTarget = "https://raw.githubusercontent.com/locai-co-uk/locai-link/main/main.py"
+# 2. git is required — main.py is a thin shim that imports `link.*` from .\src,
+#    so the full repo must be on disk before we can run it.
+if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
+    Write-Host "Error: git is required for installation but was not found." -ForegroundColor Red
+    exit 1
 }
 
-# 3. Launch Installer
+# 3. Locate or clone the repo
+if ((Test-Path ".\main.py") -and (Test-Path ".\src\link")) {
+    Write-Host "Found local repository" -ForegroundColor Green
+    $InstallDir = (Get-Location).Path
+} else {
+    $InstallDir = Join-Path (Get-Location).Path "locai-link"
+    if (Test-Path (Join-Path $InstallDir ".git")) {
+        Write-Host "Updating existing clone at $InstallDir..." -ForegroundColor Cyan
+        git -C $InstallDir pull --ff-only
+    } else {
+        Write-Host "Cloning $RepoUrl ($Branch) into $InstallDir..." -ForegroundColor Cyan
+        git clone --depth 1 -b $Branch $RepoUrl $InstallDir
+    }
+}
+
+# 4. Launch Installer from inside the repo
 Write-Host "Launching Installer..." -ForegroundColor Cyan
-uv run $MainTarget install @args
+Push-Location $InstallDir
+try {
+    uv run main.py install @args
+} finally {
+    Pop-Location
+}
