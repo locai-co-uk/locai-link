@@ -1,10 +1,42 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+[CmdletBinding(PositionalBinding=$false)]
+param(
+    [string]$DeviceName,
+    [string]$Email,
+    [string]$Password,
+    [string]$Token,
+    [string]$RegistrationKey,
+    [string]$DeviceType,
+    [string]$ApiUrl,
+    [string]$RepoUrl,
+    [string]$Branch,
+    [switch]$StartRunning,
+    [switch]$Dev,
+    [Parameter(ValueFromRemainingArguments=$true)]
+    [string[]]$RemainingArgs
+)
+
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = if ($env:LOCAI_REPO_URL) { $env:LOCAI_REPO_URL } else { "https://github.com/locai-co-uk/locai-link.git" }
-$Branch  = if ($env:LOCAI_BRANCH)   { $env:LOCAI_BRANCH }   else { "main" }
+# Resolve repo source — explicit param wins, then env var, then default.
+if (-not $RepoUrl) { $RepoUrl = if ($env:LOCAI_REPO_URL) { $env:LOCAI_REPO_URL } else { "https://github.com/locai-co-uk/locai-link.git" } }
+if (-not $Branch)  { $Branch  = if ($env:LOCAI_BRANCH)   { $env:LOCAI_BRANCH }   else { "main" } }
+
+# Translate PowerShell-style params into argparse kebab-case for `main.py install`.
+$InstallArgs = @()
+if ($DeviceName)      { $InstallArgs += @("--device-name",      $DeviceName) }
+if ($Email)           { $InstallArgs += @("--email",            $Email) }
+if ($Password)        { $InstallArgs += @("--password",         $Password) }
+if ($Token)           { $InstallArgs += @("--token",            $Token) }
+if ($RegistrationKey) { $InstallArgs += @("--registration-key", $RegistrationKey) }
+if ($DeviceType)      { $InstallArgs += @("--device-type",      $DeviceType) }
+if ($ApiUrl)          { $InstallArgs += @("--api-url",          $ApiUrl) }
+if ($StartRunning)    { $InstallArgs += "--start-running" }
+if ($Dev)             { $InstallArgs += "--dev" }
+# Anything else (e.g. raw `--flag value` pairs) passes through untouched.
+if ($RemainingArgs)   { $InstallArgs += $RemainingArgs }
 
 # 1. Check for uv, install if missing
 if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
@@ -48,7 +80,7 @@ if ((Test-Path ".\main.py") -and (Test-Path ".\src\link")) {
 Write-Host "Launching Installer..." -ForegroundColor Cyan
 Push-Location $InstallDir
 try {
-    uv run main.py install @args
+    uv run main.py install @InstallArgs
 } finally {
     Pop-Location
 }
