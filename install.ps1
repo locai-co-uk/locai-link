@@ -81,6 +81,7 @@ Write-Host "Launching Installer..." -ForegroundColor Cyan
 Push-Location $InstallDir
 try {
     uv run main.py install @InstallArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
     Pop-Location
 }

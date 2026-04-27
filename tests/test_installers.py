@@ -83,12 +83,12 @@ def _install_uv_shim(bin_dir: Path) -> None:
     # Windows: `uv.cmd` (so `where uv` and `Get-Command uv` both find it).
     (bin_dir / "uv.cmd").write_text(
         "@echo off\r\n"
-        'if /I "%~1"=="run" (\r\n'
-        "  shift\r\n"
-        f'  "{py}" %1 %2 %3 %4 %5 %6 %7 %8 %9\r\n'
-        "  exit /b %errorlevel%\r\n"
-        ")\r\n"
-        "exit /b 0\r\n"
+        'if /I not "%~1"=="run" exit /b 0\r\n'
+        "setlocal EnableDelayedExpansion\r\n"
+        'set "REST=%*"\r\n'
+        'set "REST=!REST:* =!"\r\n'
+        f'"{py}" !REST!\r\n'
+        "exit /b !errorlevel!\r\n"
     )
 
 
