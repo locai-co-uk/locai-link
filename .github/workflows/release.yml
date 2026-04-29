@@ -12,7 +12,8 @@ on:
       - "pyproject.toml"  # Only run if version file changes
 
 permissions:
-  contents: write
+  contents: read
+  pull-requests: write
 
 jobs:
   release:
