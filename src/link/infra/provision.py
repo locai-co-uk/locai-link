@@ -17,7 +17,7 @@ from .utils import get_platform_arch
 logger = logging.getLogger(__name__)
 
 # Constants
-ZENOH_VERSION = "1.7.2"
+ZENOH_VERSION = "1.9.0"
 ZENOH_DIR = Path.cwd() / ".zenoh"
 
 BASE_URL_RELEASE = f"https://github.com/eclipse-zenoh/zenoh/releases/download/{ZENOH_VERSION}"

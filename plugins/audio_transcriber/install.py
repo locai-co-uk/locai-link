@@ -295,13 +295,27 @@ def _cmake_build(tag, cmake_flags, bin_dir):
         sys.exit(1)
 
 
+def _is_already_installed(tag: str) -> bool:
+    """True when whisper-server binary is present and the cached tag matches.
+
+    Same check both prebuilt and cmake paths use — kept here so callers can
+    early-return before any log line fires.
+    """
+    binary_filename = "whisper-server.exe" if platform.system() == "Windows" else "whisper-server"
+    binary_dest = BIN_WHISPER_DIR / binary_filename
+    tag_file = BUILD_CACHE_DIR / "whisper_cpp" / "tag"
+    return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
+
+
 def install_inference_engine():
     """Installs whisper-server: prebuilt when available, build from source as fallback."""
-    logger.info("Installing Audio Transcription Engine (whisper.cpp)")
-
     BIN_WHISPER_DIR.mkdir(parents=True, exist_ok=True)
     tag = WHISPER_CPP_RELEASE
 
+    if _is_already_installed(tag):
+        return  # silent no-op — caller decides whether to announce anything
+
+    logger.info("Installing Audio Transcription Engine (whisper.cpp)")
     url = _prebuilt_url(tag)
     if url:
         if _install_prebuilt(url, BIN_WHISPER_DIR, tag):
@@ -334,6 +348,8 @@ def install_inference_engine():
 
 def main():
     """Main installation script."""
+    if _is_already_installed(WHISPER_CPP_RELEASE):
+        return  # nothing to do, stay silent
     logger.info("Starting Installation for Audio Transcriber...")
     install_inference_engine()
     logger.info("Audio Transcriber component installation complete.")

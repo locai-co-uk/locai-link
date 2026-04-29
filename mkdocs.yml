@@ -51,6 +51,7 @@ nav:
       - App: reference/app.md
       - Adapters: reference/adapters.md
       - Components: reference/components.md
+      - Pipeline: reference/pipeline.md
       - Configuration: reference/config.md
       - Infrastructure: reference/infra.md
       - Utilities: reference/utils.md

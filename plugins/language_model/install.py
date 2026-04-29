@@ -325,13 +325,27 @@ def _cmake_build(tag, cmake_flags, bin_dir):
         sys.exit(1)
 
 
+def _is_already_installed(tag: str) -> bool:
+    """True when llama-server binary is present and the cached tag matches.
+
+    Same check both prebuilt and cmake paths use — kept here so callers can
+    early-return before any log line fires.
+    """
+    binary_filename = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+    binary_dest = BIN_LLAMA_DIR / binary_filename
+    tag_file = BUILD_CACHE_DIR / "llama_cpp" / "tag"
+    return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
+
+
 def install_inference_engine():
     """Installs llama-server: prebuilt when available, build from source as fallback."""
-    logger.info("Installing AI Inference Engine (llama.cpp)")
-
     BIN_LLAMA_DIR.mkdir(parents=True, exist_ok=True)
     tag = LLAMA_CPP_RELEASE
 
+    if _is_already_installed(tag):
+        return  # silent no-op — caller decides whether to announce anything
+
+    logger.info("Installing AI Inference Engine (llama.cpp)")
     url = _prebuilt_url(tag)
     if url:
         if _install_prebuilt(url, BIN_LLAMA_DIR, tag):
@@ -363,6 +377,8 @@ def install_inference_engine():
 
 def main():
     """Main installation script."""
+    if _is_already_installed(LLAMA_CPP_RELEASE):
+        return  # nothing to do, stay silent
     logger.info("Starting Installation for Language Model...")
     install_inference_engine()
     logger.info("Language Model component installation complete.")
