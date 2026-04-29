@@ -7,7 +7,7 @@ build-backend = "uv_build"
 
 [project]
 name = "locai-link"
-version = "1.0.8"
+version = "1.0.9"
 description = "High-performance modular edge inference agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,7 +19,7 @@ dependencies = [
     "psutil>=7.0.0",
     "requests>=2.32.4",
     "pydantic>=2.12.0",
-    "eclipse-zenoh>=1.7.2",
+    "eclipse-zenoh>=1.9.0",
 ]
 
 [project.optional-dependencies]

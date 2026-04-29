@@ -24,3 +24,5 @@ models/**
 **/.todo
 
 configs/session*.json
+
+**/*.pem

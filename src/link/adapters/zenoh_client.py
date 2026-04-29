@@ -47,6 +47,23 @@ class ZenohClient:
             else:
                 z_conf.insert_json5("connect/endpoints", ep_json)
 
+        # 3. TLS — required when connecting to a tls/ endpoint with a server-cert-only
+        tls_root_ca = self.args.get("tls_root_ca")
+        if tls_root_ca:
+            z_conf.insert_json5(
+                "transport/link/tls/root_ca_certificate",
+                json.dumps(tls_root_ca),
+            )
+
+        # 4. usrpwd auth — username = device_id, password = api_key (or test cred).
+        username = self.args.get("username")
+        password = self.args.get("password")
+        if username and password:
+            z_conf.insert_json5(
+                "transport/auth/usrpwd",
+                json.dumps({"user": username, "password": password}),
+            )
+
         return z_conf
 
     def get_session(self) -> "zenoh.Session":

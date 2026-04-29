@@ -176,9 +176,13 @@ class ComponentRegistry:
                 raise RuntimeError(f"Dependency installation failed for {name}")
 
         # B. Custom Install Script (install.py)
+        # The plugin's install.py is responsible for being quiet when nothing to do
+        # (it knows what "already installed" means — typically a pinned-tag check).
+        # We always invoke it so it can self-detect; the script's own logs report
+        # actual work. Demoting our intro to DEBUG keeps the no-op run silent.
         install_script = plugin_dir / "install.py"
         if install_script.exists():
-            logger.info(f"Running custom install script for {name}...")
+            logger.debug(f"Running custom install script for {name}...")
             try:
                 subprocess.run([sys.executable, str(install_script)], cwd=plugin_dir, check=True)
             except subprocess.CalledProcessError as e:

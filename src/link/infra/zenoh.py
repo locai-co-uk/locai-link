@@ -157,13 +157,14 @@ def get_or_create_zenoh_session(config: TransportConfig) -> Any:
     raw_args = config.args
     mode = raw_args.get("mode", "client")
 
-    # 1. Provision (Lazy Install)
-    if not ZenohProvisioner.is_router_installed():
-        ZenohProvisioner.install_router_env()
-
-    # 2. Start Router (if configured)
-    if mode == "router":
-        _ensure_router_running(raw_args)
+    # 1. Provision + start a LOCAL router only when this device is hosting one.
+    # In pure client mode the router lives elsewhere (e.g. central GCE VM) and
+    # we just dial it — no local zenohd binary, no service install, no .zenoh dir.
+    if mode in ("router", "peer"):
+        if not ZenohProvisioner.is_router_installed():
+            ZenohProvisioner.install_router_env()
+        if mode == "router":
+            _ensure_router_running(raw_args)
 
     # 3. Connect Client
     client_args = raw_args.copy()
