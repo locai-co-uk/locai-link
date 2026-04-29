@@ -9,7 +9,7 @@ on:
     branches:
       - main
     paths:
-      - "pyproject.toml"  # Only run if version file changes
+      - "pyproject.toml" # Only run if version file changes
 
 permissions:
   contents: read
@@ -39,6 +39,7 @@ jobs:
       - name: 🚀 Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: v${{ steps.get_version.outputs.version }}
           name: Release v${{ steps.get_version.outputs.version }}
           generate_release_notes: true
