@@ -3,7 +3,9 @@
 
 """Sink that routes pipeline data to the agent's command handler."""
 
+import collections
 import logging
+from collections import deque
 
 from link.components.registry import ComponentRegistry, Sink
 
@@ -14,15 +16,23 @@ logger = logging.getLogger(__name__)
 class AgentCommand(Sink):
     """
     Routes pipeline data directly to the Agent Runtime's command handler.
+
+    Bounded `command_id` dedup deque rejects duplicates silently. The same
+    command can reach this sink twice when the runtime drains a Firestore
+    backlog over HTTP and a live Zenoh inbox sample for the same id arrives in
+    parallel — the dedup window lets `mark_seen()` pre-populate from the HTTP
+    response so the live sample is recognised and dropped.
     """
 
-    def __init__(self, callback):
+    def __init__(self, callback, dedup_window: int = 2000):
         """Initialises the AgentCommand sink.
 
         Args:
             callback (Callable): The function to call with command data.
+            dedup_window (int): Maximum recent command_ids to remember.
         """
         self.callback = callback
+        self._seen: deque[str] = collections.deque(maxlen=dedup_window)
 
     def __call__(self, data: dict | list[dict]) -> bool:
         """Dispatches one or more commands to the runtime callback."""
@@ -32,9 +42,19 @@ class AgentCommand(Sink):
         return all(self._dispatch(cmd) for cmd in cmds)
 
     def _dispatch(self, cmd: dict) -> bool:
+        cmd_id = cmd.get("command_id")
+        if cmd_id is not None and cmd_id in self._seen:
+            return True  # duplicate, silently ack
+        if cmd_id is not None:
+            self._seen.append(cmd_id)
         try:
             self.callback(cmd)
             return True
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
             return False
+
+    def mark_seen(self, cmd_id: str) -> None:
+        """Pre-populate dedup before the consumer starts (used by runtime reconcile)."""
+        if cmd_id is not None:
+            self._seen.append(cmd_id)

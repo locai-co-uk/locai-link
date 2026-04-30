@@ -381,9 +381,25 @@ class AgentRuntime:
                 headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
                 with requests.get(download_url, headers=headers, stream=True, timeout=600) as r:
                     r.raise_for_status()
+                    total = int(r.headers.get("content-length", 0))
+                    done = 0
+                    last_reported = -1
+                    self.status_logger.report_deployment_progress(
+                        pipeline_id, "downloading", 0.0, 0, total
+                    )
                     with open(target_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
+                            done += len(chunk)
+                            if total:
+                                pct = int((done / total) * 100)
+                                # Throttle to 5%-step deltas — keeps frontend SSE
+                                # smooth without flooding the Zenoh fanout.
+                                if pct >= last_reported + 5:
+                                    self.status_logger.report_deployment_progress(
+                                        pipeline_id, "downloading", float(pct), done, total
+                                    )
+                                    last_reported = pct
                 logger.info(f"Model saved to {target_path}")
             except Exception as e:
                 msg = f"Failed to download model: {e}"
@@ -392,6 +408,8 @@ class AgentRuntime:
                 return
         else:
             logger.info(f"Model {model_name} already exists. Using cached file.")
+
+        self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
 
         try:
             new_pipeline_config = self._map_runtime_to_pipeline_config(pipeline_id, target_path, runtime_config)
@@ -427,6 +445,7 @@ class AgentRuntime:
             logger.warning(f"Could not report applied config to backend: {e}")
 
         logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
+        self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
 
     def _log_status(self):

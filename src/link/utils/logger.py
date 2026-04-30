@@ -117,6 +117,39 @@ class LinkReporter(logging.Logger):
         if payload:
             self.info(payload, extra={"route_key": "model_status", "context": {"mid": model_id}})
 
+    def report_deployment_progress(
+        self,
+        model_id: str,
+        stage: str,
+        progress_pct: float,
+        bytes_done: int = 0,
+        total_bytes: int = 0,
+    ) -> None:
+        """Reports incremental deployment progress for a model.
+
+        Routed via the `deployment_progress` key so the configured handler can
+        format and forward to the platform (typically a Zenoh topic ending in
+        `models/{mid}/deployment/progress`). Throttle is the caller's job —
+        emit on stage transitions and at coarse percentage steps to avoid
+        flooding subscribers.
+
+        Args:
+            model_id (str): The model/pipeline ID.
+            stage (str): Deployment stage (`downloading`, `configuring`, `completed`, ...).
+            progress_pct (float): Completion percentage 0-100.
+            bytes_done (int): Bytes processed so far (download/extract). Defaults to 0.
+            total_bytes (int): Total bytes expected. 0 when unknown.
+        """
+        if not model_id:
+            return
+        payload = {
+            "stage": stage,
+            "progress_pct": progress_pct,
+            "bytes_done": bytes_done,
+            "total_bytes": total_bytes,
+        }
+        self.info(payload, extra={"route_key": "deployment_progress", "context": {"mid": model_id}})
+
 
 # Register BEFORE defining handlers
 logging.setLoggerClass(LinkReporter)
