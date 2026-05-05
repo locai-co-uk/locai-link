@@ -8,6 +8,15 @@ echo === Loc.ai Agent Installer ===
 if not defined LOCAI_REPO_URL set "LOCAI_REPO_URL=https://github.com/locai-co-uk/locai-link.git"
 if not defined LOCAI_BRANCH   set "LOCAI_BRANCH=main"
 
+set "ORIG_ARGS=%*"
+:_parse
+if "%~1"=="" goto _parse_done
+if /I "%~1"=="--branch"   set "LOCAI_BRANCH=%~2"   & shift & shift & goto _parse
+if /I "%~1"=="--repo-url" set "LOCAI_REPO_URL=%~2" & shift & shift & goto _parse
+shift
+goto _parse
+:_parse_done
+
 :: 1. uv
 where uv >nul 2>nul
 if errorlevel 1 (
@@ -51,4 +60,4 @@ if "!IS_LOCAL!"=="1" (
 :: 4. Launch Installer from inside the repo
 echo Launching Installer...
 cd /d "!INSTALL_DIR!"
-uv run main.py install %*
+uv run main.py install %ORIG_ARGS%
