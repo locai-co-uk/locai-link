@@ -499,20 +499,25 @@ class AgentRuntime:
         Returns:
             tuple[str, str | None, str | None, dict]: A tuple containing (cmd_type, cmd_id, pipeline_id, payload).
         """
+        # 1. Check for 'data' wrapper (old format or nested format)
         inner = data.get("data")
         if isinstance(inner, dict) and "command_type" in inner:
             cmd_type = inner.get("command_type", "").upper()
-            cmd_id = data.get("id")
+            cmd_id = data.get("id") or inner.get("id")
             payload = inner.get("payload", {})
             pipeline_id = payload.get("model_id") or payload.get("model_name")
             return cmd_type, cmd_id, pipeline_id, payload
 
-        cmd_type = data.get("command", "").upper()
-        cmd_id = data.get("id")
+        # 2. Check for flat format with 'command' or 'command_type'
+        cmd_type = (data.get("command") or data.get("command_type") or "").upper()
+        cmd_id = data.get("id") or data.get("command_id")
         payload = data.get("payload", {})
+
+        # 3. Identify pipeline ID
         pipeline_id = payload.get("id") or payload.get("model_id") or payload.get("model_name")
         if not pipeline_id and isinstance(cmd_id, str):
             pipeline_id = cmd_id
+
         return cmd_type, cmd_id, pipeline_id, payload
 
     def _map_runtime_to_pipeline_config(
