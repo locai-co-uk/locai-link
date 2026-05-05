@@ -4,6 +4,9 @@
 """SystemMonitor source — CPU, RAM, storage, temperature metrics via psutil."""
 
 import logging
+import platform
+import shutil
+import subprocess
 import time
 
 import psutil
@@ -86,13 +89,47 @@ class SystemMonitor(Source):
 
         # 5. Temperature
         if "temperature_celsius" in self.enabled_metrics:
-            try:
-                temps = psutil.sensors_temperatures() or {}
-                data["temperature_celsius"] = next(
+            data["temperature_celsius"] = self._read_temp()
+
+        return data
+
+    def _read_temp(self) -> float:
+        """Reads CPU temperature in degrees Celsius across platforms.
+
+        psutil.sensors_temperatures() only exists on Linux/FreeBSD; macOS and
+        Windows need their own paths. All branches fall back to 0.0 on any
+        failure rather than raise — telemetry should never crash the agent.
+        """
+        try:
+            system = platform.system()
+
+            if system == "Linux":
+                temps = psutil.sensors_temperatures() or {}  # type: ignore[attr-defined]
+                return next(
                     (temps[k][0].current for k in self._TEMP_SENSOR_KEYS if temps.get(k)),
                     0.0,
                 )
-            except (AttributeError, IndexError):
-                data["temperature_celsius"] = 0.0
 
-        return data
+            if system == "Darwin":
+                # Optional 3rd-party brew binary. We do NOT auto-install: brew
+                # may not be present, requires sudo for some setups, and silent
+                # install during agent setup would be intrusive. Document as
+                # opt-in (`brew install osx-cpu-temp`); falls back to 0.0
+                # silently when the binary isn't on PATH.
+                if shutil.which("osx-cpu-temp"):
+                    out = subprocess.run(["osx-cpu-temp"], capture_output=True, text=True, timeout=2).stdout.strip()
+                    return float(out.split()[0]) if out else 0.0
+                return 0.0
+
+            if system == "Windows":
+                try:
+                    import wmi  # type: ignore[import-not-found]
+                except ImportError:
+                    return 0.0
+                t = wmi.WMI(namespace="root\\wmi").MSAcpi_ThermalZoneTemperature()
+                if not t:
+                    return 0.0
+                return round((t[0].CurrentTemperature / 10.0) - 273.15, 1)
+        except Exception as e:
+            logger.debug(f"temperature read failed: {e}")
+        return 0.0
