@@ -583,10 +583,10 @@ class AgentRuntime:
 
             if route == "agent":
                 identity = self.agent_config.identity
-                url = f"{identity.api_url}/agent/model_results/{identity.device_id}/create_from_agent"
+                topic = f"locai/devices/{identity.device_id}/models/{pipeline_id}/results"
                 sink_conf = GenericConfig(
-                    type="http_post",
-                    args={"url": url, "api_key": identity.api_key, "timeout": 10},
+                    type="zenoh_pub",
+                    args={"topic": topic},
                 )
 
         return PipelineConfig(
