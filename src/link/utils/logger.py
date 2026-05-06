@@ -207,13 +207,27 @@ class AsyncHandler(logging.Handler):
         while not self._stop_event.is_set():
             try:
                 target, payload, raw_payload, route_key = self.queue.get(timeout=1.0)
-                try:
-                    self._transport_emit(target, payload, raw_payload, route_key)
-                except Exception as e:
-                    sys.stderr.write(f"Link Logger Error ({route_key}): {e}\n")
-                self.queue.task_done()
             except queue.Empty:
                 continue
+            try:
+                self._transport_emit(target, payload, raw_payload, route_key)
+            except Exception as e:
+                sys.stderr.write(f"Link Logger Error ({route_key}): {e}\n")
+            self.queue.task_done()
+
+        # Drain whatever is still queued so that messages emitted right before
+        # shutdown (notably report_lifecycle("offline")) actually reach their
+        # transport instead of being dropped when the daemon thread is killed.
+        while True:
+            try:
+                target, payload, raw_payload, route_key = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._transport_emit(target, payload, raw_payload, route_key)
+            except Exception as e:
+                sys.stderr.write(f"Link Logger Error ({route_key}) [drain]: {e}\n")
+            self.queue.task_done()
 
     def _transport_emit(self, target, payload, raw_payload, route_key):
         pass
@@ -221,7 +235,9 @@ class AsyncHandler(logging.Handler):
     def close(self):
         self._stop_event.set()
         if self._worker.is_alive():
-            self._worker.join(timeout=1.0)
+            # 2s gives the drain loop time to publish any remaining queued
+            # messages over the transport before the process exits.
+            self._worker.join(timeout=2.0)
         super().close()
 
 
