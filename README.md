@@ -95,69 +95,85 @@ See the API Reference for per-module docs.
 A modular, pipeline-based runtime. The **control plane** (lifecycle, configuration) is separated from the **data plane** (inference, telemetry) for performance and resilience.
 
 ```mermaid
-graph TD
+flowchart TB
     %% --- External Entities (Top) ---
-    User[User / CLI]
+    User([User / CLI])
 
     %% --- The Edge Device (Middle) ---
-    subgraph "Edge Device"
+    subgraph Device["Edge Device"]
         direction TB
 
-        Entry(Entry Point<br/>link.main)
+        Entry[Entry Point<br/>link.main]
 
-        subgraph "Application Layer"
+        subgraph App["Application Layer"]
+            direction TB
             Runtime[Agent Runtime]
             State[State Manager]
             Onboard[Onboarding]
         end
 
-        subgraph "Infrastructure Layer"
-            Zenoh[Zenoh Router]
+        subgraph Infra["Infrastructure Layer"]
+            direction TB
+            Zenoh[Zenoh Client]
             Service[Service Manager]
             Provision[Provisioner]
         end
 
-        subgraph "Execution Layer (Pipelines)"
+        subgraph Exec["Execution Layer (Pipelines)"]
+            direction TB
             Pipe[Pipeline Orchestrator]
             Source((Source))
             Sink((Sink))
-            subgraph "AI Plugins"
+            subgraph Plugins["Plugins — install any subset, or none"]
+                direction TB
                 LM[language_model]
                 AT[audio_transcriber]
                 IC[image_classifier]
                 AC[audio_classifier]
+                More[…other / custom]
             end
         end
     end
 
     %% --- External Entities (Bottom) ---
-    Cloud[Loc.ai Control Plane]
+    Cloud([Loc.ai Control Plane])
 
-    %% --- Flows ---
-    User -->|CLI Args| Entry
-    Entry -->|Bootstrap| Runtime
-    Entry -.->|Install| Service
+    %% --- Flows (vertical chain) ---
+    User --> Entry
+    Entry --> App
+    Entry -.-> Infra
+    App --> Exec
+    Source -.->|Load active only| Plugins
+
+    %% Two distinct upstream paths to the control plane:
+    %%  • Pipeline sinks: telemetry + inference results (data plane)
+    %%  • LinkReporter: logs, status, commands, model state, deployment progress (control plane reporting)
+    Sink -->|Telemetry / Results| Cloud
+    Runtime -->|Logs / Status / Reports| Cloud
     Onboard -->|Register / Activate| Cloud
 
-    Runtime -->|Persist| State
-    Runtime -->|Configure| Pipe
+    %% --- Optionality styling: dashed borders signal "any subset" ---
+    style LM stroke-dasharray:5 5
+    style AT stroke-dasharray:5 5
+    style IC stroke-dasharray:5 5
+    style AC stroke-dasharray:5 5
+    style More stroke-dasharray:5 5,fill:none
 
-    Pipe -->|Read| Source
-    Source -.->|Load| LM
-    Source -.->|Load| AT
-    Source -.->|Load| IC
-    Source -.->|Load| AC
-    Pipe -->|Write| Sink
-
-    Sink -->|Telemetry| Cloud
-
-    %% --- Layout hints (invisible) ---
-    State ~~~ Zenoh
-    Onboard ~~~ Service
-    Service ~~~ Pipe
-    Provision ~~~ Source
-    Sink ~~~ Cloud
+    %% --- Force vertical stacking inside each layer + pin Cloud below Device ---
+    Runtime ~~~ State
+    State ~~~ Onboard
+    Zenoh ~~~ Service
+    Service ~~~ Provision
+    Pipe ~~~ Source
+    Source ~~~ Sink
+    LM ~~~ AT
+    AT ~~~ IC
+    IC ~~~ AC
+    AC ~~~ More
+    Device ~~~ Cloud
 ```
+
+> **Plugins are optional.** Each plugin under `plugins/` is a standalone installable package registering pipeline components via the `locai.plugins` entry point. The runtime only loads plugins referenced by the active config. A device deployment can run with zero plugins (telemetry-only), one (e.g. `language_model`), or any combination.
 
 ### Over-The-Air Updates
 
