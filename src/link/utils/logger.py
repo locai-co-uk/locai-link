@@ -127,12 +127,6 @@ class LinkReporter(logging.Logger):
     ) -> None:
         """Reports incremental deployment progress for a model.
 
-        Routed via the `deployment_progress` key so the configured handler can
-        format and forward to the platform (typically a Zenoh topic ending in
-        `models/{mid}/deployment/progress`). Throttle is the caller's job —
-        emit on stage transitions and at coarse percentage steps to avoid
-        flooding subscribers.
-
         Args:
             model_id (str): The model/pipeline ID.
             stage (str): Deployment stage (`downloading`, `configuring`, `completed`, ...).

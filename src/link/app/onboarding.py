@@ -201,8 +201,6 @@ def _resolve_agent_config(
     try:
         return _apply_server_config(server_config, device_id, device_name, api_key, api_url)
     except Exception as e:
-        # Loud, critical — the operator needs to see this. But don't brick
-        # registration: fall back to known-good defaults.
         logger.critical(
             f"Backend config rejected ({e}). Falling back to built-in defaults — "
             "check the template on the control plane."
@@ -229,8 +227,6 @@ def _apply_server_config(
         ValueError: If the schema version is unknown or validation fails.
     """
 
-    # Strict version check. Unknown versions could mean the backend is ahead of
-    # the agent, in which case we can't safely interpret the config.
     raw_version = raw.get("version")
     if raw_version != SCHEMA_VERSION:
         raise ValueError(f"Unsupported config schema version {raw_version!r} — this agent requires {SCHEMA_VERSION}")
@@ -246,8 +242,6 @@ def _apply_server_config(
     }
     resolved = resolve_templates(raw, context)
 
-    # Always inject our known identity, regardless of what the template declared.
-    # The backend shouldn't be overriding the client's view of its own identity.
     resolved["identity"] = {
         "device_id": device_id,
         "device_name": device_name,
@@ -278,9 +272,6 @@ def _bootstrap_config(device_id: str, device_name: str, api_key: str, api_url: s
         AgentConfig: The generated agent configuration.
     """
     logger.info(f"Onboarding successful. Assigned ID: {device_id}")
-
-    # Note: We resolve ${identity...} variables immediately here since we have them.
-    # We use double curly braces {{cid}} to output literal {cid} for the runtime logger.
 
     return AgentConfig(
         version=2.1,
