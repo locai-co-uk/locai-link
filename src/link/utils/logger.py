@@ -18,29 +18,31 @@ from pydantic import BaseModel
 
 
 def _resolve_agent_version() -> str | None:
-    """Determine the agent version, tolerating uninstalled checkouts.
+    """Determine the agent version, tolerating uninstalled checkouts and
+    non-editable installs.
 
-    `importlib.metadata.version("locai-link")` only finds a value when the
-    package is pip-installed in the active venv (writes `.dist-info/METADATA`).
-    Windows users who run `uv run main.py run` from a fresh clone without
-    `uv pip install -e .` first hit `PackageNotFoundError` and end up with
-    `_AGENT_VERSION = None`. Fall back to reading the project's `pyproject.toml`
-    directly so the version is always discoverable as long as the source tree
-    is on disk.
+    Returns the version string or `None` if neither path yields one.
     """
     try:
         return version("locai-link")
     except PackageNotFoundError:
         pass
-    try:
-        import tomllib  # 3.11+
 
-        # logger.py lives at src/link/utils/logger.py → repo root is parents[3]
-        pp = Path(__file__).resolve().parents[3] / "pyproject.toml"
-        if pp.exists():
-            return tomllib.loads(pp.read_text(encoding="utf-8"))["project"]["version"]
+    try:
+        import tomllib
+
+        here = Path(__file__).resolve()
+        for parent in [here, *here.parents][:8]:
+            candidate = parent / "pyproject.toml"
+            if not candidate.is_file():
+                continue
+            data = tomllib.loads(candidate.read_text(encoding="utf-8"))
+            project = data.get("project") or {}
+            if project.get("name") == "locai-link" and "version" in project:
+                return project["version"]
     except Exception:
         pass
+
     return None
 
 
