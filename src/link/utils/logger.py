@@ -10,15 +10,41 @@ import sys
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 import requests
 from pydantic import BaseModel
 
-try:
-    _AGENT_VERSION: str | None = version("locai-link")
-except PackageNotFoundError:
-    _AGENT_VERSION = None
+
+def _resolve_agent_version() -> str | None:
+    """Determine the agent version, tolerating uninstalled checkouts.
+
+    `importlib.metadata.version("locai-link")` only finds a value when the
+    package is pip-installed in the active venv (writes `.dist-info/METADATA`).
+    Windows users who run `uv run main.py run` from a fresh clone without
+    `uv pip install -e .` first hit `PackageNotFoundError` and end up with
+    `_AGENT_VERSION = None`. Fall back to reading the project's `pyproject.toml`
+    directly so the version is always discoverable as long as the source tree
+    is on disk.
+    """
+    try:
+        return version("locai-link")
+    except PackageNotFoundError:
+        pass
+    try:
+        import tomllib  # 3.11+
+
+        # logger.py lives at src/link/utils/logger.py → repo root is parents[3]
+        pp = Path(__file__).resolve().parents[3] / "pyproject.toml"
+        if pp.exists():
+            return tomllib.loads(pp.read_text(encoding="utf-8"))["project"]["version"]
+    except Exception:
+        pass
+    return None
+
+
+_AGENT_VERSION: str | None = _resolve_agent_version()
 
 _SEVERITY_MAP = {
     "DEBUG": "info",
