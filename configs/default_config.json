@@ -1,84 +1,82 @@
 {
-    "version": 2.1,
-    "identity": {
-        "device_id": "dev-01",
-        "device_name": "ubuntu-x86_64"
-    },
-    "transport": {
+  "version": 2.1,
+  "identity": {
+    "device_id": "dev-01",
+    "device_name": "ubuntu-x86_64"
+  },
+  "transport": {
+    "type": "zenoh",
+    "args": {
+      "mode": "router",
+      "endpoints": ["tcp/0.0.0.0:7447"],
+      "storage": {
+        "type": "rocksdb",
+        "dir": "link_db"
+      }
+    }
+  },
+  "logging": {
+    "handlers": [
+      {
+        "type": "console",
+        "level": "INFO"
+      },
+      {
+        "type": "zenoh",
+        "level": "INFO",
+        "args": {
+          "topic": "locai/devices/${identity.device_id}/logs"
+        }
+      }
+    ]
+  },
+  "reporting": {
+    "handlers": [
+      {
         "type": "zenoh",
         "args": {
-            "mode": "router",
-            "endpoints": [
-                "tcp/0.0.0.0:7447"
-            ],
-            "storage": {
-                "type": "rocksdb",
-                "dir": "link_db"
-            }
+          "lifecycle_status": "locai/devices/${identity.device_id}/status",
+          "command_status": "locai/devices/${identity.device_id}/commands/{cid}/status",
+          "model_status": "locai/devices/${identity.device_id}/models/{mid}/status"
         }
-    },
-    "logging": {
-        "handlers": [
-            {
-                "type": "console",
-                "level": "INFO"
-            },
-            {
-                "type": "zenoh",
-                "level": "INFO",
-                "args": {
-                    "topic": "locai/devices/${identity.device_id}/logs"
-                }
-            }
-        ]
-    },
-    "reporting": {
-        "handlers": [
-            {
-                "type": "zenoh",
-                "args": {
-                    "device_status": "locai/devices/${identity.device_id}/status",
-                    "command_status": "locai/devices/${identity.device_id}/commands/{cid}/status",
-                    "model_status": "locai/devices/${identity.device_id}/models/{mid}/status"
-                }
-            }
-        ]
-    },
-    "pipelines": [
-        {
-            "id": "command_center",
-            "active": true,
-            "source": {
-                "type": "zenoh_sub",
-                "args": {
-                    "topic": "locai/devices/${identity.device_id}/commands"
-                }
-            },
-            "sink": {
-                "type": "command"
-            }
-        },
-        {
-            "id": "system_telemetry",
-            "active": true,
-            "source": {
-                "type": "system_monitor",
-                "args": {
-                    "interval": 1,
-                    "metrics": [
-                        "cpu_usage",
-                        "ram_usage",
-                        "storage_available_gb",
-                        "temperature_celsius"
-                    ]
-                }
-            },
-            "sink": {
-                "type": "zenoh_pub",
-                "args": {
-                    "topic": "locai/devices/${identity.device_id}/system"
-                }
-            }
-        }
+      }
     ]
+  },
+  "pipelines": [
+    {
+      "id": "command_center",
+      "active": true,
+      "source": {
+        "type": "zenoh_sub",
+        "args": {
+          "topic": "locai/devices/${identity.device_id}/commands"
+        }
+      },
+      "sink": {
+        "type": "command"
+      }
+    },
+    {
+      "id": "system_telemetry",
+      "active": true,
+      "source": {
+        "type": "system_monitor",
+        "args": {
+          "interval": 1,
+          "metrics": [
+            "cpu_usage",
+            "ram_usage",
+            "storage_available_gb",
+            "temperature_celsius"
+          ]
+        }
+      },
+      "sink": {
+        "type": "zenoh_pub",
+        "args": {
+          "topic": "locai/devices/${identity.device_id}/system"
+        }
+      }
+    }
+  ]
 }
