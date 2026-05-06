@@ -18,13 +18,11 @@ from pydantic import BaseModel
 
 
 def _resolve_agent_version() -> str | None:
-    """Determine the agent version, tolerating uninstalled checkouts and
-    non-editable installs.
-
-    Returns the version string or `None` if neither path yields one.
-    """
+    """Determine the agent version, tolerating uninstalled checkouts."""
     try:
-        return version("locai-link")
+        v = version("locai-link")
+        if v:
+            return v
     except PackageNotFoundError:
         pass
 
@@ -47,7 +45,6 @@ def _resolve_agent_version() -> str | None:
 
 
 _AGENT_VERSION: str | None = _resolve_agent_version()
-
 _SEVERITY_MAP = {
     "DEBUG": "info",
     "INFO": "info",
