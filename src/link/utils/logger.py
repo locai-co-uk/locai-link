@@ -183,7 +183,6 @@ class AsyncHandler(logging.Handler):
                 print(f"   Template: {template}")
                 return
 
-            # 3. Payload Preparation
             if isinstance(record.msg, dict):
                 # Structured data (Reporter) -> Send as JSON
                 raw_payload = record.msg
@@ -215,9 +214,6 @@ class AsyncHandler(logging.Handler):
                 sys.stderr.write(f"Link Logger Error ({route_key}): {e}\n")
             self.queue.task_done()
 
-        # Drain whatever is still queued so that messages emitted right before
-        # shutdown (notably report_lifecycle("offline")) actually reach their
-        # transport instead of being dropped when the daemon thread is killed.
         while True:
             try:
                 target, payload, raw_payload, route_key = self.queue.get_nowait()
@@ -235,8 +231,6 @@ class AsyncHandler(logging.Handler):
     def close(self):
         self._stop_event.set()
         if self._worker.is_alive():
-            # 2s gives the drain loop time to publish any remaining queued
-            # messages over the transport before the process exits.
             self._worker.join(timeout=2.0)
         super().close()
 
