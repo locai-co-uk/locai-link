@@ -188,6 +188,14 @@ class AgentRuntime:
                 else:
                     self.status_logger.report_command(cmd_id, "failed", f"Failed to stop {pipeline_id}")
 
+            elif cmd_type == "REMOVE_MODEL":
+                if not pipeline_id:
+                    msg = "REMOVE command rejected: Could not identify target pipeline."
+                    logger.warning(msg)
+                    self.status_logger.report_command(cmd_id, "failed", msg)
+                    return
+                self._remove_model(cmd_id, pipeline_id)
+
             elif cmd_type == "STATUS":
                 self._log_status()
 
@@ -427,6 +435,87 @@ class AgentRuntime:
         logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
         self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
+
+    def _remove_model(self, command_id: str, pipeline_id: str):
+        """Drops a pipeline's config and deletes its on-disk artifacts.
+
+        Refuses (and logs a warning) when the pipeline is currently running, or
+        when another configured pipeline references the same artifact path. The
+        operator must explicitly stop the pipeline first; this keeps removal
+        non-destructive and avoids killing live inference / serving.
+
+        Args:
+            command_id (str): The command ID.
+            pipeline_id (str): The pipeline / model ID to remove.
+        """
+        logger.info(f"Removing pipeline '{pipeline_id}'...")
+
+        with self.lock:
+            if pipeline_id in self.pipelines:
+                msg = (
+                    f"Cannot remove '{pipeline_id}': pipeline is running. "
+                    "Stop it first (STOP_MODEL_INFERENCE / STOP_SERVING) and retry."
+                )
+                logger.warning(msg)
+                self.status_logger.report_command(command_id, "failed", msg)
+                return
+
+            cfg = self.pipeline_configs.get(pipeline_id)
+            artifact_path: Path | None = None
+            if cfg is not None:
+                src_args = getattr(cfg.source, "args", {}) or {}
+                model_path = src_args.get("model_path")
+                if model_path:
+                    artifact_path = Path(str(model_path))
+
+            if artifact_path is not None:
+                for other_id, other_cfg in self.pipeline_configs.items():
+                    if other_id == pipeline_id:
+                        continue
+                    other_args = getattr(other_cfg.source, "args", {}) or {}
+                    other_path = other_args.get("model_path")
+                    if other_path and Path(str(other_path)) == artifact_path:
+                        msg = (
+                            f"Cannot remove '{pipeline_id}': artifact "
+                            f"'{artifact_path.name}' is also used by pipeline "
+                            f"'{other_id}'. Remove that one first and retry."
+                        )
+                        logger.warning(msg)
+                        self.status_logger.report_command(command_id, "failed", msg)
+                        return
+
+            self.pipeline_configs.pop(pipeline_id, None)
+            if self.state_manager:
+                try:
+                    self.state_manager.remove_pipeline(pipeline_id)
+                except Exception as e:
+                    logger.warning(f"Failed to remove pipeline from state: {e}")
+
+        deleted = False
+        if artifact_path is not None:
+            try:
+                if artifact_path.is_file():
+                    artifact_path.unlink()
+                    deleted = True
+                    logger.info(f"Deleted artifact: {artifact_path}")
+                else:
+                    logger.info(f"No artifact at {artifact_path} (already removed).")
+            except Exception as e:
+                logger.warning(f"Failed to delete artifact at {artifact_path}: {e}")
+        else:
+            logger.info(f"No artifact path on '{pipeline_id}' config — skipping file deletion.")
+
+        self.status_logger.report_model(
+            pipeline_id,
+            installed=False,
+            running=False,
+            serving=False,
+            pid=0,
+            serving_pid=0,
+            serving_port=0,
+        )
+        suffix = f" (file deleted: {artifact_path.name})" if deleted and artifact_path else ""
+        self.status_logger.report_command(command_id, "completed", f"Pipeline '{pipeline_id}' removed{suffix}")
 
     def _log_status(self):
         """Logs the current status of the agent, including running and configured pipelines."""
