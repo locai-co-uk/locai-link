@@ -651,6 +651,13 @@ class AgentRuntime:
                         source_args["height"] = inp["resolution"][1]
             if "show_window" not in source_args:
                 source_args["show_window"] = False
+        elif runner == "whisper_audio_transcription" or semantic_type == "audio_transcription":
+            source_type = "audio_transcriber"
+            serving = runtime_config.get("serving") or {}
+            if serving.get("default_port") is not None:
+                source_args.setdefault("port", serving["default_port"])
+            if serving.get("default_host") is not None:
+                source_args.setdefault("host", serving["default_host"])
         elif "audio_classification" in runner or semantic_type == "audio_classification":
             source_type = "audio_classifier"
             inputs = runtime_config.get("inputs", [])

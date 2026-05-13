@@ -58,35 +58,35 @@ jobs:
             python: "3.11"
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v5
-      with:
-        enable-cache: true
-        cache-dependency-glob: "pyproject.toml"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
-    - name: Set up Python ${{ matrix.python }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python }}
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
 
-    - name: Install Project
-      shell: bash
-      run: |
-        uv venv
-        uv pip install -e ".[dev]"
-        # Install language_model plugin so tests/test_language_model_server.py can import it.
-        # No build step — just the Python package; integration tests live in the plugin dir.
-        uv pip install -e "plugins/language_model[dev]"
+      - name: Install Project
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+          # Install language_model plugin so tests/test_language_model_server.py can import it.
+          # No build step — just the Python package; integration tests live in the plugin dir.
+          uv pip install -e "plugins/language_model[dev]"
 
-    - name: Run Unit Tests
-      shell: bash
-      env:
-        DEVICE_MODE: "LOCAL"
-      run: |
-        uv run pytest tests/ -v
+      - name: Run Unit Tests
+        shell: bash
+        env:
+          DEVICE_MODE: "LOCAL"
+        run: |
+          uv run pytest tests/ -v
 
   # 2. Linting (Fast)
   lint:
@@ -129,66 +129,81 @@ jobs:
             python: "3.11"
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v5
-      with:
-        enable-cache: true
-        cache-dependency-glob: "**/pyproject.toml"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
 
-    - name: Set up Python ${{ matrix.python }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python }}
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
 
-    # OS-Specific Audio Deps
-    - name: Install System Deps (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        # GitHub-hosted runners point to azure.archive.ubuntu.com which is
-        # often flaky — without short timeouts apt hangs for minutes retrying
-        # each Ign'd InRelease before falling back to archive.ubuntu.com.
-        APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
-        sudo apt-get $APT_OPTS update
-        sudo apt-get $APT_OPTS install -y libportaudio2
+      # OS-Specific Audio Deps
+      - name: Install System Deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y libportaudio2
 
-    - name: Install System Deps (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        brew install portaudio
+      - name: Install System Deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install portaudio
 
-    - name: Install Project and Plugins
-      shell: bash
-      run: |
-        uv venv
-        uv pip install -e ".[dev]"
-        uv pip install -e "plugins/language_model[dev]"
-        uv pip install -e "plugins/image_classifier[dev]"
-        uv pip install -e "plugins/audio_classifier[dev]"
-        uv pip install -e "plugins/audio_transcriber[dev]"
+      - name: Install Project and Plugins
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+          uv pip install -e "plugins/language_model[dev]"
+          uv pip install -e "plugins/image_classifier[dev]"
+          uv pip install -e "plugins/audio_classifier[dev]"
+          uv pip install -e "plugins/audio_transcriber[dev]"
 
-    - name: Install Llama Server
-      shell: bash
-      run: uv run python plugins/language_model/install.py
+      - name: Install Llama Server
+        shell: bash
+        run: uv run python plugins/language_model/install.py
 
-    - name: Install Whisper Server
-      shell: bash
-      run: uv run python plugins/audio_transcriber/install.py
+      - name: Verify llama-swap binary
+        shell: bash
+        run: |
+          VENV_PREFIX="$(uv run python -c 'import sys; print(sys.prefix)')"
+          EXPECTED_TAG="$(uv run python -c 'import sys; sys.path.insert(0, "plugins/language_model"); import install; print(install.LLAMA_SWAP_RELEASE)')"
+          BIN="$VENV_PREFIX/bin-llama/llama-swap"
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN="$BIN.exe"; fi
+          if [ ! -x "$BIN" ] && [ ! -f "$BIN" ]; then
+            echo "::error::llama-swap binary missing at $BIN"
+            exit 1
+          fi
+          OUT="$("$BIN" --version 2>&1)"
+          echo "$OUT"
+          if ! echo "$OUT" | grep -q "version: $EXPECTED_TAG"; then
+            echo "::error::llama-swap version mismatch — expected tag '$EXPECTED_TAG', got: $OUT"
+            exit 1
+          fi
 
-    - name: Test Audio Classifier
-      shell: bash
-      run: uv run pytest plugins/audio_classifier/ -v -s -m ""
+      - name: Install Whisper Server
+        shell: bash
+        run: uv run python plugins/audio_transcriber/install.py
 
-    - name: Test Image Classifier
-      shell: bash
-      run: uv run pytest plugins/image_classifier/ -v -s -m ""
+      - name: Test Audio Classifier
+        shell: bash
+        run: uv run pytest plugins/audio_classifier/ -v -s -m ""
 
-    - name: Test Language Model
-      shell: bash
-      run: uv run pytest plugins/language_model/ -v -s -m ""
+      - name: Test Image Classifier
+        shell: bash
+        run: uv run pytest plugins/image_classifier/ -v -s -m ""
 
-    - name: Test Audio Transcriber
-      shell: bash
-      run: uv run pytest plugins/audio_transcriber/ -v -s -m ""
+      - name: Test Language Model
+        shell: bash
+        run: uv run pytest plugins/language_model/ -v -s -m ""
+
+      - name: Test Audio Transcriber
+        shell: bash
+        run: uv run pytest plugins/audio_transcriber/ -v -s -m ""
