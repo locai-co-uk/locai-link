@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 import requests
 
 import link.components  # noqa: F401
-from link.adapters.http_client import HttpClient
 from link.app.state import StateManager
 from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
@@ -188,6 +187,14 @@ class AgentRuntime:
                     )
                 else:
                     self.status_logger.report_command(cmd_id, "failed", f"Failed to stop {pipeline_id}")
+
+            elif cmd_type == "REMOVE_MODEL":
+                if not pipeline_id:
+                    msg = "REMOVE command rejected: Could not identify target pipeline."
+                    logger.warning(msg)
+                    self.status_logger.report_command(cmd_id, "failed", msg)
+                    return
+                self._remove_model(cmd_id, pipeline_id)
 
             elif cmd_type == "STATUS":
                 self._log_status()
@@ -381,9 +388,23 @@ class AgentRuntime:
                 headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
                 with requests.get(download_url, headers=headers, stream=True, timeout=600) as r:
                     r.raise_for_status()
+                    total = int(r.headers.get("content-length", 0))
+                    done = 0
+                    last_reported = -1
+                    self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
                     with open(target_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
+                            done += len(chunk)
+                            if total:
+                                pct = int((done / total) * 100)
+                                # Throttle to 5%-step deltas — keeps frontend SSE
+                                # smooth without flooding the Zenoh fanout.
+                                if pct >= last_reported + 5:
+                                    self.status_logger.report_deployment_progress(
+                                        pipeline_id, "downloading", float(pct), done, total
+                                    )
+                                    last_reported = pct
                 logger.info(f"Model saved to {target_path}")
             except Exception as e:
                 msg = f"Failed to download model: {e}"
@@ -392,6 +413,8 @@ class AgentRuntime:
                 return
         else:
             logger.info(f"Model {model_name} already exists. Using cached file.")
+
+        self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
 
         try:
             new_pipeline_config = self._map_runtime_to_pipeline_config(pipeline_id, target_path, runtime_config)
@@ -408,26 +431,91 @@ class AgentRuntime:
                     self.state_manager.update_pipeline_config(new_pipeline_config)
                 except Exception as e:
                     logger.warning(f"Failed to persist state: {e}")
-            current_pipelines = list(self.pipeline_configs.values())
-
-        current_cfg = self.agent_config.model_copy(update={"pipelines": current_pipelines})
-        identity = current_cfg.identity
-        try:
-            client = HttpClient(
-                base_url=identity.api_url,
-                default_headers={"Authorization": f"Bearer {identity.api_key}"},
-                timeout=10.0,
-            )
-            client.post(
-                f"agent/{identity.device_id}/update_applied_agent_config",
-                json_data={"config": current_cfg.model_dump()},
-            )
-            client.close()
-        except Exception as e:
-            logger.warning(f"Could not report applied config to backend: {e}")
 
         logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
+        self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
+
+    def _remove_model(self, command_id: str, pipeline_id: str):
+        """Drops a pipeline's config and deletes its on-disk artifacts.
+
+        Refuses (and logs a warning) when the pipeline is currently running, or
+        when another configured pipeline references the same artifact path. The
+        operator must explicitly stop the pipeline first; this keeps removal
+        non-destructive and avoids killing live inference / serving.
+
+        Args:
+            command_id (str): The command ID.
+            pipeline_id (str): The pipeline / model ID to remove.
+        """
+        logger.info(f"Removing pipeline '{pipeline_id}'...")
+
+        with self.lock:
+            if pipeline_id in self.pipelines:
+                msg = (
+                    f"Cannot remove '{pipeline_id}': pipeline is running. "
+                    "Stop it first (STOP_MODEL_INFERENCE / STOP_SERVING) and retry."
+                )
+                logger.warning(msg)
+                self.status_logger.report_command(command_id, "failed", msg)
+                return
+
+            cfg = self.pipeline_configs.get(pipeline_id)
+            artifact_path: Path | None = None
+            if cfg is not None:
+                src_args = getattr(cfg.source, "args", {}) or {}
+                model_path = src_args.get("model_path")
+                if model_path:
+                    artifact_path = Path(str(model_path))
+
+            if artifact_path is not None:
+                for other_id, other_cfg in self.pipeline_configs.items():
+                    if other_id == pipeline_id:
+                        continue
+                    other_args = getattr(other_cfg.source, "args", {}) or {}
+                    other_path = other_args.get("model_path")
+                    if other_path and Path(str(other_path)) == artifact_path:
+                        msg = (
+                            f"Cannot remove '{pipeline_id}': artifact "
+                            f"'{artifact_path.name}' is also used by pipeline "
+                            f"'{other_id}'. Remove that one first and retry."
+                        )
+                        logger.warning(msg)
+                        self.status_logger.report_command(command_id, "failed", msg)
+                        return
+
+            self.pipeline_configs.pop(pipeline_id, None)
+            if self.state_manager:
+                try:
+                    self.state_manager.remove_pipeline(pipeline_id)
+                except Exception as e:
+                    logger.warning(f"Failed to remove pipeline from state: {e}")
+
+        deleted = False
+        if artifact_path is not None:
+            try:
+                if artifact_path.is_file():
+                    artifact_path.unlink()
+                    deleted = True
+                    logger.info(f"Deleted artifact: {artifact_path}")
+                else:
+                    logger.info(f"No artifact at {artifact_path} (already removed).")
+            except Exception as e:
+                logger.warning(f"Failed to delete artifact at {artifact_path}: {e}")
+        else:
+            logger.info(f"No artifact path on '{pipeline_id}' config — skipping file deletion.")
+
+        self.status_logger.report_model(
+            pipeline_id,
+            installed=False,
+            running=False,
+            serving=False,
+            pid=0,
+            serving_pid=0,
+            serving_port=0,
+        )
+        suffix = f" (file deleted: {artifact_path.name})" if deleted and artifact_path else ""
+        self.status_logger.report_command(command_id, "completed", f"Pipeline '{pipeline_id}' removed{suffix}")
 
     def _log_status(self):
         """Logs the current status of the agent, including running and configured pipelines."""
@@ -500,20 +588,25 @@ class AgentRuntime:
         Returns:
             tuple[str, str | None, str | None, dict]: A tuple containing (cmd_type, cmd_id, pipeline_id, payload).
         """
+        # 1. Check for 'data' wrapper (old format or nested format)
         inner = data.get("data")
         if isinstance(inner, dict) and "command_type" in inner:
             cmd_type = inner.get("command_type", "").upper()
-            cmd_id = data.get("id")
+            cmd_id = data.get("id") or inner.get("id")
             payload = inner.get("payload", {})
             pipeline_id = payload.get("model_id") or payload.get("model_name")
             return cmd_type, cmd_id, pipeline_id, payload
 
-        cmd_type = data.get("command", "").upper()
-        cmd_id = data.get("id")
+        # 2. Check for flat format with 'command' or 'command_type'
+        cmd_type = (data.get("command") or data.get("command_type") or "").upper()
+        cmd_id = data.get("id") or data.get("command_id")
         payload = data.get("payload", {})
+
+        # 3. Identify pipeline ID
         pipeline_id = payload.get("id") or payload.get("model_id") or payload.get("model_name")
         if not pipeline_id and isinstance(cmd_id, str):
             pipeline_id = cmd_id
+
         return cmd_type, cmd_id, pipeline_id, payload
 
     def _map_runtime_to_pipeline_config(
@@ -558,6 +651,13 @@ class AgentRuntime:
                         source_args["height"] = inp["resolution"][1]
             if "show_window" not in source_args:
                 source_args["show_window"] = False
+        elif runner == "whisper_audio_transcription" or semantic_type == "audio_transcription":
+            source_type = "audio_transcriber"
+            serving = runtime_config.get("serving") or {}
+            if serving.get("default_port") is not None:
+                source_args.setdefault("port", serving["default_port"])
+            if serving.get("default_host") is not None:
+                source_args.setdefault("host", serving["default_host"])
         elif "audio_classification" in runner or semantic_type == "audio_classification":
             source_type = "audio_classifier"
             inputs = runtime_config.get("inputs", [])
@@ -579,10 +679,10 @@ class AgentRuntime:
 
             if route == "agent":
                 identity = self.agent_config.identity
-                url = f"{identity.api_url}/agent/model_results/{identity.device_id}/create_from_agent"
+                topic = f"locai/devices/{identity.device_id}/models/{pipeline_id}/results"
                 sink_conf = GenericConfig(
-                    type="http_post",
-                    args={"url": url, "api_key": identity.api_key, "timeout": 10},
+                    type="zenoh_pub",
+                    args={"topic": topic},
                 )
 
         return PipelineConfig(

@@ -1,6 +1,41 @@
 # Changelog
 
-All notable changes migrating from `locai-link-old` to `locai-link-new`.
+All notable changes. Newest at top. The migration narrative from
+`locai-link-old` is preserved below the per-version entries as historical
+record.
+
+## [1.0.9] — 2026-05-08
+
+### Added
+- `LinkReporter.report_deployment_progress()` — incremental model deployment events (`downloading`, `configuring`, `completed`) with byte counts; throttled to 5% steps.
+- `AgentCommand._seen` deque + `mark_seen()` — bounded `command_id` dedup to support online-reconcile flows where Firestore HTTP backlog and live Zenoh inbox samples overlap.
+- Zenoh client: `tls_root_ca`, `username`, `password` args in `transport.args`. `tls_root_ca: "auto"` resolves to the `certifi` bundle at runtime — no PEM file needs to live on disk.
+- One-liner installers (`install.sh`, `install.cmd`) honor `--branch` and `--repo-url` CLI args, matching `install.ps1`. Env vars (`LOCAI_BRANCH`, `LOCAI_REPO_URL`) still respected; CLI overrides them.
+- Windows temperature: non-admin path via `Win32_PerfFormattedData_Counters_ThermalZoneInformation` (perf counter, no elevation), with admin-only `MSAcpi_ThermalZoneTemperature` fallback for service-mode deploys.
+- macOS temperature: optional `osx-cpu-temp` brew binary (opt-in; falls back to 0.0 silently when not installed).
+- `certifi>=2024.2.2` as explicit dependency.
+- Pipeline reference page in mkdocs nav.
+- End-to-end installer tests (`tests/test_installers.py`) — bash on POSIX, pwsh + cmd.exe on Windows CI.
+
+### Changed
+- `ZenohClient._build_config` gates TLS injection on `tls/` endpoint scheme rather than mode, so peer-of-router setups verify outbound TLS too.
+- `get_or_create_zenoh_session` no longer provisions a local `zenohd` binary in pure client mode — install only runs for `mode in ("router", "peer")`.
+- Plugin install scripts (`language_model`, `audio_transcriber`) early-return silently when the binary is already at the pinned tag, eliminating banner-log noise on every agent start.
+- Component registry: `Running custom install script for {name}…` demoted INFO → DEBUG; plugin's own logs are the sole signal when work happens.
+- `install.ps1` translates PowerShell-idiomatic params (`-DeviceName`, `-Email`, `-RegistrationKey`) into argparse kebab-case before invoking `main.py install`. Propagates `$LASTEXITCODE` so installer crashes no longer return 0 silently.
+- Router config generator (`infra/zenoh.py`) injects `timestamping.enabled.router: true` into `generated_router.json5` so rocksdb storage receives the `data_info` column-family records it needs.
+- pyproject `dependencies` cleaned: dropped stale entries; verified against the wire deps now in use.
+- `NOTICE.md` rewritten to reflect the actual direct dependency set with optional/dev sections.
+- `THIRDPARTYLICENSES` and `THIRDPARTYNOTICES` regenerated from the current venv via `pip-licenses` — stale entries (`opencv-python`, `pillow`, `tensorflow_cpu`, `sounddevice`, `python-dotenv`) removed.
+
+### Removed
+- `update_applied_agent_config` POST from `main.py` JIT-onboarding path and from `runtime.py:_deploy_model`. Backend learns applied config via Zenoh status events instead.
+- `wmi` Windows-only dependency. The Python lib's `pywin32` postinstall is fragile under uv (dist-info lands, module doesn't) and creates COM objects whose destructors spammed `Win32 exception releasing IUnknown` lines at process teardown. Replaced with PowerShell shell-out.
+
+### Fixed
+- `install.cmd` argv shim: `shift` inside a parenthesized `if` block didn't update `%1..%9` (cmd parses positionals at block-entry). Caused python to be invoked with `run main.py install …`, fail silently, and return 0 to the caller. Rewritten with delayed-expansion `%*` strip.
+
+---
 
 ## Architecture
 

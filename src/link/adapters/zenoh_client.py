@@ -47,9 +47,20 @@ class ZenohClient:
             else:
                 z_conf.insert_json5("connect/endpoints", ep_json)
 
-        # 3. TLS — required when connecting to a tls/ endpoint with a server-cert-only
-        tls_root_ca = self.args.get("tls_root_ca")
-        if tls_root_ca:
+        # 3. TLS — required whenever any endpoint uses the tls/ scheme (outbound
+        # connect verification). Mode is the wrong gate: a router that federates to
+        # a cloud router still dials outbound TLS. When `tls_root_ca` is absent or
+        # set to "auto", fall back to the certifi bundle: the GCE router uses a
+        # public Let's Encrypt cert whose root (ISRG Root X1) ships in certifi, so
+        # devices need no PEM on disk and no install-time curl. Override with a
+        # path only for private/self-signed CAs (dev, future internal CA, mTLS).
+        uses_tls = any(str(ep).startswith("tls/") for ep in endpoints)
+        if uses_tls:
+            tls_root_ca = self.args.get("tls_root_ca")
+            if not tls_root_ca or tls_root_ca == "auto":
+                import certifi
+
+                tls_root_ca = certifi.where()
             z_conf.insert_json5(
                 "transport/link/tls/root_ca_certificate",
                 json.dumps(tls_root_ca),

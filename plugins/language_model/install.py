@@ -23,6 +23,11 @@ PROJECT_ROOT = Path(__file__).parent
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
 LLAMA_CPP_RELEASE = "b8808"
 
+# Pinned llama-swap release — update manually after vetting a new release.
+# Find release tags at: https://github.com/mostlygeek/llama-swap/releases
+# The asset URL pattern is `llama-swap_<tag>_<os>_<arch>.<ext>`.
+LLAMA_SWAP_RELEASE = "211"
+
 # Detect Virtual Environment Root and define Install Directory
 if sys.prefix != sys.base_prefix:
     VENV_ROOT = Path(sys.prefix)
@@ -375,12 +380,151 @@ def install_inference_engine():
     )
 
 
+def _swap_prebuilt_url(tag: str) -> str | None:
+    """Returns the platform-appropriate llama-swap release URL, or None if unsupported.
+
+    Release naming on https://github.com/mostlygeek/llama-swap/releases:
+        llama-swap_<tag>_<os>_<arch>.<ext>
+
+    Where <os> ∈ {linux, darwin, windows, freebsd}, <arch> ∈ {amd64, arm64},
+    <ext> = zip on Windows, tar.gz everywhere else.
+    """
+    system = platform.system()
+    machine = platform.machine().lower()
+    is_arm = machine in ("arm64", "aarch64")
+    base = f"https://github.com/mostlygeek/llama-swap/releases/download/v{tag}"
+
+    if system == "Linux":
+        arch = "arm64" if is_arm else "amd64"
+        return f"{base}/llama-swap_{tag}_linux_{arch}.tar.gz"
+    if system == "Darwin":
+        arch = "arm64" if is_arm else "amd64"
+        return f"{base}/llama-swap_{tag}_darwin_{arch}.tar.gz"
+    if system == "Windows":
+        # Only amd64 is published. arm64 Windows users would need to wait for
+        # upstream support (or build from source).
+        if is_arm:
+            return None
+        return f"{base}/llama-swap_{tag}_windows_amd64.zip"
+    return None
+
+
+def _is_swap_installed(tag: str) -> bool:
+    """True when the llama-swap binary is present and the cached tag matches.
+
+    Mirrors `_is_already_installed`: a tag file under the build cache lets us
+    skip re-download on subsequent runs even when the binary is already on disk.
+    """
+    binary_filename = "llama-swap.exe" if platform.system() == "Windows" else "llama-swap"
+    binary_dest = BIN_LLAMA_DIR / binary_filename
+    tag_file = BUILD_CACHE_DIR / "llama_swap" / "tag"
+    return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
+
+
+def _install_swap_prebuilt(url: str, bin_dir: Path, tag: str) -> bool:
+    """Download the llama-swap release archive and install its binary to bin_dir.
+
+    Returns True on success, False on any failure (caller decides whether to
+    bail or fall back). Tag-cached: a repeated call with the same tag is a
+    no-op after the first success.
+    """
+    system = platform.system()
+    binary_filename = "llama-swap.exe" if system == "Windows" else "llama-swap"
+    binary_dest = bin_dir / binary_filename
+
+    cache_dir = BUILD_CACHE_DIR / "llama_swap"
+    tag_file = cache_dir / "tag"
+    if binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag:
+        logger.info(f"llama-swap already installed ({tag}) — skipping download.")
+        return True
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = cache_dir / url.split("/")[-1]
+
+    logger.info(f"Downloading llama-swap {tag}...")
+    try:
+        urllib.request.urlretrieve(url, archive_path)
+    except Exception as e:
+        logger.warning(f"Download failed: {e}")
+        archive_path.unlink(missing_ok=True)
+        return False
+
+    logger.info("Extracting llama-swap...")
+    try:
+        if archive_path.name.endswith(".tar.gz"):
+            with tarfile.open(archive_path, "r:gz") as tf:
+                matches = [
+                    m for m in tf.getmembers() if m.isfile() and Path(m.name).name.lower() == binary_filename.lower()
+                ]
+                if not matches:
+                    logger.warning(f"{binary_filename} not found in archive.")
+                    return False
+                f = tf.extractfile(matches[0])
+                if f is None:
+                    logger.warning(f"Could not extract {binary_filename}.")
+                    return False
+                binary_dest.write_bytes(f.read())
+                binary_dest.chmod(0o755)
+
+            # macOS Gatekeeper quarantine attribute strip — same as llama-server.
+            if system == "Darwin":
+                subprocess.run(
+                    ["xattr", "-dr", "com.apple.quarantine", str(binary_dest)],
+                    capture_output=True,
+                )
+        else:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                matches = [n for n in zf.namelist() if Path(n).name.lower() == binary_filename.lower()]
+                if not matches:
+                    logger.warning(f"{binary_filename} not found in archive.")
+                    return False
+                binary_dest.write_bytes(zf.read(matches[0]))
+                # No chmod needed on Windows.
+    except Exception as e:
+        logger.warning(f"Extraction failed: {e}")
+        return False
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+    tag_file.write_text(tag)
+    logger.info(f"llama-swap installed to {binary_dest}")
+    return True
+
+
+def install_swap():
+    """Installs the pinned llama-swap binary alongside llama-server.
+
+    No-op when the binary at the configured tag is already on disk. Logs a
+    warning (but does NOT fail the overall install) when the current platform
+    has no published prebuilt — the language_model plugin will still work for
+    single-model serving via the dedicated llama-server path; only the
+    multi-model swap path is unavailable.
+    """
+    BIN_LLAMA_DIR.mkdir(parents=True, exist_ok=True)
+    tag = LLAMA_SWAP_RELEASE
+
+    if _is_swap_installed(tag):
+        return
+
+    url = _swap_prebuilt_url(tag)
+    if not url:
+        logger.warning(
+            f"No llama-swap prebuilt available for {platform.system()}/{platform.machine()}; "
+            "multi-model swap serving will be disabled on this device."
+        )
+        return
+
+    if not _install_swap_prebuilt(url, BIN_LLAMA_DIR, tag):
+        logger.warning("llama-swap install failed; multi-model swap serving disabled.")
+
+
 def main():
     """Main installation script."""
-    if _is_already_installed(LLAMA_CPP_RELEASE):
+    if _is_already_installed(LLAMA_CPP_RELEASE) and _is_swap_installed(LLAMA_SWAP_RELEASE):
         return  # nothing to do, stay silent
     logger.info("Starting Installation for Language Model...")
     install_inference_engine()
+    install_swap()
     logger.info("Language Model component installation complete.")
 
 

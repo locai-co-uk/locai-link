@@ -7,6 +7,18 @@ set -e
 REPO_URL="${LOCAI_REPO_URL:-https://github.com/locai-co-uk/locai-link.git}"
 BRANCH="${LOCAI_BRANCH:-main}"
 
+_args=("$@")
+i=0
+while [ $i -lt ${#_args[@]} ]; do
+    case "${_args[$i]}" in
+        --branch)    BRANCH="${_args[$((i+1))]}";   i=$((i+2));;
+        --branch=*)  BRANCH="${_args[$i]#--branch=}"; i=$((i+1));;
+        --repo-url)  REPO_URL="${_args[$((i+1))]}"; i=$((i+2));;
+        --repo-url=*) REPO_URL="${_args[$i]#--repo-url=}"; i=$((i+1));;
+        *)           i=$((i+1));;
+    esac
+done
+
 # 1. Check for uv, install if missing
 if ! command -v uv &> /dev/null; then
     echo "Installing uv package manager..."

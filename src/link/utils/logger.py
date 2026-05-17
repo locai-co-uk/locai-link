@@ -10,16 +10,41 @@ import sys
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 import requests
 from pydantic import BaseModel
 
-try:
-    _AGENT_VERSION: str | None = version("locai-link")
-except PackageNotFoundError:
-    _AGENT_VERSION = None
 
+def _resolve_agent_version() -> str | None:
+    """Determine the agent version, tolerating uninstalled checkouts."""
+    try:
+        v = version("locai-link")
+        if v:
+            return v
+    except PackageNotFoundError:
+        pass
+
+    try:
+        import tomllib
+
+        here = Path(__file__).resolve()
+        for parent in [here, *here.parents][:8]:
+            candidate = parent / "pyproject.toml"
+            if not candidate.is_file():
+                continue
+            data = tomllib.loads(candidate.read_text(encoding="utf-8"))
+            project = data.get("project") or {}
+            if project.get("name") == "locai-link" and "version" in project:
+                return project["version"]
+    except Exception:
+        pass
+
+    return None
+
+
+_AGENT_VERSION: str | None = _resolve_agent_version()
 _SEVERITY_MAP = {
     "DEBUG": "info",
     "INFO": "info",
@@ -117,6 +142,33 @@ class LinkReporter(logging.Logger):
         if payload:
             self.info(payload, extra={"route_key": "model_status", "context": {"mid": model_id}})
 
+    def report_deployment_progress(
+        self,
+        model_id: str,
+        stage: str,
+        progress_pct: float,
+        bytes_done: int = 0,
+        total_bytes: int = 0,
+    ) -> None:
+        """Reports incremental deployment progress for a model.
+
+        Args:
+            model_id (str): The model/pipeline ID.
+            stage (str): Deployment stage (`downloading`, `configuring`, `completed`, ...).
+            progress_pct (float): Completion percentage 0-100.
+            bytes_done (int): Bytes processed so far (download/extract). Defaults to 0.
+            total_bytes (int): Total bytes expected. 0 when unknown.
+        """
+        if not model_id:
+            return
+        payload = {
+            "stage": stage,
+            "progress_pct": progress_pct,
+            "bytes_done": bytes_done,
+            "total_bytes": total_bytes,
+        }
+        self.info(payload, extra={"route_key": "deployment_progress", "context": {"mid": model_id}})
+
 
 # Register BEFORE defining handlers
 logging.setLoggerClass(LinkReporter)
@@ -156,7 +208,6 @@ class AsyncHandler(logging.Handler):
                 print(f"   Template: {template}")
                 return
 
-            # 3. Payload Preparation
             if isinstance(record.msg, dict):
                 # Structured data (Reporter) -> Send as JSON
                 raw_payload = record.msg
@@ -180,13 +231,24 @@ class AsyncHandler(logging.Handler):
         while not self._stop_event.is_set():
             try:
                 target, payload, raw_payload, route_key = self.queue.get(timeout=1.0)
-                try:
-                    self._transport_emit(target, payload, raw_payload, route_key)
-                except Exception as e:
-                    sys.stderr.write(f"Link Logger Error ({route_key}): {e}\n")
-                self.queue.task_done()
             except queue.Empty:
                 continue
+            try:
+                self._transport_emit(target, payload, raw_payload, route_key)
+            except Exception as e:
+                sys.stderr.write(f"Link Logger Error ({route_key}): {e}\n")
+            self.queue.task_done()
+
+        while True:
+            try:
+                target, payload, raw_payload, route_key = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._transport_emit(target, payload, raw_payload, route_key)
+            except Exception as e:
+                sys.stderr.write(f"Link Logger Error ({route_key}) [drain]: {e}\n")
+            self.queue.task_done()
 
     def _transport_emit(self, target, payload, raw_payload, route_key):
         pass
@@ -194,7 +256,7 @@ class AsyncHandler(logging.Handler):
     def close(self):
         self._stop_event.set()
         if self._worker.is_alive():
-            self._worker.join(timeout=1.0)
+            self._worker.join(timeout=2.0)
         super().close()
 
 

@@ -1,6 +1,7 @@
 """CLI entry point — dispatches setup, run, install, reset, stop, TUI subcommands."""
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -8,7 +9,6 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-from link.adapters.http_client import HttpClient
 from link.app.onboarding import activate_device, register_device
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
@@ -223,20 +223,6 @@ def run(args: argparse.Namespace):
                 sys.exit(1)
 
             state_manager.bootstrap(agent_config)
-            identity = agent_config.identity
-            try:
-                client = HttpClient(
-                    base_url=identity.api_url,
-                    default_headers={"Authorization": f"Bearer {identity.api_key}"},
-                    timeout=10.0,
-                )
-                client.post(
-                    f"agent/{identity.device_id}/update_applied_agent_config",
-                    json_data={"config": agent_config.model_dump()},
-                )
-                client.close()
-            except Exception as e:
-                logger.warning(f"Could not report applied config to backend: {e}")
         except Exception:
             sys.exit(1)
 
@@ -285,9 +271,17 @@ def run(args: argparse.Namespace):
         logger.critical(f"Runtime crash: {e}")
         sys.exit(1)
     finally:
+        # Flush logging handlers BEFORE closing the Zenoh session — otherwise
+        # the offline lifecycle message (queued by AsyncZenohHandler in the
+        # runtime's finally block) would be drained against an already-closed
+        # session and silently dropped. logging.shutdown() calls handler.close()
+        # on every handler, which now drains its queue (see AsyncHandler.close).
+        try:
+            logging.shutdown()
+        except Exception:
+            pass
         if zenoh_session:
             zenoh_session.close()
-            logger.info("Zenoh session closed.")
 
     # D. OTA Update / Config restart & Re-exec
     # - `update_requested` → pull latest code + refresh binaries, then execv.

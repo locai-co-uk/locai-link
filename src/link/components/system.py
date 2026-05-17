@@ -4,6 +4,9 @@
 """SystemMonitor source — CPU, RAM, storage, temperature metrics via psutil."""
 
 import logging
+import platform
+import shutil
+import subprocess
 import time
 
 import psutil
@@ -46,8 +49,6 @@ class SystemMonitor(Source):
         else:
             self.enabled_metrics = self.AVAILABLE_METRICS
 
-        # Prime the CPU counter so the first real call has a delta to compare against.
-        # psutil.cpu_percent(interval=None) returns 0.0 on the very first call.
         if "cpu_usage" in self.enabled_metrics:
             psutil.cpu_percent(interval=None)
 
@@ -57,9 +58,6 @@ class SystemMonitor(Source):
         Returns:
             dict | None: The collected metrics or None if interval hasn't passed.
         """
-        # 1. Rate Limiting
-        # Instead of sleeping, we return None. This returns control to the Pipeline
-        # loop immediately, allowing it to check for 'stop' signals.
         now = time.time()
         if now - self.last_poll < self.interval:
             return None
@@ -67,16 +65,12 @@ class SystemMonitor(Source):
         self.last_poll = now
         data = {"timestamp": now}
 
-        # 2. CPU
-        # interval=None is non-blocking. It calculates usage since the *last call*.
         if "cpu_usage" in self.enabled_metrics:
             data["cpu_usage"] = psutil.cpu_percent(interval=None)
 
-        # 3. RAM Usage
         if "ram_usage" in self.enabled_metrics:
             data["ram_usage"] = psutil.virtual_memory().percent
 
-        # 4. Storage
         if "storage_available_gb" in self.enabled_metrics:
             try:
                 free_bytes = psutil.disk_usage("/").free
@@ -84,15 +78,95 @@ class SystemMonitor(Source):
             except Exception:
                 data["storage_available_gb"] = -1.0
 
-        # 5. Temperature
         if "temperature_celsius" in self.enabled_metrics:
-            try:
-                temps = psutil.sensors_temperatures() or {}
-                data["temperature_celsius"] = next(
+            data["temperature_celsius"] = self._read_temp()
+
+        return data
+
+    def _read_temp(self) -> float:
+        """Reads CPU temperature in degrees Celsius across platforms.
+
+        psutil.sensors_temperatures() only exists on Linux/FreeBSD; macOS and
+        Windows need their own paths. All branches fall back to 0.0 on any
+        failure rather than raise — telemetry should never crash the agent.
+        """
+        try:
+            system = platform.system()
+
+            if system == "Linux":
+                temps = psutil.sensors_temperatures() or {}  # type: ignore[attr-defined]
+                return next(
                     (temps[k][0].current for k in self._TEMP_SENSOR_KEYS if temps.get(k)),
                     0.0,
                 )
-            except (AttributeError, IndexError):
-                data["temperature_celsius"] = 0.0
 
-        return data
+            if system == "Darwin":
+                if shutil.which("osx-cpu-temp"):
+                    out = subprocess.run(["osx-cpu-temp"], capture_output=True, text=True, timeout=2).stdout.strip()
+                    return float(out.split()[0]) if out else 0.0
+                return 0.0
+
+            if system == "Windows":
+                return self._read_temp_windows()
+        except Exception as e:
+            logger.debug(f"temperature read failed: {e}")
+        return 0.0
+
+    def _read_temp_windows(self) -> float:
+        """Windows temperature via PowerShell, two-tiered:
+
+        1. `Win32_PerfFormattedData_Counters_ThermalZoneInformation` in
+           `root/cimv2` — Performance Counter, **no admin required**. Works on
+           any unprivileged user shell. Caveat: vendor must populate the
+           counter; some laptops return only the Microsoft dummy 30.15°C
+           (kelvin × 10 = 3030) which we filter out.
+        2. `MSAcpi_ThermalZoneTemperature` in `root/wmi` — ACPI thermal zone,
+           **requires admin**. Used as fallback when the perf counter is
+           empty/dummy and the process happens to be elevated (e.g. running
+           as a Windows service / Local System).
+
+        All paths fall back to 0.0 on any failure.
+        """
+        # Tier 1 — non-admin perf counter
+        try:
+            cmd = [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance -Namespace root/cimv2 "
+                "-ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation "
+                "-ErrorAction SilentlyContinue | "
+                "ForEach-Object { if ($_.HighPrecisionTemperature) "
+                "{ $_.HighPrecisionTemperature } else { $_.Temperature } } | "
+                "Select-Object -First 1",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            raw = res.stdout.strip()
+            if raw:
+                k_x10 = float(raw)
+                # 3030 = 30.15°C — Microsoft's "no real sensor" placeholder.
+                # 0 / negative also obvious junk.
+                if k_x10 > 0 and k_x10 != 3030:
+                    return round((k_x10 / 10.0) - 273.15, 1)
+        except Exception as e:
+            logger.debug(f"perf-counter temperature read failed: {e}")
+
+        # Tier 2 — ACPI (admin-only) fallback
+        try:
+            cmd = [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance -Namespace root/wmi "
+                "-ClassName MSAcpi_ThermalZoneTemperature "
+                "-ErrorAction SilentlyContinue | "
+                "Select-Object -First 1 -ExpandProperty CurrentTemperature)",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            raw = res.stdout.strip()
+            if raw:
+                return round((float(raw) / 10.0) - 273.15, 1)
+        except Exception as e:
+            logger.debug(f"ACPI temperature read failed: {e}")
+
+        return 0.0
