@@ -211,7 +211,19 @@ def _resolve_token(
     if token:
         return token
     if email:
-        password = password or getpass.getpass("Enter platform password: ")
+        if password is None:
+            password = getpass.getpass("Enter platform password (leave blank for SSO accounts): ")
+        if not password:
+            # Empty password → skip the login call and go straight to device
+            # flow. The backend's form parser rejects empty passwords with 422
+            # before the SSO check runs, so we can't probe via /auth/login; and
+            # an empty password is never valid for a password user anyway.
+            print(
+                "No password provided; using device authorization flow.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _device_flow(api_url, client_metadata)
         try:
             return login_and_get_token(email, password, api_url)
         except UseDeviceFlowError:

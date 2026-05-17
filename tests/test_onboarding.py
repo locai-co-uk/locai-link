@@ -355,6 +355,22 @@ def test_login_409_without_use_device_flow_falls_through_to_runtime_error(mocker
         login_and_get_token("user@test.com", "pw", API_URL)
 
 
+def test_resolve_token_skips_login_on_empty_password(mocker):
+    """Empty password from getpass → skip /auth/login entirely and go straight
+    to device flow. The backend's form parser rejects empty passwords with 422
+    before the SSO check runs, so probing via login would just yield a
+    confusing validation error."""
+    mocker.patch("link.app.onboarding.getpass.getpass", return_value="")
+    login_mock = mocker.patch("link.app.onboarding.login_and_get_token")
+    device_mock = mocker.patch("link.app.onboarding._device_flow", return_value="jwt-via-device")
+
+    token = _resolve_token("sso@test.com", None, None, API_URL, client_metadata={"device_name": "x"})
+
+    assert token == "jwt-via-device"
+    login_mock.assert_not_called()
+    device_mock.assert_called_once()
+
+
 def test_resolve_token_falls_through_to_device_flow_on_sso_user(mocker):
     """Password attempt raising UseDeviceFlowError → caller runs _device_flow."""
     mocker.patch(
