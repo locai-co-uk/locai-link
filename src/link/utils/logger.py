@@ -18,26 +18,39 @@ from pydantic import BaseModel
 
 
 def _resolve_agent_version() -> str | None:
-    """Determine the agent version, tolerating uninstalled checkouts."""
+    """Determine the agent version, tolerating uninstalled checkouts.
+
+    Resolution order:
+    1. importlib.metadata — works when the package is installed with dist-info.
+    2. pyproject.toml walk-up from __file__ — works for editable installs where
+       the source tree is directly on sys.path.
+    3. pyproject.toml walk-up from sys.argv[0] — works on Mac/Windows when
+       uv run main.py is invoked from the project root and __file__ points deep
+       into site-packages beyond the 8-level walk limit.
+    """
     try:
         v = version("locai-link")
         if v:
             return v
-    except PackageNotFoundError:
+    except (PackageNotFoundError, Exception):
         pass
 
     try:
         import tomllib
 
-        here = Path(__file__).resolve()
-        for parent in [here, *here.parents][:8]:
-            candidate = parent / "pyproject.toml"
-            if not candidate.is_file():
-                continue
-            data = tomllib.loads(candidate.read_text(encoding="utf-8"))
-            project = data.get("project") or {}
-            if project.get("name") == "locai-link" and "version" in project:
-                return project["version"]
+        search_roots = [Path(__file__).resolve()]
+        if getattr(sys, "argv", None) and sys.argv[0]:
+            search_roots.append(Path(sys.argv[0]).resolve())
+
+        for start in search_roots:
+            for parent in [start, *start.parents]:
+                candidate = parent / "pyproject.toml"
+                if not candidate.is_file():
+                    continue
+                data = tomllib.loads(candidate.read_text(encoding="utf-8"))
+                project = data.get("project") or {}
+                if project.get("name") == "locai-link" and "version" in project:
+                    return project["version"]
     except Exception:
         pass
 
@@ -106,8 +119,9 @@ class LinkReporter(logging.Logger):
             status (str): The lifecycle status ('online' or 'offline').
         """
         payload: dict[str, Any] = {"status": status}
-        if _AGENT_VERSION:
-            payload["agent_version"] = _AGENT_VERSION
+        v = _AGENT_VERSION or _resolve_agent_version()
+        if v:
+            payload["agent_version"] = v
         if status == "offline":
             payload["metrics"] = {"cpu_usage": 0, "ram_usage": 0, "temperature_celsius": 0, "storage_available_gb": 0}
 
