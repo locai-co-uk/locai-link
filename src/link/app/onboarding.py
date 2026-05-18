@@ -12,7 +12,6 @@ from typing import Any
 
 import requests
 
-from link.utils.logger import _AGENT_VERSION, _resolve_agent_version
 from link.config.models import (
     SCHEMA_VERSION,
     AgentConfig,
@@ -24,6 +23,7 @@ from link.config.models import (
     TransportConfig,
 )
 from link.config.templating import resolve_templates
+from link.utils.logger import _AGENT_VERSION, _resolve_agent_version
 
 logger = logging.getLogger(__name__)
 
