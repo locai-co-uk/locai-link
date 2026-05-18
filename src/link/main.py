@@ -116,7 +116,10 @@ def install(args: argparse.Namespace):
     # Helper to run commands inside the target repo
     def run_target(cmd_list):
         full_cmd = ["uv", "run", "main.py"] + cmd_list
-        subprocess.run(full_cmd, cwd=install_dir, check=True)
+        try:
+            subprocess.run(full_cmd, cwd=install_dir, check=True)
+        except KeyboardInterrupt:
+            sys.exit(0)
 
     try:
         # A. Setup

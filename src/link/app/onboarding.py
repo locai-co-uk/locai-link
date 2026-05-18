@@ -23,6 +23,7 @@ from link.config.models import (
     TransportConfig,
 )
 from link.config.templating import resolve_templates
+from link.utils.logger import _AGENT_VERSION, _resolve_agent_version
 
 logger = logging.getLogger(__name__)
 
@@ -271,11 +272,15 @@ def register_device(
     }
     auth_token = _resolve_token(email, password, token, api_url, client_metadata=client_metadata)
 
+    _agent_ver = _AGENT_VERSION or _resolve_agent_version()
+    _metadata: dict[str, Any] = {"os": platform.system(), "arch": platform.machine()}
+    if _agent_ver:
+        _metadata["agent_version"] = _agent_ver
     payload = {
         "registration_key": reg_key,
         "name": name,
         "device_type": "other",
-        "metadata": {"os": platform.system(), "arch": platform.machine()},
+        "metadata": _metadata,
     }
     headers = {"Authorization": f"Bearer {auth_token}"}
 
