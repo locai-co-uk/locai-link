@@ -223,7 +223,8 @@ def run(args: argparse.Namespace):
                 sys.exit(1)
 
             state_manager.bootstrap(agent_config)
-        except Exception:
+        except Exception as e:
+            logger.critical(f"Onboarding failed: {e}", exc_info=True)
             sys.exit(1)
 
     # D. Factory Defaults

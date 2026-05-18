@@ -26,7 +26,7 @@ curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.
 curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
-The installer prompts interactively for anything you omit, including your platform password.
+The installer prompts interactively for anything you omit, including your platform password. If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
 
 ## Build from Source
 This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
@@ -49,6 +49,8 @@ uv run main.py run \
 ```
 
 You'll be prompted for your password (or pass `--token <JWT>` to skip). Add `--api-url "<url>"` when pointing at a non-production control plane.
+
+If your account has no password (e.g. Google sign-up), the CLI seamlessly switches to OAuth 2.0 Device Authorization (RFC 8628): you'll see a `XXXX-XXXX` code and a verification URL — open it in any browser, approve the device, and the CLI continues automatically.
 
 On subsequent runs, resume the saved session:
 
@@ -196,7 +198,15 @@ On startup without a session, the agent resolves identity in this order:
 3. **JIT onboarding** — with `--registration-key`, either register (`--device-name` + `--email`/`--token`) or re-activate (`--device-id`).
 4. **Factory defaults** — fall back to `configs/default_config.json`.
 
-Registration authenticates with email/password (login returns a JWT) or a pre-obtained `--token`, then exchanges the registration key for a device ID and API key.
+Registration resolves an auth token via one of three paths:
+
+1. **`--token <JWT>`** — pre-obtained access token. No prompts. Use this for CI / unattended deployments.
+2. **`--email` + password** — the CLI prompts for the password via `getpass`, then calls `/auth/login`. Returns a JWT on success.
+3. **`--email` + device authorization** — fallback when the account has no password (e.g. Google SSO sign-up). The CLI prints a `XXXX-XXXX` code and a `/link` URL; the user approves on any device with a browser, and the CLI polls until the request is approved (or denied / expired). Implements OAuth 2.0 RFC 8628.
+
+The CLI tries path 2 first when `--email` is provided. If the backend signals `use_device_flow` (HTTP 409), it falls through to path 3 automatically — users with a password keep the snappy one-prompt experience; SSO-only users get the device flow without re-running the command.
+
+Once authenticated, the registration key is exchanged for a device ID and API key.
 
 ## Plugins
 

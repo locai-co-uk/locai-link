@@ -6,6 +6,8 @@
 import getpass
 import logging
 import platform
+import sys
+import time
 from typing import Any
 
 import requests
@@ -24,6 +26,20 @@ from link.config.templating import resolve_templates
 
 logger = logging.getLogger(__name__)
 
+# RFC 8628 grant_type — long enough to merit a name.
+DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
+# Hard cap on poll-loop iterations (defense in depth — the backend's
+# `expired_token` is the authoritative terminator). expires_in is 600s with
+# a 5s interval, so ~120 polls; we cap at 240 to leave headroom for slow_down.
+_DEVICE_POLL_MAX_ITERATIONS = 240
+
+
+class UseDeviceFlowError(Exception):
+    """Backend signalled HTTP 409 `use_device_flow` — caller should fall through
+    to the OAuth 2.0 Device Authorization Grant. Not an error condition per se;
+    a control-flow signal that the account has no password set (SSO-only)."""
+
 
 def login_and_get_token(email: str, password: str, api_url: str) -> str:
     """Authenticates with the platform and returns a JWT access token.
@@ -37,7 +53,9 @@ def login_and_get_token(email: str, password: str, api_url: str) -> str:
         str: The JWT access token.
 
     Raises:
-        RuntimeError: If authentication fails.
+        UseDeviceFlowError: If the backend returns HTTP 409 `use_device_flow`
+            (account has no password — caller should run the device flow).
+        RuntimeError: If authentication fails for any other reason.
     """
     logger.info("Authenticating with the platform...")
     try:
@@ -48,18 +66,131 @@ def login_and_get_token(email: str, password: str, api_url: str) -> str:
                 logger.info("Authentication successful.")
                 return token
             raise RuntimeError("Login succeeded but no access token returned.")
-        else:
-            detail = ""
+        if resp.status_code == 409:
             try:
-                detail = resp.json().get("detail", resp.text)
+                detail = resp.json().get("detail", {})
             except Exception:
-                detail = resp.text
-            raise RuntimeError(f"Authentication failed ({resp.status_code}): {detail}")
+                detail = {}
+            if isinstance(detail, dict) and detail.get("error") == "use_device_flow":
+                raise UseDeviceFlowError(detail.get("message", "Account requires device authorization."))
+            # 409 without the expected payload — fall through to generic failure.
+        detail = ""
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise RuntimeError(f"Authentication failed ({resp.status_code}): {detail}")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Network error during authentication: {e}") from e
 
 
-def _resolve_token(email: str | None, password: str | None, token: str | None, api_url: str) -> str:
+def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) -> str:
+    """Drives the OAuth 2.0 Device Authorization Grant (RFC 8628) from the CLI.
+
+    Asks the backend for a `user_code` + `verification_uri`, prints them to
+    stderr so the user can approve in a browser on any device, then polls
+    `/auth/device/token` per RFC §3.5 until the request is approved, denied,
+    or expired. Used as a fallback for SSO-only users who cannot complete
+    the password flow.
+
+    Args:
+        api_url: The API base URL (already includes the `/api/v1` prefix).
+        client_metadata: Optional `{device_name, os, hostname}` shown to the
+            user on the approval page so they can confirm which device is
+            asking. Omitted from the request body when None.
+
+    Returns:
+        str: The JWT access token.
+
+    Raises:
+        RuntimeError: On `access_denied`, `expired_token`, or any unrecoverable
+            HTTP / network failure.
+    """
+    payload: dict[str, Any] = {}
+    if client_metadata:
+        payload["client_metadata"] = client_metadata
+
+    try:
+        resp = requests.post(f"{api_url}/auth/device/code", json=payload, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Failed to initiate device authorization: {e}") from e
+
+    device_code = data["device_code"]
+    user_code = data["user_code"]
+    verification_uri = data["verification_uri"]
+    verification_uri_complete = data.get("verification_uri_complete", verification_uri)
+    interval = int(data.get("interval", 5))
+
+    # Banner to stderr — matches getpass convention so it stays visible
+    # regardless of stdout redirection.
+    print(
+        "\n"
+        "To authenticate, open this URL on any device:\n"
+        f"    {verification_uri}\n"
+        "And enter this code:\n"
+        f"    {user_code}\n"
+        "\n"
+        "Or open this URL directly:\n"
+        f"    {verification_uri_complete}\n"
+        "\n"
+        "Waiting for approval...",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    token_url = f"{api_url}/auth/device/token"
+    token_body = {"device_code": device_code, "grant_type": DEVICE_GRANT_TYPE}
+
+    for _ in range(_DEVICE_POLL_MAX_ITERATIONS):
+        time.sleep(interval)
+        try:
+            resp = requests.post(token_url, json=token_body, timeout=10)
+        except requests.exceptions.RequestException as e:
+            # Transient network blip — keep polling. The user has up to
+            # `expires_in` seconds to complete approval; the backend's
+            # `expired_token` is the authoritative terminator.
+            logger.warning(f"Network error while polling for device authorization: {e}")
+            continue
+
+        if resp.status_code == 200:
+            token = resp.json().get("access_token")
+            if not token:
+                raise RuntimeError("Device approval succeeded but no access token returned.")
+            print("Device approved.", file=sys.stderr, flush=True)
+            return token
+
+        # Non-200: parse RFC §3.5 error code.
+        try:
+            detail = resp.json().get("detail", {})
+            error = detail.get("error") if isinstance(detail, dict) else None
+        except Exception:
+            error = None
+
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval += 5
+            continue
+        if error == "access_denied":
+            raise RuntimeError("Device authorization denied.")
+        if error == "expired_token":
+            raise RuntimeError("Device authorization expired — please re-run.")
+
+        # Anything else — surface the raw response so the user can debug.
+        raise RuntimeError(f"Device authorization failed ({resp.status_code}): {resp.text}")
+
+    raise RuntimeError("Device authorization timed out.")
+
+
+def _resolve_token(
+    email: str | None,
+    password: str | None,
+    token: str | None,
+    api_url: str,
+    client_metadata: dict[str, Any] | None = None,
+) -> str:
     """Resolves a JWT token from the provided credentials.
 
     Args:
@@ -67,18 +198,43 @@ def _resolve_token(email: str | None, password: str | None, token: str | None, a
         password (str | None): The user's password (prompted if None and email is provided).
         token (str | None): A pre-obtained JWT token.
         api_url (str): The API base URL.
+        client_metadata (dict | None): Optional metadata surfaced to the user
+            on the approval page if the flow falls through to device auth.
 
     Returns:
         str: A valid JWT token.
 
     Raises:
         ValueError: If neither token nor email is provided.
+        RuntimeError: If authentication fails.
     """
     if token:
         return token
     if email:
-        password = password or getpass.getpass("Enter platform password: ")
-        return login_and_get_token(email, password, api_url)
+        if password is None:
+            password = getpass.getpass("Enter platform password (leave blank for SSO accounts): ")
+        if not password:
+            # Empty password → skip the login call and go straight to device
+            # flow. The backend's form parser rejects empty passwords with 422
+            # before the SSO check runs, so we can't probe via /auth/login; and
+            # an empty password is never valid for a password user anyway.
+            print(
+                "No password provided; using device authorization flow.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _device_flow(api_url, client_metadata)
+        try:
+            return login_and_get_token(email, password, api_url)
+        except UseDeviceFlowError:
+            # SSO-only user — let them know why we're switching flows so they
+            # don't read the banner as "wrong password, try again".
+            print(
+                "This account uses single sign-on; falling back to device authorization.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _device_flow(api_url, client_metadata)
     raise ValueError("Provide either --token or --email to authenticate.")
 
 
@@ -105,7 +261,15 @@ def register_device(
     """
     logger.info(f"Registering new device: {name}")
 
-    auth_token = _resolve_token(email, password, token, api_url)
+    # client_metadata is shown on the /link approval page so the user can
+    # confirm which device is asking before approving. Best-effort — falls
+    # back gracefully if platform inspection fails on exotic runtimes.
+    client_metadata = {
+        "device_name": name,
+        "os": platform.system(),
+        "hostname": platform.node(),
+    }
+    auth_token = _resolve_token(email, password, token, api_url, client_metadata=client_metadata)
 
     payload = {
         "registration_key": reg_key,
