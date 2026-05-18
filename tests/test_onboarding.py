@@ -333,9 +333,7 @@ def test_login_raises_use_device_flow_on_409(mocker):
     """Backend signals SSO-only account via HTTP 409 + use_device_flow code."""
     resp = mocker.MagicMock()
     resp.status_code = 409
-    resp.json.return_value = {
-        "detail": {"error": "use_device_flow", "message": "No password set."}
-    }
+    resp.json.return_value = {"detail": {"error": "use_device_flow", "message": "No password set."}}
     mocker.patch("link.app.onboarding.requests.post", return_value=resp)
 
     with pytest.raises(UseDeviceFlowError, match="No password set"):

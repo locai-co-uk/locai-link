@@ -194,15 +194,8 @@ class SwapManager:
         model_entries: dict = {}
         for i, (model_id, m) in enumerate(self._models.items()):
             internal_port = self.port + 1 + i
-            args = (
-                [str(self._server_bin), "--model", m["path"], "--port", str(internal_port)]
-                + m["args"]
-            )
-            cmd = (
-                subprocess.list2cmdline(args)
-                if platform.system() == "Windows"
-                else shlex.join(args)
-            )
+            args = [str(self._server_bin), "--model", m["path"], "--port", str(internal_port)] + m["args"]
+            cmd = subprocess.list2cmdline(args) if platform.system() == "Windows" else shlex.join(args)
             entry: dict = {
                 "cmd": cmd,
                 "proxy": f"http://127.0.0.1:{internal_port}",

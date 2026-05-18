@@ -22,13 +22,13 @@ from colorama import Fore, Style
 
 # --- LOCAL IMPORTS ---
 try:
+    from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from .server import ModelServer
     from .swap_manager import SwapManager, get_swap_manager
-    from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
 except ImportError:
+    from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from server import ModelServer
     from swap_manager import SwapManager, get_swap_manager
-    from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
 
 
 logger = logging.getLogger(__name__)
@@ -68,9 +68,7 @@ class LanguageModel:
             if _is_swap_installed(LLAMA_SWAP_RELEASE):
                 self._swap_manager = get_swap_manager(self.port, self.host, BIN_LLAMA_DIR)
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
-                self._swap_manager.add_model(
-                    self.model_id, str(self.model_path), extra_args, self._build_serve_env()
-                )
+                self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
             else:
                 logger.warning("llama-swap not installed — falling back to single-model direct serve")
                 self.server = ModelServer(
