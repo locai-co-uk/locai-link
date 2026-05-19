@@ -1,22 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""SwapManager — singleton that owns the llama-swap process and its JSON config.
+"""SwapManager — manages llama-swap processes keyed by external port.
 
-All language-model pipelines in serve mode register here.  llama-swap keeps a
-single listener port per device and loads/unloads individual llama-server
-instances on demand (maxConcurrent: 1), so there is never more than one model
-resident in RAM at a time without link needing to deactivate pipelines manually.
+llama-swap is a small proxy that loads/unloads llama-server instances on demand,
+keeping one listener port per swap with `maxConcurrent: 1` so only one model
+sits in RAM at a time.
 
-Internal port layout
---------------------
-swap port  (e.g. 8100) — externally visible, owned by llama-swap
-swap port+1            — llama-server for model[0]
-swap port+2            — llama-server for model[1]
-…and so on.
+link uses one SwapManager per (host, port).  In normal operation the frontend
+pins every model to the same port and they all share a single swap.  The
+registry below transparently supports multiple ports as a fallback, so a
+stray second port from the control plane gets its own swap instead of tearing
+down the first one (which left earlier adapters polling a dead process).
 
-These internal ports are only reachable from localhost; llama-swap proxies to
-them and they are reassigned each time the config is (re)written.
+Internal port layout (per swap)
+-------------------------------
+swap port              — externally visible, owned by llama-swap
+swap port + 100 + i    — llama-server for model[i]
+
+The +100 offset keeps each swap's internal ports clear of neighbouring swaps'
+external ports.  Internal ports are reachable only from localhost.
 """
 
 import json
@@ -24,43 +27,43 @@ import logging
 import platform
 import shlex
 import signal
+import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-# Process-level singleton — one swap process per link runtime.
+# Process-level registry: one SwapManager per (host, port).
 _global_lock = threading.Lock()
-_instance: "SwapManager | None" = None
+_instances: dict[tuple[str, int], "SwapManager"] = {}
 
 
 def get_swap_manager(port: int, host: str, bin_dir: Path) -> "SwapManager":
-    """Return the module-level singleton, creating or restarting it as needed."""
-    global _instance
+    """Return the SwapManager for (host, port), creating it on first use."""
+    key = (host, port)
     with _global_lock:
-        if _instance is None:
-            _instance = SwapManager(port, host, bin_dir)
-        elif not _instance._matches(port, host):
-            # Port/host changed (shouldn't happen; single device, single port).
-            _instance.shutdown()
-            _instance = SwapManager(port, host, bin_dir)
-        return _instance
+        sm = _instances.get(key)
+        if sm is None:
+            sm = SwapManager(port, host, bin_dir)
+            _instances[key] = sm
+        return sm
 
 
 class SwapManager:
-    """Manages a single llama-swap process for this device.
+    """Manages a single llama-swap process for one (host, port) pair.
 
-    Config is written to configs/swap_config.json (project-local, same
-    directory as session state files).  The file is removed when the last
-    model is deregistered.
+    Config and log files are keyed by port (configs/swap_config_<port>.json,
+    logs/llama-swap_<port>.log) so two swaps in the same process don't collide.
     """
 
-    _CONFIG_PATH = Path("configs") / "swap_config.json"
     _MAX_CONCURRENT = 1
     _HEALTH_CHECK_TIMEOUT = 120  # seconds llama-swap waits for a model to become ready
+    _MODEL_TTL = 300  # seconds a model stays loaded after the last request
+    _INTERNAL_PORT_OFFSET = 100  # internal llama-server ports start at swap_port + offset
 
     def __init__(self, port: int, host: str, bin_dir: Path) -> None:
         self.port = port
@@ -68,7 +71,9 @@ class SwapManager:
         is_win = platform.system() == "Windows"
         self._swap_bin = bin_dir / ("llama-swap.exe" if is_win else "llama-swap")
         self._server_bin = bin_dir / ("llama-server.exe" if is_win else "llama-server")
-        self._models: dict[str, dict] = {}  # model_id -> {path, args, env}
+        self._config_path = Path("configs") / f"swap_config_{port}.json"
+        self._log_path = Path("logs") / f"llama-swap_{port}.log"
+        self._models: dict[str, dict] = {}
         self._proc: subprocess.Popen | None = None
         self._lock = threading.RLock()
 
@@ -104,16 +109,20 @@ class SwapManager:
             del self._models[model_id]
             if not self._models:
                 self._stop()
-                self._CONFIG_PATH.unlink(missing_ok=True)
+                self._config_path.unlink(missing_ok=True)
+                with _global_lock:
+                    _instances.pop((self.host, self.port), None)
             else:
                 self._write_config()
                 if self._is_running():
                     self._reload()
 
     def shutdown(self) -> None:
-        """Stop llama-swap unconditionally (called on runtime shutdown)."""
+        """Stop llama-swap unconditionally and drop from the registry."""
         with self._lock:
             self._stop()
+        with _global_lock:
+            _instances.pop((self.host, self.port), None)
 
     @property
     def address(self) -> str:
@@ -121,8 +130,12 @@ class SwapManager:
 
     def is_healthy(self) -> bool:
         """Lightweight HTTP liveness check against llama-swap's /health endpoint."""
+        if self._proc is not None and self._proc.poll() is not None:
+            return False  # process already exited — skip the HTTP round-trip
+        # 0.0.0.0 / :: are bind addresses — not valid connect targets.
+        host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
         try:
-            resp = requests.get(f"{self.address}/health", timeout=2)
+            resp = requests.get(f"http://{host}:{self.port}/health", timeout=2)
             return resp.status_code == 200
         except Exception:
             return False
@@ -130,9 +143,6 @@ class SwapManager:
     # ------------------------------------------------------------------
     # Process lifecycle (all called under self._lock)
     # ------------------------------------------------------------------
-
-    def _matches(self, port: int, host: str) -> bool:
-        return self.port == port and self.host == host
 
     def _is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -143,19 +153,50 @@ class SwapManager:
                 f"llama-swap binary not found at {self._swap_bin}. "
                 "Re-run plugin install or check language_model installation."
             )
+
+        # Kill any stale llama-swap left over from a previous unclean shutdown
+        # that is still holding our port — new process can't bind otherwise.
+        if self._port_in_use():
+            if self.is_healthy():
+                logger.warning(
+                    f"Port {self.port} already has a healthy llama-swap; reusing it. "
+                    "Send STOP_SERVING first if you need a clean restart."
+                )
+                return
+            logger.warning(f"Port {self.port} is in use but not healthy — killing stale process")
+            self._kill_port()
+
         display_host = "localhost" if self.host in ("0.0.0.0", "::", "") else self.host
         logger.info(f"Starting llama-swap on http://{display_host}:{self.port}")
+
+        self._log_path.parent.mkdir(exist_ok=True)
+        log_fh = open(self._log_path, "a")  # noqa: SIM115 — kept open for subprocess lifetime
+
         self._proc = subprocess.Popen(
             [
                 str(self._swap_bin),
                 "--config",
-                str(self._CONFIG_PATH),
+                str(self._config_path.resolve()),
                 "--listen",
                 f"{self.host}:{self.port}",
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
         )
+
+        # Brief sanity check — if the process exits within 1 s the config or
+        # port caused an immediate failure; surface the last log lines.
+        time.sleep(1)
+        if self._proc.poll() is not None:
+            log_fh.flush()
+            try:
+                tail = self._log_path.read_text(errors="replace").splitlines()[-10:]
+                logger.error("llama-swap exited immediately. Last log lines:")
+                for line in tail:
+                    logger.error(f"  | {line}")
+            except Exception:
+                pass
+            raise RuntimeError(f"llama-swap failed to start (exit {self._proc.returncode}). See {self._log_path}")
 
     def _stop(self) -> None:
         if not self._is_running():
@@ -183,26 +224,50 @@ class SwapManager:
         else:
             self._proc.send_signal(signal.SIGHUP)
 
+    def _port_in_use(self) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("127.0.0.1", self.port)) == 0
+
+    def _kill_port(self) -> None:
+        """Best-effort kill of whatever process is holding self.port."""
+        try:
+            import psutil
+
+            for conn in psutil.net_connections(kind="inet"):
+                laddr = conn.laddr
+                # laddr is `pconn(ip, port)` for INET sockets but pyright sees
+                # it as a union with `tuple[()]`; getattr keeps the check safe.
+                if not laddr or getattr(laddr, "port", None) != self.port or not conn.pid:
+                    continue
+                try:
+                    psutil.Process(conn.pid).terminate()
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Config generation
     # ------------------------------------------------------------------
 
     def _write_config(self) -> None:
         """(Over)write the JSON config consumed by llama-swap."""
-        self._CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
 
         model_entries: dict = {}
         for i, (model_id, m) in enumerate(self._models.items()):
-            internal_port = self.port + 1 + i
+            internal_port = self.port + self._INTERNAL_PORT_OFFSET + i
             args = [str(self._server_bin), "--model", m["path"], "--port", str(internal_port)] + m["args"]
             cmd = subprocess.list2cmdline(args) if platform.system() == "Windows" else shlex.join(args)
             entry: dict = {
                 "cmd": cmd,
                 "proxy": f"http://127.0.0.1:{internal_port}",
-                "ttl": 60,
+                "ttl": self._MODEL_TTL,
             }
             if m["env"]:
-                entry["env"] = m["env"]
+                # llama-swap expects env as []string of "KEY=VALUE" entries, not a map.
+                entry["env"] = [f"{k}={v}" for k, v in m["env"].items()]
             model_entries[model_id] = entry
 
         config = {
@@ -210,4 +275,4 @@ class SwapManager:
             "maxConcurrent": self._MAX_CONCURRENT,
             "models": model_entries,
         }
-        self._CONFIG_PATH.write_text(json.dumps(config, indent=2))
+        self._config_path.write_text(json.dumps(config, indent=2))

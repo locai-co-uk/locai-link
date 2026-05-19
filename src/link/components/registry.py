@@ -102,6 +102,19 @@ class ComponentRegistry:
         return cls._components.copy()
 
     @classmethod
+    def install_plugin(cls, name: str) -> None:
+        """Install a plugin's dependencies without instantiating it.
+
+        Same flow as `load_plugin`'s install step — used by the `install-plugin`
+        CLI command and by callers that want to pre-stage a plugin's deps and
+        native binaries before deciding whether to load it.
+        """
+        plugin_dir = cls._find_plugin_dir(name)
+        if not plugin_dir:
+            raise FileNotFoundError(f"Plugin directory not found for '{name}'")
+        cls._install_plugin_dependencies(name, plugin_dir)
+
+    @classmethod
     def load_plugin(cls, name: str, args: dict) -> Component:
         """Dynamically installs and loads a plugin component.
 
@@ -112,11 +125,15 @@ class ComponentRegistry:
         Returns:
             Component: The instantiated component.
         """
+        frozen = bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+
         # 1. Locate the plugin directory
         plugin_dir = cls._find_plugin_dir(name)
 
-        # 2. Install Dependencies (Lazy)
-        if plugin_dir:
+        # 2. Install Dependencies (Lazy) — skipped in a frozen bundle, where
+        # every plugin is pre-installed at build time and there's no live venv
+        # to pip into.
+        if plugin_dir and not frozen:
             cls._install_plugin_dependencies(name, plugin_dir)
 
         # 3. Load via Entry Point (Modern Standard)

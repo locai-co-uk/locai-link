@@ -7,7 +7,7 @@ build-backend = "uv_build"
 
 [project]
 name = "locai-link"
-version = "1.0.11"
+version = "1.0.12"
 description = "High-performance modular edge inference agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,8 @@ dev = [
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.7.0",
     "mkdocstrings[python]>=1.0.0",
+    # Bundling
+    "pyinstaller>=6.20.0",
 ]
 tui = ["textual>=7.0.0"]
 

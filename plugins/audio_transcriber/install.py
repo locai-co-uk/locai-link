@@ -23,8 +23,13 @@ PROJECT_ROOT = Path(__file__).parent
 # Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
 WHISPER_CPP_RELEASE = "v1.8.4"
 
-# Detect Virtual Environment Root and define Install Directory
-if sys.prefix != sys.base_prefix:
+# Detect Virtual Environment Root and define Install Directory.
+# FROZEN: running from a PyInstaller bundle.
+FROZEN = bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+if FROZEN:
+    BIN_WHISPER_DIR = Path(sys._MEIPASS) / "bin-whisper"  # type: ignore[attr-defined]
+    BUILD_CACHE_DIR = BIN_WHISPER_DIR  # never written in frozen mode; kept for parity
+elif sys.prefix != sys.base_prefix:
     VENV_ROOT = Path(sys.prefix)
     BIN_WHISPER_DIR = VENV_ROOT / "bin-whisper"
     BUILD_CACHE_DIR = VENV_ROOT / "build-cache"
@@ -299,16 +304,21 @@ def _is_already_installed(tag: str) -> bool:
     """True when whisper-server binary is present and the cached tag matches.
 
     Same check both prebuilt and cmake paths use — kept here so callers can
-    early-return before any log line fires.
+    early-return before any log line fires.  In a frozen bundle the binary is
+    shipped without a tag file, so presence alone counts as installed.
     """
     binary_filename = "whisper-server.exe" if platform.system() == "Windows" else "whisper-server"
     binary_dest = BIN_WHISPER_DIR / binary_filename
+    if FROZEN:
+        return binary_dest.exists()
     tag_file = BUILD_CACHE_DIR / "whisper_cpp" / "tag"
     return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
 
 
 def install_inference_engine():
     """Installs whisper-server: prebuilt when available, build from source as fallback."""
+    if FROZEN:
+        return  # binary ships in the bundle; nothing to install
     BIN_WHISPER_DIR.mkdir(parents=True, exist_ok=True)
     tag = WHISPER_CPP_RELEASE
 
