@@ -37,13 +37,15 @@ class ModelServer:
         self.n_ctx = int(kwargs.get("n_ctx") or 2048)
         self.chat_format = kwargs.get("chat_format")
 
-        # Determine binary directory
-        if sys.prefix != sys.base_prefix:
-            self.bin_dir = Path(sys.prefix) / "bin-llama"
-        else:
-            self.bin_dir = Path(__file__).parent / "bin-llama"
-            if not self.bin_dir.exists():
-                self.bin_dir = Path(__file__).parent.parent / "bin-llama"
+        # Defer to install.py for binary directory — it already handles FROZEN
+        # (PyInstaller bundles), venv, and standalone layouts.  Importing keeps
+        # server.py and the install checks in adapter.py looking at the same
+        # path; previously they could disagree inside a frozen bundle.
+        try:
+            from .install import BIN_LLAMA_DIR
+        except ImportError:
+            from install import BIN_LLAMA_DIR  # type: ignore[no-redef]
+        self.bin_dir = BIN_LLAMA_DIR
 
     @staticmethod
     def build_telemetry_payload(model_id, output_text, start_time, end_time, duration, metadata):

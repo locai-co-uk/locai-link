@@ -47,6 +47,7 @@ PLUGIN_SPEC = {
             "link_audio_transcriber",
             "link_audio_transcriber.adapter",
             "link_audio_transcriber.server",
+            "link_audio_transcriber.install",
         ],
         "native_dir": "bin-whisper",
     },

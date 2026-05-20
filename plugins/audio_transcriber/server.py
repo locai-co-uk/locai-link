@@ -33,13 +33,13 @@ class WhisperServer:
         self.n_threads = kwargs.get("n_threads")
         self.beam_size = kwargs.get("beam_size")
 
-        # Determine binary directory
-        if sys.prefix != sys.base_prefix:
-            self.bin_dir = Path(sys.prefix) / "bin-whisper"
-        else:
-            self.bin_dir = Path(__file__).parent / "bin-whisper"
-            if not self.bin_dir.exists():
-                self.bin_dir = Path(__file__).parent.parent / "bin-whisper"
+        # Defer to install.py for binary directory — it already handles FROZEN
+        # (PyInstaller bundles), venv, and standalone layouts.
+        try:
+            from .install import BIN_WHISPER_DIR
+        except ImportError:
+            from install import BIN_WHISPER_DIR  # type: ignore[no-redef]
+        self.bin_dir = BIN_WHISPER_DIR
 
     @staticmethod
     def build_telemetry_payload(model_id, output_text, start_time, end_time, duration, metadata):
