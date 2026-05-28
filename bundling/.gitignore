@@ -1,0 +1,4 @@
+_artifacts/
+build/
+dist/
+*.spec.bak

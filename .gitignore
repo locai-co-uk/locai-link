@@ -5,6 +5,7 @@
 .zenoh
 .vscode
 build
+dist
 site
 
 pyrefly.toml

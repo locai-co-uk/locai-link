@@ -23,4 +23,6 @@ packages = [] # Disable auto-discovery
 "adapter.py" = "link_language_model/adapter.py"
 "server.py" = "link_language_model/server.py"
 "client.py" = "link_language_model/client.py"
+"install.py" = "link_language_model/install.py"
+"swap_manager.py" = "link_language_model/swap_manager.py"
 "__init__.py" = "link_language_model/__init__.py"

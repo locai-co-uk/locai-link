@@ -21,15 +21,20 @@ PROJECT_ROOT = Path(__file__).parent
 
 # Pinned llama.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
-LLAMA_CPP_RELEASE = "b8808"
+LLAMA_CPP_RELEASE = "b9222"
 
 # Pinned llama-swap release — update manually after vetting a new release.
 # Find release tags at: https://github.com/mostlygeek/llama-swap/releases
 # The asset URL pattern is `llama-swap_<tag>_<os>_<arch>.<ext>`.
-LLAMA_SWAP_RELEASE = "211"
+LLAMA_SWAP_RELEASE = "216"
 
-# Detect Virtual Environment Root and define Install Directory
-if sys.prefix != sys.base_prefix:
+# Detect Virtual Environment Root and define Install Directory.
+# FROZEN: running from a PyInstaller bundle.
+FROZEN = bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+if FROZEN:
+    BIN_LLAMA_DIR = Path(sys._MEIPASS) / "bin-llama"  # type: ignore[attr-defined]
+    BUILD_CACHE_DIR = BIN_LLAMA_DIR  # never written in frozen mode; kept for parity
+elif sys.prefix != sys.base_prefix:
     VENV_ROOT = Path(sys.prefix)
     BIN_LLAMA_DIR = VENV_ROOT / "bin-llama"
     BUILD_CACHE_DIR = VENV_ROOT / "build-cache"
@@ -143,6 +148,16 @@ def _install_prebuilt(url, bin_dir, tag):
 
     logger.info("Extracting...")
     try:
+        # Wipe stale llama.cpp artefacts from a prior tag so versioned shared
+        # libraries (e.g. libllama.so.0.0.9222 alongside leftover .0.0.8808)
+        # don't accumulate. Leaves llama-swap and any non-matching files alone.
+        patterns = ["lib*"]
+        patterns += ["llama-server.exe", "*.dll"] if system == "Windows" else ["llama-server"]
+        for pattern in patterns:
+            for stale in bin_dir.glob(pattern):
+                if stale.is_file() or stale.is_symlink():
+                    stale.unlink(missing_ok=True)
+
         is_targz = archive_path.name.endswith(".tar.gz")
         if is_targz:
             with tarfile.open(archive_path, "r:gz") as tf:
@@ -334,16 +349,21 @@ def _is_already_installed(tag: str) -> bool:
     """True when llama-server binary is present and the cached tag matches.
 
     Same check both prebuilt and cmake paths use — kept here so callers can
-    early-return before any log line fires.
+    early-return before any log line fires.  In a frozen bundle the binary is
+    shipped without a tag file, so presence alone counts as installed.
     """
     binary_filename = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
     binary_dest = BIN_LLAMA_DIR / binary_filename
+    if FROZEN:
+        return binary_dest.exists()
     tag_file = BUILD_CACHE_DIR / "llama_cpp" / "tag"
     return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
 
 
 def install_inference_engine():
     """Installs llama-server: prebuilt when available, build from source as fallback."""
+    if FROZEN:
+        return  # binary ships in the bundle; nothing to install
     BIN_LLAMA_DIR.mkdir(parents=True, exist_ok=True)
     tag = LLAMA_CPP_RELEASE
 
@@ -414,9 +434,12 @@ def _is_swap_installed(tag: str) -> bool:
 
     Mirrors `_is_already_installed`: a tag file under the build cache lets us
     skip re-download on subsequent runs even when the binary is already on disk.
+    In a frozen bundle no tag file is shipped — binary presence is sufficient.
     """
     binary_filename = "llama-swap.exe" if platform.system() == "Windows" else "llama-swap"
     binary_dest = BIN_LLAMA_DIR / binary_filename
+    if FROZEN:
+        return binary_dest.exists()
     tag_file = BUILD_CACHE_DIR / "llama_swap" / "tag"
     return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
 
@@ -500,6 +523,8 @@ def install_swap():
     single-model serving via the dedicated llama-server path; only the
     multi-model swap path is unavailable.
     """
+    if FROZEN:
+        return  # binary ships in the bundle; nothing to install
     BIN_LLAMA_DIR.mkdir(parents=True, exist_ok=True)
     tag = LLAMA_SWAP_RELEASE
 

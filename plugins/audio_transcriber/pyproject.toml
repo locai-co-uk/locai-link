@@ -22,4 +22,5 @@ packages = [] # Disable auto-discovery
 [tool.hatch.build.targets.wheel.force-include]
 "adapter.py" = "link_audio_transcriber/adapter.py"
 "server.py" = "link_audio_transcriber/server.py"
+"install.py" = "link_audio_transcriber/install.py"
 "__init__.py" = "link_audio_transcriber/__init__.py"

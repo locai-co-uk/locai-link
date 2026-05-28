@@ -40,14 +40,19 @@ def test_llm_server_mode_lifecycle():
     print(f"\n[LLM] Starting Server on port {TEST_PORT}...")
 
     agent = LanguageModel(model_path=MODEL_PATH, mode="serve", port=TEST_PORT, n_gpu_layers=0, alias="test-model")
+    swap_mode = agent._swap_manager is not None
 
-    # Server.start() is non-blocking; wait for the background health watcher to confirm readiness.
-    assert agent.server.wait_until_ready(timeout=60), "Server did not become ready within 60s"
+    # Wait for the serving endpoint to become ready (works for both swap and direct mode).
+    # llama-swap loads the model lazily on first request, so the health check here only
+    # confirms the proxy process is up; the inference step below forces model load.
+    assert agent.wait_until_ready(timeout=60), "Serving endpoint did not become ready within 60s"
 
+    pid = None
     try:
-        assert agent.server.running
-        pid = agent.server.process.pid
-        assert psutil.pid_exists(pid), "Server process should exist"
+        if not swap_mode:
+            assert agent.server is not None and agent.server.running
+            pid = agent.server.process.pid
+            assert psutil.pid_exists(pid), "Server process should exist"
 
         health_url = f"http://127.0.0.1:{TEST_PORT}/health"
         print(f"[LLM] Checking Health: {health_url}")
@@ -56,9 +61,11 @@ def test_llm_server_mode_lifecycle():
         print("[LLM] Health Check Passed")
 
         chat_url = f"http://127.0.0.1:{TEST_PORT}/v1/chat/completions"
-        payload = {"messages": [{"role": "user", "content": "Say 'hello'."}], "max_tokens": 10}
+        # model field required by llama-swap for routing; ignored by direct llama-server
+        payload = {"model": "test-model", "messages": [{"role": "user", "content": "Say 'hello'."}], "max_tokens": 10}
         print("[LLM] Sending Inference Request...")
-        resp = requests.post(chat_url, json=payload, timeout=30)
+        # Longer timeout for swap mode: first request triggers llama-server start + model load
+        resp = requests.post(chat_url, json=payload, timeout=120)
         assert resp.status_code == 200
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
@@ -70,5 +77,6 @@ def test_llm_server_mode_lifecycle():
         agent.stop()
         time.sleep(2)  # Give OS time to reap process
 
-        assert not psutil.pid_exists(pid), "Zombie process detected! Server did not exit cleanly."
-        assert not agent.server.monitor_thread.is_alive()
+        if not swap_mode and pid is not None:
+            assert not psutil.pid_exists(pid), "Zombie process detected! Server did not exit cleanly."
+            assert agent.server is not None and not agent.server.monitor_thread.is_alive()

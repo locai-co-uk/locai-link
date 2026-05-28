@@ -494,6 +494,10 @@ def main():
             start_tui()
         except ImportError:
             logger.error("TUI missing.")
+    elif args.command == "install-plugin":
+        from link.components.registry import ComponentRegistry
+
+        ComponentRegistry.install_plugin(args.name)
     else:
         parser.print_help()
 

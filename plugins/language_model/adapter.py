@@ -4,6 +4,7 @@
 import atexit
 import json
 import logging
+import os
 import platform
 import queue
 import re
@@ -21,9 +22,13 @@ from colorama import Fore, Style
 
 # --- LOCAL IMPORTS ---
 try:
+    from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from .server import ModelServer
+    from .swap_manager import SwapManager, get_swap_manager
 except ImportError:
+    from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from server import ModelServer
+    from swap_manager import SwapManager, get_swap_manager
 
 
 logger = logging.getLogger(__name__)
@@ -51,32 +56,45 @@ class LanguageModel:
             raise FileNotFoundError(f"Model not found: {self.model_path}")
 
         self.model_id = alias or self.model_path.stem
-
         self.n_gpu_layers = int(n_gpu_layers or 35)
         self.n_ctx = int(n_ctx or 2048)
         self.host = host
         self.port = int(port)
 
-        telemetry_callback = self._on_server_log if self.mode == "serve" else None
-
-        self.server = ModelServer(
-            model_path=self.model_path,
-            host=self.host,
-            port=self.port,
-            n_gpu_layers=self.n_gpu_layers,
-            n_ctx=self.n_ctx,
-            alias=alias,
-            on_telemetry=telemetry_callback,
-        )
-        self.server.start()
-
-        atexit.register(self.stop)
+        self.server: ModelServer | None = None
+        self._swap_manager: SwapManager | None = None
 
         if self.mode == "serve":
+            if _is_swap_installed(LLAMA_SWAP_RELEASE):
+                self._swap_manager = get_swap_manager(self.port, self.host, BIN_LLAMA_DIR)
+                extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
+                self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
+            else:
+                logger.warning("llama-swap not installed — falling back to single-model direct serve")
+                self.server = ModelServer(
+                    model_path=self.model_path,
+                    host=self.host,
+                    port=self.port,
+                    n_gpu_layers=self.n_gpu_layers,
+                    n_ctx=self.n_ctx,
+                    alias=alias,
+                    on_telemetry=self._on_server_log,
+                )
+                self.server.start()
             self.thread = threading.Thread(target=self._server_heartbeat_loop, daemon=True)
             self.thread.start()
         else:
-            # Client Mode
+            # Chat mode: spawn a local llama-server and open an interactive loop.
+            self.server = ModelServer(
+                model_path=self.model_path,
+                host=self.host,
+                port=self.port,
+                n_gpu_layers=self.n_gpu_layers,
+                n_ctx=self.n_ctx,
+                alias=alias,
+                on_telemetry=None,
+            )
+            self.server.start()
             self.system_prompt = system_prompt
             self.new_terminal = new_terminal
             self.remote_conn = None
@@ -94,6 +112,8 @@ class LanguageModel:
             self.thread.start()
             logger.info("Chat initialised.")
 
+        atexit.register(self.stop)
+
     def __call__(self):
         try:
             return self.queue.get_nowait()
@@ -102,6 +122,8 @@ class LanguageModel:
 
     def stop(self):
         self.running = False
+        if self._swap_manager:
+            self._swap_manager.remove_model(self.model_id)
         if self.server:
             self.server.stop()
         if getattr(self, "remote_conn", None):
@@ -110,6 +132,23 @@ class LanguageModel:
                     self.remote_conn.close()
             except Exception:
                 pass
+
+    def wait_until_ready(self, timeout: float) -> bool:
+        """Block until the serving endpoint is healthy or timeout elapses.
+
+        Dispatches to the SwapManager health poll (swap mode) or to the
+        ModelServer's own health watcher (direct mode).
+        """
+        if self._swap_manager:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if self._swap_manager.is_healthy():
+                    return True
+                time.sleep(0.5)
+            return False
+        if self.server:
+            return self.server.wait_until_ready(timeout)
+        return False
 
     def _on_server_log(self, line):
         """Parses server logs to extract telemetry (Serve Mode Only)."""
@@ -144,21 +183,13 @@ class LanguageModel:
 
     def _server_heartbeat_loop(self):
         while self.running:
-            if not self.server.running:
+            if self._swap_manager:
+                if not self._swap_manager.is_healthy():
+                    logger.warning("llama-swap health check failed", extra={"category": "health"})
+            elif self.server and not self.server.running:
                 logger.error("Server process died!", extra={"category": "health"})
                 self.running = False
                 break
-            # status = {
-            #     "type": "status",
-            #     "mode": "serving",
-            #     "address": f"http://{self.host}:{self.port}",
-            #     "timestamp": time.time(),
-            # }
-            # if not self.queue.full():
-            #     try:
-            #         self.queue.put_nowait(status)
-            #     except queue.Full:
-            #         pass
             time.sleep(10)
 
     def _client_interaction_loop(self):
@@ -222,7 +253,8 @@ class LanguageModel:
         response_text = ""
         tokens = 0
         url = f"http://{self.host}:{self.port}/v1/chat/completions"
-        payload = {"messages": self.messages, **self.parameters}
+        # model field is required by llama-swap for routing; harmless for direct llama-server
+        payload = {"model": self.model_id, "messages": self.messages, **self.parameters}
 
         try:
             resp = requests.post(url, json=payload, stream=self.parameters["stream"], timeout=600)
@@ -276,6 +308,27 @@ class LanguageModel:
 
         if not self.queue.full():
             self.queue.put(telemetry_payload)
+
+    def _build_serve_env(self) -> dict[str, str]:
+        """Return env vars to inject into the llama-server launched by llama-swap.
+
+        On Linux, LD_LIBRARY_PATH must include bin-llama so the CUDA/Vulkan
+        shared libraries (.so) bundled alongside llama-server are found at
+        runtime.  Other platforms don't need this.
+        """
+        if platform.system() != "Linux":
+            return {}
+        bin_dir = BIN_LLAMA_DIR
+        lib_paths: set[str] = {str(bin_dir)}
+        for root, _, files in os.walk(bin_dir):
+            for f in files:
+                if "ggml" in f and f.endswith(".so"):
+                    lib_paths.add(root)
+        ld_path = os.pathsep.join(sorted(lib_paths))
+        current = os.environ.get("LD_LIBRARY_PATH", "")
+        if current:
+            ld_path = f"{ld_path}{os.pathsep}{current}"
+        return {"LD_LIBRARY_PATH": ld_path} if ld_path else {}
 
     def _resolve_path(self, path_str):
         path = Path(path_str)
