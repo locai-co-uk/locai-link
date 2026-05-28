@@ -668,8 +668,16 @@ class AgentRuntime:
                     if inp.get("channels"):
                         source_args["channels"] = inp["channels"]
         else:
-            logger.warning(f"Unknown runner '{runner}'. Defaulting to 'generic_model'.")
-            source_type = "generic_model"
+            raise ValueError(
+                f"Cannot deploy pipeline '{pipeline_id}': runtime_config has no recognized "
+                f"runner or semantic_type (runner={runner!r}, semantic_type={semantic_type!r}). "
+                f"Expected runner in {{gguf_language_model, *image_detection*, "
+                f"whisper_audio_transcription, *audio_classification*}} or semantic_type in "
+                f"{{text_generation, object_detection, audio_transcription, audio_classification}}. "
+                f"Most likely the control plane did not synthesize a default runtime_config for "
+                f"this model — check that the model's runtime_configs/<model_id>__model__default "
+                f"document exists with process.impl.runner populated."
+            )
 
         sink_conf = GenericConfig(type="console", args={})
 
