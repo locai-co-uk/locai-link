@@ -207,13 +207,50 @@ def _detect_gpu_cmake_flags():
     return flags
 
 
+def _missing_build_prerequisites():
+    """Return a list of (tool, install_hint) pairs for any build tools that are missing.
+
+    whisper.cpp doesn't ship Linux/macOS prebuilt server binaries, so building from
+    source is the only supported path on those platforms — and the user needs git
+    and cmake on PATH. Surfacing the full list (and the platform-appropriate install
+    command) is more useful than reporting them one at a time mid-build.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        hint_prefix = "brew install"
+    elif system == "Linux":
+        # Don't assume a package manager — Debian/RHEL/Arch each use a different one.
+        # Just give the canonical package names; the user can map to their distro.
+        hint_prefix = "(install package)"
+    elif system == "Windows":
+        hint_prefix = "choco install"
+    else:
+        hint_prefix = "install"
+
+    missing = []
+    if not _command_exists("git"):
+        missing.append(("git", f"{hint_prefix} git"))
+    if not _command_exists("cmake"):
+        missing.append(("cmake", f"{hint_prefix} cmake"))
+    return missing
+
+
 def _cmake_build(tag, cmake_flags, bin_dir):
     """Clone whisper.cpp at tag, build whisper-server with cmake, and install to bin_dir."""
-    if not _command_exists("git"):
-        logger.error("git is required to build from source but was not found.")
-        sys.exit(1)
-    if not _command_exists("cmake"):
-        logger.error("cmake is required to build from source but was not found.")
+    missing = _missing_build_prerequisites()
+    if missing:
+        tools = ", ".join(t for t, _ in missing)
+        logger.error(
+            f"Cannot build whisper.cpp from source: missing {tools}. "
+            f"whisper.cpp does not publish prebuilt server binaries for "
+            f"{platform.system()} at tag {tag}, so these tools are required."
+        )
+        for _, hint in missing:
+            logger.error(f"  Install with: {hint}")
+        if platform.system() == "Darwin":
+            logger.error(
+                "  (If Homebrew is not installed: https://brew.sh — then run the command above.)"
+            )
         sys.exit(1)
 
     system = platform.system()
