@@ -248,9 +248,7 @@ def _cmake_build(tag, cmake_flags, bin_dir):
         for _, hint in missing:
             logger.error(f"  Install with: {hint}")
         if platform.system() == "Darwin":
-            logger.error(
-                "  (If Homebrew is not installed: https://brew.sh — then run the command above.)"
-            )
+            logger.error("  (If Homebrew is not installed: https://brew.sh — then run the command above.)")
         sys.exit(1)
 
     system = platform.system()
