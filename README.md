@@ -28,6 +28,18 @@ curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install
 
 The installer prompts interactively for anything you omit, including your platform password. If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
 
+### Plugin build prerequisites
+
+Some plugins compile native binaries from source on first use (notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp — upstream does not publish prebuilts for Linux/macOS). Install `git` and `cmake` on the device before deploying a model that uses these:
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install cmake` (git ships with Xcode CLT) |
+| Debian/Ubuntu | `sudo apt install cmake git build-essential` |
+| Fedora/RHEL | `sudo dnf install cmake git gcc-c++` |
+| Arch | `sudo pacman -S cmake git base-devel` |
+| Windows | No action — prebuilt binaries are downloaded. |
+
 ## Build from Source
 This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
 
