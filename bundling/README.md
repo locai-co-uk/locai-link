@@ -8,16 +8,15 @@ Build a self-contained, embeddable distribution of Link via PyInstaller.
 bundling/
 ├── README.md                  # this file
 ├── prefetch.py                # downloads native binaries into _artifacts/<platform>/
-├── _artifacts/                # build inputs (native binaries, generated, gitignored)
-│   └── <os>-<arch>/
-│       └── bin-llama/
-│           ├── llama-server
-│           └── llama-swap
-└── (forthcoming)
-    ├── locai-link.spec        # PyInstaller spec
-    ├── build.py               # orchestrator: prefetch → pyinstaller → post-sign
-    ├── hooks/                 # PyInstaller hidden-import hooks
-    └── entitlements.plist     # macOS hardened-runtime entitlements
+├── build.py                   # orchestrator: prefetch → pyinstaller
+├── locai-link.spec            # PyInstaller spec
+├── entitlements.plist         # macOS hardened-runtime entitlements
+├── sign_macos.py              # codesign + notarytool + staple (macOS only)
+└── _artifacts/                # build inputs (native binaries, generated, gitignored)
+    └── <os>-<arch>/
+        └── bin-llama/
+            ├── llama-server
+            └── llama-swap
 ```
 
 ## Local build
@@ -42,8 +41,40 @@ across runs so re-builds are fast).
 ## CI
 
 A GitHub Actions matrix builds the bundle on `macos-latest`, `windows-latest`,
-and `ubuntu-latest`, uploading the artefact for each. Signing/notarisation is
-layered on macOS/Windows in a separate post-build step.
+and `ubuntu-latest`, uploading the artefact for each. The macOS job also
+codesigns + notarises + staples the bundle when the signing secrets are
+configured on the repo (see below); without those secrets the bundle is
+uploaded unsigned (PRs from forks land here).
+
+### macOS signing — required repo secrets
+
+Add these to **Settings → Secrets and variables → Actions** before the
+signed bundle build will run end-to-end. Missing any one of them causes the
+workflow to skip signing and surface a `::notice::` line.
+
+| Secret | Source | Notes |
+|---|---|---|
+| `APPLE_DEVELOPER_ID_APPLICATION_CERT_P12_BASE64` | Export the **Developer ID Application** cert + private key from Keychain Access as `.p12`, then `base64 < cert.p12 \| pbcopy` | Treat as a long-lived secret; rotates only on cert expiry. |
+| `APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD` | Passphrase set during the .p12 export above | — |
+| `APPLE_DEVELOPER_ID_APPLICATION` | Common name of the signing identity, e.g. `Developer ID Application: Loc.ai Ltd (TEAMID12AB)` | Find via `security find-identity -v -p codesigning` on a developer Mac. |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect → Users and Access → Keys → 10-char key ID | Create the key with **Developer** role; it's the minimum that can submit notarisation. |
+| `APPLE_NOTARY_ISSUER_ID` | App Store Connect → Users and Access → Keys → Issuer ID (UUID) | Per-team value, the same for every key issued by that team. |
+| `APPLE_NOTARY_KEY_P8_BASE64` | The `.p8` file you download once when creating the API key, base64-encoded | Apple lets you download this once — store it carefully. |
+
+Local dev signing follows the same procedure but reads the cert from your
+login keychain instead of importing a .p12:
+
+```bash
+export APPLE_DEVELOPER_ID_APPLICATION="Developer ID Application: …"
+export APPLE_NOTARY_KEY_ID="ABCD1234EF"
+export APPLE_NOTARY_ISSUER_ID="…"
+export APPLE_NOTARY_KEY_PATH="$HOME/keys/AuthKey_ABCD1234EF.p8"
+uv run python bundling/sign_macos.py --bundle dist/locai-link
+```
+
+Pass `--skip-notarise` to sign without submitting to Apple — useful when
+iterating on entitlements or codesign flags without burning 10-15 minutes
+per round-trip on the notary queue.
 
 ## What gets bundled
 
