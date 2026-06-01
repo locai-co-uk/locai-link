@@ -74,3 +74,119 @@ def test_update_agent_flag_default_false(empty_agent):
     """update_requested defaults to False when no update command is issued."""
     empty_agent.handle_command({"id": "cmd-1", "command": "STATUS", "payload": {}})
     assert empty_agent.update_requested is False
+
+
+def _config_with_artifact(device_id, pipeline_id, model_path):
+    """Config dict with one stopped pipeline whose source carries a model_path."""
+    return {
+        "version": 2.1,
+        "identity": {"device_id": device_id},
+        "pipelines": [
+            {
+                "id": pipeline_id,
+                "source": {"type": "clock_tick", "args": {"interval": 0.1, "model_path": str(model_path)}},
+                "sink": {"type": "console", "args": {}},
+            }
+        ],
+    }
+
+
+def test_uninstall_model_deletes_artifact_and_completes(mocker, mock_zenoh_session, mock_state_manager, tmp_path):
+    """UNINSTALL_MODEL on a stopped pipeline unlinks the artifact and reports completed."""
+    artifact = tmp_path / "m1.tflite"
+    artifact.write_bytes(b"weights")
+    agent = _make_agent(_config_with_artifact("d", "m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+
+    agent.handle_command({"command_type": "uninstall_model", "id": "c1", "payload": {"model_id": "m1"}})
+
+    assert not artifact.exists()
+    assert "m1" not in agent.pipeline_configs
+    mock_state_manager.remove_pipeline.assert_called_once_with("m1")
+    agent.status_logger.report_model.assert_called_once()
+    assert agent.status_logger.report_model.call_args.kwargs["installed"] is False
+    assert agent.status_logger.report_command.call_args.args[1] == "completed"
+
+
+def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker, capfd):
+    """A running pipeline is NOT removed when force_stop is absent/false."""
+    empty_agent.handle_command(
+        {
+            "id": "start",
+            "command": "START_MODEL",
+            "payload": {
+                "id": "live",
+                "source": {"type": "clock_tick", "args": {}},
+                "sink": {"type": "console", "args": {}},
+            },
+        }
+    )
+    assert "live" in empty_agent.pipelines
+    mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command({"command_type": "uninstall_model", "id": "c2", "payload": {"model_id": "live"}})
+
+    assert "live" in empty_agent.pipelines  # still running — refused
+    assert empty_agent.status_logger.report_command.call_args.args[1] == "failed"
+    empty_agent._shutdown()
+    capfd.readouterr()
+
+
+def test_uninstall_running_pipeline_with_force_stop_succeeds(empty_agent, mocker, capfd):
+    """force_stop:true stops the live pipeline first, then uninstalls it."""
+    empty_agent.handle_command(
+        {
+            "id": "start",
+            "command": "START_MODEL",
+            "payload": {
+                "id": "live",
+                "source": {"type": "clock_tick", "args": {}},
+                "sink": {"type": "console", "args": {}},
+            },
+        }
+    )
+    assert "live" in empty_agent.pipelines
+    mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command(
+        {"command_type": "uninstall_model", "id": "c3", "payload": {"model_id": "live", "force_stop": True}}
+    )
+
+    assert "live" not in empty_agent.pipelines
+    assert "live" not in empty_agent.pipeline_configs
+    assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
+    capfd.readouterr()
+
+
+def test_uninstall_orphaned_file_fallback(mocker, empty_agent, tmp_path, monkeypatch):
+    """With no local config, the payload filename locates the artifact under models/."""
+    monkeypatch.chdir(tmp_path)
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    orphan = models_dir / "ghost.onnx"
+    orphan.write_bytes(b"x")
+    mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command(
+        {
+            "command_type": "uninstall_model",
+            "id": "c4",
+            "payload": {"model_id": "ghost", "filename_on_server": "ghost", "file_extension": "onnx"},
+        }
+    )
+
+    assert not orphan.exists()
+    assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
+
+
+def test_remove_model_alias_still_handled(mocker, mock_zenoh_session, mock_state_manager, tmp_path):
+    """The legacy REMOVE_MODEL command name remains supported."""
+    artifact = tmp_path / "legacy.tflite"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_artifact("d", "legacy", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+
+    agent.handle_command({"command": "REMOVE_MODEL", "id": "c5", "payload": {"id": "legacy"}})
+
+    assert not artifact.exists()
+    assert agent.status_logger.report_command.call_args.args[1] == "completed"
