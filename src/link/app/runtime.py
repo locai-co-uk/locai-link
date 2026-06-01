@@ -188,13 +188,18 @@ class AgentRuntime:
                 else:
                     self.status_logger.report_command(cmd_id, "failed", f"Failed to stop {pipeline_id}")
 
-            elif cmd_type == "REMOVE_MODEL":
+            elif cmd_type in ("UNINSTALL_MODEL", "REMOVE_MODEL"):
                 if not pipeline_id:
-                    msg = "REMOVE command rejected: Could not identify target pipeline."
+                    msg = "UNINSTALL command rejected: Could not identify target pipeline."
                     logger.warning(msg)
                     self.status_logger.report_command(cmd_id, "failed", msg)
                     return
-                self._remove_model(cmd_id, pipeline_id)
+                self._uninstall_model(
+                    cmd_id,
+                    pipeline_id,
+                    force_stop=bool(payload.get("force_stop", False)),
+                    payload=payload,
+                )
 
             elif cmd_type == "STATUS":
                 self._log_status()
@@ -436,30 +441,53 @@ class AgentRuntime:
         self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
 
-    def _remove_model(self, command_id: str, pipeline_id: str):
+    def _uninstall_model(
+        self,
+        command_id: str,
+        pipeline_id: str,
+        force_stop: bool = False,
+        payload: dict | None = None,
+    ):
         """Drops a pipeline's config and deletes its on-disk artifacts.
 
-        Refuses (and logs a warning) when the pipeline is currently running, or
-        when another configured pipeline references the same artifact path. The
-        operator must explicitly stop the pipeline first; this keeps removal
-        non-destructive and avoids killing live inference / serving.
+        Refuses (and logs a warning) when the pipeline is currently running and
+        ``force_stop`` is False, or when another configured pipeline references
+        the same artifact path. When ``force_stop`` is True, a running pipeline
+        is stopped first (true one-click uninstall) before removal.
+
+        Removal is idempotent: a missing config or already-deleted file still
+        reports ``completed``. When no local config exists but the command
+        payload carried ``filename_on_server`` / ``file_extension``, the
+        on-disk artifact is located via the ``models/`` directory as a fallback
+        so disk is freed even after local state has drifted.
 
         Args:
             command_id (str): The command ID.
             pipeline_id (str): The pipeline / model ID to remove.
+            force_stop (bool): When True, stop a running pipeline before removal.
+            payload (dict | None): Original command payload (orphaned-file fallback).
         """
-        logger.info(f"Removing pipeline '{pipeline_id}'...")
+        logger.info(f"Uninstalling pipeline '{pipeline_id}' (force_stop={force_stop})...")
 
-        with self.lock:
-            if pipeline_id in self.pipelines:
+        # Stop FIRST, before acquiring self.lock — _stop_pipeline takes the lock itself,
+        # so calling it inside `with self.lock` would deadlock.
+        if pipeline_id in self.pipelines:
+            if not force_stop:
                 msg = (
-                    f"Cannot remove '{pipeline_id}': pipeline is running. "
+                    f"Cannot uninstall '{pipeline_id}': pipeline is running. "
                     "Stop it first (STOP_MODEL_INFERENCE / STOP_SERVING) and retry."
                 )
                 logger.warning(msg)
                 self.status_logger.report_command(command_id, "failed", msg)
                 return
+            logger.info(f"force_stop: stopping running pipeline '{pipeline_id}' before uninstall")
+            if not self._stop_pipeline(pipeline_id):
+                msg = f"Cannot uninstall '{pipeline_id}': failed to stop running pipeline."
+                logger.error(msg)
+                self.status_logger.report_command(command_id, "failed", msg)
+                return
 
+        with self.lock:
             cfg = self.pipeline_configs.get(pipeline_id)
             artifact_path: Path | None = None
             if cfg is not None:
@@ -467,6 +495,18 @@ class AgentRuntime:
                 model_path = src_args.get("model_path")
                 if model_path:
                     artifact_path = Path(str(model_path))
+
+            # Orphaned-file fallback: no local config (so no model_path), but the
+            # command payload told us the filename — reconstruct the path under the
+            # same models/ dir _deploy_model writes to, so we still free disk.
+            if artifact_path is None and payload:
+                filename = payload.get("filename_on_server")
+                if filename:
+                    extension = payload.get("file_extension") or ""
+                    if extension and not str(extension).startswith("."):
+                        extension = f".{extension}"
+                    artifact_path = Path.cwd().joinpath("models", f"{filename}{extension}")
+                    logger.info(f"No local config for '{pipeline_id}'; using payload fallback path: {artifact_path}")
 
             if artifact_path is not None:
                 for other_id, other_cfg in self.pipeline_configs.items():
