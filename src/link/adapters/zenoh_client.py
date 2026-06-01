@@ -69,7 +69,7 @@ class ZenohClient:
         # 4. usrpwd auth — username = device_id, password = api_key (or test cred).
         username = self.args.get("username")
         password = self.args.get("password")
-        if username and password:
+        if username and password and uses_tls:
             z_conf.insert_json5(
                 "transport/auth/usrpwd",
                 json.dumps({"user": username, "password": password}),
