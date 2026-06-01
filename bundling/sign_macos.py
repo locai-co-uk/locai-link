@@ -130,30 +130,41 @@ def codesign_bundle(bundle: Path, identity: str, entitlements: Path) -> None:
     # hardened runtime. --force overwrites any existing ad-hoc signature
     # PyInstaller may have applied to its bootloader.
     for binary in mach_o_files:
-        _run([
-            "codesign",
-            "--force",
-            "--timestamp",
-            "--options", "runtime",
-            "--entitlements", str(entitlements),
-            "--sign", identity,
-            str(binary),
-        ])
+        _run(
+            [
+                "codesign",
+                "--force",
+                "--timestamp",
+                "--options",
+                "runtime",
+                "--entitlements",
+                str(entitlements),
+                "--sign",
+                identity,
+                str(binary),
+            ]
+        )
 
     # Final outer signature on the bundle directory — verifies the
     # ensemble. --deep is intentionally NOT used here (Apple explicitly
     # deprecated it for the loadable-bundle case); we did the deep walk
     # manually above.
-    _run([
-        "codesign",
-        "--force",
-        "--timestamp",
-        "--options", "runtime",
-        "--entitlements", str(entitlements),
-        "--sign", identity,
-        "--identifier", BUNDLE_IDENTIFIER,
-        str(bundle),
-    ])
+    _run(
+        [
+            "codesign",
+            "--force",
+            "--timestamp",
+            "--options",
+            "runtime",
+            "--entitlements",
+            str(entitlements),
+            "--sign",
+            identity,
+            "--identifier",
+            BUNDLE_IDENTIFIER,
+            str(bundle),
+        ]
+    )
 
     # Sanity check: --verify catches signature mismatches before we waste
     # 10 minutes on Apple's notarisation queue.
@@ -170,35 +181,43 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
         zip_path = Path(tmp) / f"{bundle.name}.zip"
         # `ditto -c -k --sequesterRsrc --keepParent` is Apple's blessed
         # way to zip a bundle for notarisation. Plain `zip` strips xattrs.
-        _run([
-            "ditto",
-            "-c", "-k",
-            "--sequesterRsrc",
-            "--keepParent",
-            str(bundle),
-            str(zip_path),
-        ])
+        _run(
+            [
+                "ditto",
+                "-c",
+                "-k",
+                "--sequesterRsrc",
+                "--keepParent",
+                str(bundle),
+                str(zip_path),
+            ]
+        )
 
         # notarytool --wait blocks until Apple returns Accepted/Invalid.
         # On rejection we fetch the log so CI logs surface the reason
         # without a separate manual step.
         try:
-            _run([
-                "xcrun", "notarytool", "submit", str(zip_path),
-                "--key", str(key_path),
-                "--key-id", key_id,
-                "--issuer", issuer_id,
-                "--wait",
-            ])
+            _run(
+                [
+                    "xcrun",
+                    "notarytool",
+                    "submit",
+                    str(zip_path),
+                    "--key",
+                    str(key_path),
+                    "--key-id",
+                    key_id,
+                    "--issuer",
+                    issuer_id,
+                    "--wait",
+                ]
+            )
         except subprocess.CalledProcessError:
             logger.error("Notarisation failed — fetching log for diagnosis.")
             # Submission ID is printed by submit; without it we can't fetch
             # the log directly. Fall back to listing the most recent submission.
             _run(
-                ["xcrun", "notarytool", "history",
-                 "--key", str(key_path),
-                 "--key-id", key_id,
-                 "--issuer", issuer_id],
+                ["xcrun", "notarytool", "history", "--key", str(key_path), "--key-id", key_id, "--issuer", issuer_id],
                 check=False,
             )
             raise
