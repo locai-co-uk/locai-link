@@ -194,33 +194,66 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
         )
 
         # notarytool --wait blocks until Apple returns Accepted/Invalid.
-        # On rejection we fetch the log so CI logs surface the reason
-        # without a separate manual step.
+        # CRITICAL: notarytool exits 0 even when the result is `Invalid` —
+        # Apple considers the SUBMISSION successful, just the verdict is
+        # negative. So we parse --output-format json and check status
+        # ourselves; the previous CalledProcessError-only path silently
+        # walked into stapler with a rejected bundle and a confusing
+        # CloudKit "Record not found" error.
+        result = _run(
+            [
+                "xcrun",
+                "notarytool",
+                "submit",
+                str(zip_path),
+                "--key",
+                str(key_path),
+                "--key-id",
+                key_id,
+                "--issuer",
+                issuer_id,
+                "--wait",
+                "--output-format",
+                "json",
+            ],
+            capture=True,
+        )
+        import json as _json
+
         try:
+            verdict = _json.loads(result.stdout)
+        except _json.JSONDecodeError:
+            logger.error("Could not parse notarytool JSON output:\n%s", result.stdout)
+            raise SystemExit("Notarisation verdict could not be parsed.")
+
+        submission_id = verdict.get("id", "<unknown>")
+        status = verdict.get("status", "<unknown>")
+        logger.info("Notarytool verdict: status=%s id=%s", status, submission_id)
+
+        if status != "Accepted":
+            # Fetch Apple's diagnostic log inline so CI shows the
+            # rejection reason without a separate manual `notarytool log`
+            # round-trip. The log lists each file Apple objected to and why.
+            logger.error("Notarisation rejected — fetching diagnostic log.")
             _run(
                 [
                     "xcrun",
                     "notarytool",
-                    "submit",
-                    str(zip_path),
+                    "log",
+                    submission_id,
                     "--key",
                     str(key_path),
                     "--key-id",
                     key_id,
                     "--issuer",
                     issuer_id,
-                    "--wait",
-                ]
-            )
-        except subprocess.CalledProcessError:
-            logger.error("Notarisation failed — fetching log for diagnosis.")
-            # Submission ID is printed by submit; without it we can't fetch
-            # the log directly. Fall back to listing the most recent submission.
-            _run(
-                ["xcrun", "notarytool", "history", "--key", str(key_path), "--key-id", key_id, "--issuer", issuer_id],
+                ],
                 check=False,
             )
-            raise
+            raise SystemExit(
+                f"Notarisation rejected with status={status!r} (submission {submission_id}). "
+                f"See the log output above for per-file objections."
+            )
 
     # Staple the notarisation ticket onto the bundle itself so first-run
     # works without an Apple round-trip (matters for offline edge devices
