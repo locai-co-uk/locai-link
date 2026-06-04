@@ -185,13 +185,16 @@ jobs:
       # locally; the .sha256 sidecar lets users verify the download.
       - name: Package bundle
         shell: bash
+        # All vars in one env block — the prior version had two separate
+        # `env:` keys which is invalid YAML and GitHub rejected the file
+        # at parse time. ARCHIVE_EXT drives the if/else (tar vs zip),
+        # ASSET is the full filename used by both the archive step and
+        # the Python heredoc (env-passed so the heredoc subprocess sees it).
         env:
-          TAG_NAME: ${{ steps.tag.outputs.name }}
-          ASSET_BASENAME: ${{ matrix.asset_basename }}
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          ASSET: ${{ matrix.asset_basename }}-${{ steps.tag.outputs.name }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          ASSET="${ASSET_BASENAME}-${TAG_NAME}.${ARCHIVE_EXT}"
           mkdir -p release-assets
           cd dist
           if [ "${ARCHIVE_EXT}" = "zip" ]; then
@@ -214,8 +217,6 @@ jobs:
           print(f"{digest}  {name}")
           EOF
           ls -lah release-assets/
-        env:
-          ASSET: ${{ matrix.asset_basename }}-${{ steps.tag.outputs.name }}.${{ matrix.archive_ext }}
 
       - name: Upload release assets
         uses: actions/upload-artifact@v4
