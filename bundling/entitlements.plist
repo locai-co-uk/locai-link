@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    Hardened-runtime entitlements for the macOS bundle.
+
+    Required by Apple notarisation; relaxations below are the minimum needed
+    for a PyInstaller-frozen Python app that ships unsigned third-party
+    native binaries (whisper-server, llama-server, llama-swap).
+
+    Each relaxation is justified inline so future audits can see the
+    reasoning without trawling git history.
+    -->
+
+    <!-- PyInstaller's bootloader allocates a writable+executable page to
+         load the frozen archive; Python itself JITs regex bytecode and
+         certain C extensions. Without this the binary crashes at launch
+         with EXC_BAD_ACCESS once hardened runtime is on. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- We load whisper.cpp / llama.cpp shared libraries that are NOT
+         signed by Apple. With hardened runtime on, dyld refuses to load
+         them unless library validation is disabled at the loading
+         binary's entitlement layer. Standard for any app that bundles
+         third-party Mach-O dylibs. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Python sets DYLD_FALLBACK_LIBRARY_PATH internally in some
+         configurations and certain Python C extensions probe DYLD_*.
+         Hardened runtime drops DYLD_* env vars by default; allowing
+         them is safe here because we don't accept untrusted input that
+         could set them. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

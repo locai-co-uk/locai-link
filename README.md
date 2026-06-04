@@ -7,7 +7,36 @@ Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a R
 
 ## Quick Start
 
-One-line installer for edge devices — sets up, registers, and activates in a single command.
+The fastest way to get Link running is to download a pre-built binary from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest). No Python, git, or compilers required on the device. The macOS bundle is signed + notarised so it runs without Gatekeeper warnings.
+
+**macOS (Apple Silicon):**
+```bash
+curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-macos-arm64-$TAG.tar.gz | tar -xz
+./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+```
+
+**Linux (x86_64):**
+```bash
+curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-linux-x86_64-$TAG.tar.gz | tar -xz
+./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+```
+
+**Windows (PowerShell):**
+```powershell
+Invoke-WebRequest https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-windows-x86_64-$TAG.zip -OutFile locai-link.zip
+Expand-Archive locai-link.zip
+.\locai-link\locai-link.exe run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+```
+
+Replace `$TAG` with the version you want (e.g. `v1.0.12`); the URLs on the Releases page list the exact filenames. Each release also publishes a `.sha256` sidecar so you can verify the download (`sha256sum -c locai-link-…sha256`).
+
+If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
+
+## Build from Source
+
+The pre-built binaries above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
+
+One-line installer that clones the repo, sets up Python via `uv`, and runs the agent in a single command:
 
 **Linux / macOS:**
 ```bash
@@ -23,14 +52,18 @@ curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.
 
 **Windows (CMD):**
 ```cmd
-curl -LsSf https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
-The installer prompts interactively for anything you omit, including your platform password. If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
+> `--ssl-no-revoke` is needed because Windows curl uses Schannel, which fails the connection with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` when it can't reach the certificate's revocation endpoint — common on corporate networks and strict firewalls. The flag skips the revocation lookup only; server certificate validation is unaffected.
 
-### Plugin build prerequisites
+The installer prompts interactively for anything you omit, including your platform password.
 
-Some plugins compile native binaries from source on first use (notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp — upstream does not publish prebuilts for Linux/macOS). Install `git` and `cmake` on the device before deploying a model that uses these:
+### Plugin build prerequisites (source builds only)
+
+Source builds compile native plugin binaries from upstream on first use (notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp — upstream does not publish prebuilts for Linux/macOS). The pre-built bundles ship these binaries pre-compiled, so this section only applies to the source-install path above.
+
+Install `git` and `cmake` on the device before deploying a model that uses these plugins:
 
 | Platform | Command |
 |---|---|
@@ -40,7 +73,7 @@ Some plugins compile native binaries from source on first use (notably `audio_tr
 | Arch | `sudo pacman -S cmake git base-devel` |
 | Windows | No action — prebuilt binaries are downloaded. |
 
-## Build from Source
+## Hacking on the codebase
 This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
 
 ### Installation

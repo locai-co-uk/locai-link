@@ -76,6 +76,15 @@ jobs:
         shell: bash
         run: uv run python bundling/build.py --plugins language_model audio_transcriber
 
+      # Note: macOS sign + notarise is intentionally NOT done here. This
+      # workflow's purpose is build-validation on every PR + main push,
+      # which should be fast (~5-8 min). Apple's notarisation queue
+      # easily adds 15-25 minutes per run, and the signed artefact from
+      # a non-release build serves no public purpose — workflow artefacts
+      # require GitHub login to download and expire after 14 days.
+      # Signing lives in release-assets.yml, gated on the `release: created`
+      # event so it only runs when we're actually cutting a release.
+
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
