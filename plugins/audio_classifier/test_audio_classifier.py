@@ -4,6 +4,7 @@
 import logging
 import shutil
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -18,14 +19,40 @@ MODEL_URL = "https://huggingface.co/thelou1s/yamnet/resolve/main/lite-model_yamn
 MODEL_PATH = TEMP_DIR / "yamnet.tflite"
 
 
+def _download_yamnet_with_retry(max_attempts: int = 4) -> bool:
+    """Fetch the YAMNet TFLite model; tolerate transient CDN flakes.
+
+    huggingface.co rate-limits anonymous downloads (returns HTTP 429) when
+    parallel CI runs hit it in close succession. Retry with exponential
+    backoff, then bail with a skip-the-test signal so a transient outage
+    doesn't fail an unrelated PR.
+    """
+    req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
+    for attempt in range(max_attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp, open(MODEL_PATH, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            return True
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            if attempt == max_attempts - 1:
+                print(f"YAMNet download failed after {max_attempts} attempts: {exc}")
+                return False
+            backoff = 2 ** attempt  # 1s, 2s, 4s, 8s
+            print(f"YAMNet download attempt {attempt + 1} failed ({exc}); retrying in {backoff}s")
+            time.sleep(backoff)
+    return False
+
+
 @pytest.fixture(scope="module", autouse=True)
 def setup_teardown():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     if not MODEL_PATH.exists():
         print(f"Downloading YAMNet to {MODEL_PATH}...")
-        req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as resp, open(MODEL_PATH, "wb") as f:
-            shutil.copyfileobj(resp, f)  # type: ignore
+        if not _download_yamnet_with_retry():
+            # Skip rather than fail — this is a network-dependent integration
+            # test whose model lives on an external CDN we don't control.
+            # A transient 429 / outage shouldn't block unrelated PR merges.
+            pytest.skip("YAMNet CDN unavailable; skipping audio_classifier integration test.")
     yield
     if TEMP_DIR.exists():
         shutil.rmtree(TEMP_DIR)
