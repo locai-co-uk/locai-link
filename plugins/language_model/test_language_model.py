@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import shutil
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -10,6 +11,15 @@ import psutil
 import pytest
 import requests
 from link_language_model.adapter import LanguageModel  # type: ignore
+
+# The LLM under test can return Unicode characters in completions (emojis are
+# common in SmolLM2 outputs). On Windows runners stdout defaults to cp1252,
+# which can't encode those characters; subsequent print() calls then crash
+# with UnicodeEncodeError even though the test logic itself passed. Force
+# UTF-8 with backslash-escape fallback so debug prints don't fail the test.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 # Constants
 TEMP_DIR = Path(__file__).parent / "temp_models"
