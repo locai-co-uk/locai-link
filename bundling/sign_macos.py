@@ -278,17 +278,54 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
                 f"See the log output above for per-file objections."
             )
 
-    # Staple the notarisation ticket onto the bundle itself so first-run
-    # works without an Apple round-trip (matters for offline edge devices
-    # and CI sanity-tests behind strict egress).
-    _run(["xcrun", "stapler", "staple", str(bundle)])
-    _run(["xcrun", "stapler", "validate", str(bundle)])
+    # Attempt to staple the notarisation ticket onto the bundle so first-
+    # launch works without contacting Apple. This is BEST-EFFORT for our
+    # distribution shape: `xcrun stapler` only supports container formats
+    # it knows how to write into (.app bundles, .dmg disk images, .pkg
+    # installers). A PyInstaller onedir output is a plain directory —
+    # stapler has nowhere to embed the ticket and exits with code 73.
+    #
+    # Skipping the staple is safe here because:
+    #   - The bundle is notarised. Apple's database knows it's accepted.
+    #   - On first launch with internet present, Gatekeeper queries that
+    #     database online and accepts the binary. End users see no warning.
+    #   - Link's first action on every device is registering with the
+    #     control plane, which requires network — so the online-lookup
+    #     path is always available.
+    #
+    # If we ever wrap the onedir in a .dmg or .pkg, stapling THAT outer
+    # container will succeed and bake the ticket in for offline launches.
+    try:
+        _run(["xcrun", "stapler", "staple", str(bundle)], check=False)
+        # Validate only runs cleanly if staple succeeded; same skip
+        # logic applies.
+        validate = _run(
+            ["xcrun", "stapler", "validate", str(bundle)],
+            check=False,
+            capture=True,
+        )
+        if validate.returncode == 0:
+            logger.info("Staple validated; ticket embedded in bundle.")
+        else:
+            logger.warning(
+                "Stapler validate failed — bundle is NOT stapled. End users "
+                "will need network on first launch so Gatekeeper can verify "
+                "notarisation online (cached after). This is expected for "
+                "PyInstaller onedir bundles; package as .dmg/.pkg to enable "
+                "stapling. Notarisation itself is intact."
+            )
+    except Exception as exc:
+        # Defence in depth — we already use check=False above, but log
+        # anything unexpected and continue to spctl.
+        logger.warning("Stapler step raised unexpectedly: %s. Continuing.", exc)
 
-    # Final Gatekeeper assessment — the same check macOS does on first
-    # launch. If this passes, end users won't see "cannot be opened
-    # because the developer cannot be verified".
+    # Final Gatekeeper assessment — same check macOS does on first launch.
+    # With internet present, spctl resolves the notarisation status from
+    # Apple's servers even when the bundle isn't stapled. If this passes,
+    # end users won't see "cannot be opened because the developer cannot
+    # be verified".
     _run(["spctl", "--assess", "--type", "execute", "--verbose=2", str(bundle)])
-    logger.info("Notarisation + staple + spctl assessment passed.")
+    logger.info("Notarisation + spctl assessment passed.")
 
 
 def main() -> None:
