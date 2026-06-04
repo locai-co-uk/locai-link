@@ -128,7 +128,17 @@ def codesign_bundle(bundle: Path, identity: str, entitlements: Path) -> None:
 
     # Sign every binary individually so dylibs deep inside the tree get
     # hardened runtime. --force overwrites any existing ad-hoc signature
-    # PyInstaller may have applied to its bootloader.
+    # PyInstaller may have applied to its bootloader. The leaves-first
+    # sort means the top-level executable (locai-link/locai-link) is the
+    # last file signed in the walk; we deliberately do NOT then run an
+    # "outer" codesign on the bundle directory because a PyInstaller
+    # onedir output is a plain directory, not an .app bundle. On a plain
+    # directory `codesign --sign X dist/locai-link/` re-signs the main
+    # executable a second time with a --identifier override, which
+    # produced a notarisation-invalid signature on the previous
+    # iteration (Apple's log: "The signature of the binary is invalid."
+    # against locai-link.zip/locai-link/locai-link). Individual signing
+    # of every Mach-O is sufficient for notarisation of onedir bundles.
     for binary in mach_o_files:
         _run(
             [
@@ -145,30 +155,18 @@ def codesign_bundle(bundle: Path, identity: str, entitlements: Path) -> None:
             ]
         )
 
-    # Final outer signature on the bundle directory — verifies the
-    # ensemble. --deep is intentionally NOT used here (Apple explicitly
-    # deprecated it for the loadable-bundle case); we did the deep walk
-    # manually above.
-    _run(
-        [
-            "codesign",
-            "--force",
-            "--timestamp",
-            "--options",
-            "runtime",
-            "--entitlements",
-            str(entitlements),
-            "--sign",
-            identity,
-            "--identifier",
-            BUNDLE_IDENTIFIER,
-            str(bundle),
-        ]
-    )
-
-    # Sanity check: --verify catches signature mismatches before we waste
-    # 10 minutes on Apple's notarisation queue.
-    _run(["codesign", "--verify", "--strict", "--verbose=2", str(bundle)])
+    # Sanity check on the main executable — catches signature mismatches
+    # before we waste 10 minutes on Apple's notarisation queue. We verify
+    # the top-level binary specifically because that's the file Apple's
+    # Gatekeeper checks on launch; --strict ensures no per-architecture
+    # slice is unsigned in a fat binary.
+    main_exe = bundle / bundle.name
+    if not main_exe.exists():
+        # Some onedir layouts name the main exe identically to the bundle
+        # directory; in others it's elsewhere. Fall back to the last
+        # entry in the leaves-first walk, which is the shallowest Mach-O.
+        main_exe = mach_o_files[-1]
+    _run(["codesign", "--verify", "--strict", "--verbose=2", str(main_exe)])
     logger.info("Codesign verification passed.")
 
 
