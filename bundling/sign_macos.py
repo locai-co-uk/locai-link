@@ -192,12 +192,21 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
         )
 
         # notarytool --wait blocks until Apple returns Accepted/Invalid.
-        # CRITICAL: notarytool exits 0 even when the result is `Invalid` —
-        # Apple considers the SUBMISSION successful, just the verdict is
-        # negative. So we parse --output-format json and check status
-        # ourselves; the previous CalledProcessError-only path silently
-        # walked into stapler with a rejected bundle and a confusing
-        # CloudKit "Record not found" error.
+        # Two distinct failure modes to handle:
+        #
+        #  (a) notarytool itself fails to run (network, auth, Apple service
+        #      outage, submission too large). Exits non-zero, may not
+        #      produce JSON. Need to surface whatever it wrote.
+        #
+        #  (b) Submission reaches Apple and gets a verdict, but the verdict
+        #      is `Invalid` (signature problem, missing entitlement, etc.).
+        #      notarytool exits 0 in this case — Apple considers the
+        #      SUBMISSION successful, just the verdict is negative. We
+        #      detect this by parsing --output-format json's status field.
+        #
+        # check=False so we handle the exit code ourselves; both stdout
+        # and stderr always get echoed so CI logs show the diagnostic
+        # without a separate manual notarytool-log fetch.
         result = _run(
             [
                 "xcrun",
@@ -215,7 +224,23 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
                 "json",
             ],
             capture=True,
+            check=False,
         )
+        if result.stdout:
+            logger.info("notarytool stdout:\n%s", result.stdout)
+        if result.stderr:
+            logger.info("notarytool stderr:\n%s", result.stderr)
+
+        if result.returncode != 0:
+            # Failure mode (a): notarytool couldn't reach a verdict. The
+            # echoed stdout/stderr above contains Apple's diagnostic — read
+            # the build log to triage. Common causes: transient Apple-side
+            # 5xx (retry usually works), corrupt zip, expired API key.
+            raise SystemExit(
+                f"notarytool submit exited with code {result.returncode} before "
+                f"producing a verdict. See stdout/stderr above for the cause."
+            )
+
         import json as _json
 
         try:
