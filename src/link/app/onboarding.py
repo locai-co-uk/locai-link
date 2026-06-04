@@ -6,6 +6,7 @@
 import getpass
 import logging
 import platform
+import random
 import sys
 import time
 from typing import Any
@@ -300,6 +301,182 @@ def register_device(
     except Exception as e:
         logger.critical(f"Registration failed: {e}")
         raise
+
+
+# Headless enroll retry policy. Enrollment runs unattended at scale, so transient
+# failures must be retried with exponential backoff + jitter rather than crashing
+# the agent. Under a Restart=always service a crash becomes a tight restart loop,
+# and during a fleet-wide rollout the 300/min per-key backend limit means many
+# devices hit 429 at once — without backoff they would form a thundering herd.
+# Permanent failures (bad/expired/revoked key, cap full, malformed request) are
+# NOT retried; they cannot resolve without operator action.
+_ENROLL_MAX_ATTEMPTS = 8
+_ENROLL_BACKOFF_BASE_SECONDS = 2.0
+_ENROLL_BACKOFF_CAP_SECONDS = 60.0
+
+
+def _enroll_backoff_seconds(attempt: int) -> float:
+    """Full-jitter exponential backoff: uniform random in [0, min(cap, base*2^(n-1))]."""
+    ceiling = min(
+        _ENROLL_BACKOFF_CAP_SECONDS,
+        _ENROLL_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+    )
+    return random.uniform(0, ceiling)
+
+
+def _retry_after_seconds(resp) -> float | None:
+    """Return the Retry-After header in seconds if present and parseable, else None.
+
+    Only the integer-seconds form is honoured; the HTTP-date form falls back to
+    computed backoff. Capped so a hostile/absurd value can't stall the agent.
+    """
+    raw = resp.headers.get("Retry-After") if getattr(resp, "headers", None) else None
+    if not raw:
+        return None
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if secs < 0:
+        return None
+    return min(secs, _ENROLL_BACKOFF_CAP_SECONDS)
+
+
+def _enroll_error_detail(resp) -> str:
+    """Best-effort human-readable detail from a non-2xx enroll response."""
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and "detail" in body:
+            return str(body["detail"])
+        return str(body)
+    except Exception:
+        return (getattr(resp, "text", "") or "")[:200]
+
+
+def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
+    """Headless fleet enrollment via a reusable org-scoped fleet key.
+
+    No user credentials are required.  The device is identified by a hashed
+    OS machine-id so the control plane can deduplicate re-enrollments on the
+    same physical machine (e.g. after a local identity wipe or an OS reinstall
+    that preserved the hardware UUID).
+
+    Behaviour on the backend:
+    - New machine  -> creates a new Device, increments the org's device_count,
+                      returns a fresh device_id + api_key + optional config.
+    - Known machine -> rotates the existing device's api_key, returns the same
+                       device_id/name, does NOT touch the device_count cap.
+
+    Args:
+        fleet_key: Reusable org-scoped fleet enrollment key, obtained from the
+            ``LOCAI_FLEET_KEY`` environment variable or the ``--fleet-key`` CLI
+            flag.  Must start with ``flk_``.
+        api_url: Control-plane API base URL (e.g. ``https://api.locai.co.uk/api/v1``).
+
+    Returns:
+        AgentConfig: Validated config ready for ``StateManager.bootstrap()``.
+
+    Raises:
+        RuntimeError: On HTTP error, network failure, or unexpected response shape.
+    """
+    from link.infra.machine_id import get_machine_id_hash
+
+    logger.info("Starting headless fleet enrollment...")
+
+    machine_id_hash = get_machine_id_hash()
+
+    _agent_ver = _AGENT_VERSION or _resolve_agent_version()
+    payload: dict[str, Any] = {
+        "machine_id_hash": machine_id_hash,
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "hostname": platform.node(),
+    }
+    if _agent_ver:
+        payload["agent_version"] = _agent_ver
+
+    headers = {"Authorization": f"Bearer {fleet_key}"}
+
+    data: dict[str, Any] | None = None
+    for attempt in range(1, _ENROLL_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                f"{api_url}/devices/enroll",
+                json=payload,
+                headers=headers,
+                timeout=15,
+            )
+        except requests.exceptions.RequestException as exc:
+            # Network/timeout — transient. Back off and retry.
+            if attempt >= _ENROLL_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"Fleet enrollment failed after {attempt} attempts (network error): {exc}"
+                ) from exc
+            delay = _enroll_backoff_seconds(attempt)
+            logger.warning(
+                "Enroll attempt %d/%d failed (network error: %s); retrying in %.1fs",
+                attempt,
+                _ENROLL_MAX_ATTEMPTS,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        status_code = resp.status_code
+
+        if status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise RuntimeError(f"Enrollment response was not valid JSON: {exc}") from exc
+            break
+
+        # Transient — 429 (rate limited, expected during a rollout burst) and 5xx.
+        if status_code == 429 or 500 <= status_code < 600:
+            if attempt >= _ENROLL_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"Fleet enrollment failed after {attempt} attempts (HTTP {status_code})."
+                )
+            delay = _retry_after_seconds(resp)
+            if delay is None:
+                delay = _enroll_backoff_seconds(attempt)
+            logger.warning(
+                "Enroll attempt %d/%d got HTTP %d; retrying in %.1fs",
+                attempt,
+                _ENROLL_MAX_ATTEMPTS,
+                status_code,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        # Permanent — 401/403 (bad/expired/revoked key), 409 (cap full),
+        # 422 (bad request), or any other 4xx. Retrying cannot help; fail fast.
+        raise RuntimeError(
+            f"Fleet enrollment rejected (HTTP {status_code}): {_enroll_error_detail(resp)}"
+        )
+
+    if data is None:
+        # Defensive — the loop always either breaks with data or raises above.
+        raise RuntimeError("Fleet enrollment failed: no response received.")
+
+    device_id = data.get("device_id")
+    api_key = data.get("api_key")
+    if not device_id or not api_key:
+        raise RuntimeError(f"Enrollment response missing device_id or api_key: {data}")
+
+    # Backend auto-generates the device name; fall back to device_id if absent.
+    device_name = data.get("device_name") or device_id
+    logger.info(f"Fleet enrollment successful. Device: {device_name} ({device_id})")
+
+    return _resolve_agent_config(
+        server_config=data.get("config"),
+        device_id=device_id,
+        device_name=device_name,
+        api_key=api_key,
+        api_url=api_url,
+    )
 
 
 def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:

@@ -9,7 +9,7 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-from link.app.onboarding import activate_device, register_device
+from link.app.onboarding import activate_device, enroll_device, register_device
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
 from link.app.updater import pull_and_update, reinstall_plugin_binaries
@@ -230,6 +230,23 @@ def run(args: argparse.Namespace):
             logger.critical(f"Onboarding failed: {e}", exc_info=True)
             sys.exit(1)
 
+    # C1. Fleet Enrollment (headless / unattended mode)
+    # Triggered when no local session exists and a fleet key is available —
+    # either via --fleet-key CLI flag or LOCAI_FLEET_KEY environment variable.
+    # The device self-enrolls against POST /devices/enroll with no user
+    # credentials; the returned identity is persisted as a normal session file
+    # so subsequent launches auto-resume (path B) without re-enrolling.
+    if agent_config is None:
+        _fleet_key = getattr(args, "fleet_key", None) or os.environ.get("LOCAI_FLEET_KEY")
+        if _fleet_key:
+            api_url = args.api_url if args.api_url else DEFAULT_API_URL
+            try:
+                agent_config = enroll_device(fleet_key=_fleet_key, api_url=api_url)
+                state_manager.bootstrap(agent_config)
+            except Exception as e:
+                logger.critical(f"Fleet enrollment failed: {e}", exc_info=True)
+                sys.exit(1)
+
     # D. Factory Defaults
     if agent_config is None:
         logger.info("Initialising from default configuration.")
@@ -331,12 +348,20 @@ def _deploy_service(cwd: Path):
     python_exe = cwd / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     cmd = f"{python_exe} main.py run"
 
+    # Propagate the fleet key into the service environment so that if the
+    # local session is ever wiped (e.g. `reset --hard`) the service can
+    # re-enroll on next start without requiring a manual re-install.
+    svc_env: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
+    _svc_fleet_key = os.environ.get("LOCAI_FLEET_KEY")
+    if _svc_fleet_key:
+        svc_env["LOCAI_FLEET_KEY"] = _svc_fleet_key
+
     agent = ServiceManager(
         "locai-link",
         cmd,
         "Loc.ai Agent",
         str(cwd),
-        env_vars={"PYTHONUNBUFFERED": "1"},
+        env_vars=svc_env,
     )
 
     try:
@@ -454,6 +479,13 @@ def main():
     run_p.add_argument("--password", help="Platform password (prompted securely if omitted).")
     run_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email/password).")
     run_p.add_argument("--api-url", help="Override API URL.")
+    run_p.add_argument(
+        "--fleet-key",
+        help="Org-scoped fleet enrollment key for headless/unattended mode. "
+        "Also read from the LOCAI_FLEET_KEY environment variable. "
+        "When present and no local session exists, the device self-enrolls "
+        "against POST /devices/enroll with no user interaction.",
+    )
 
     # Install (one-liner orchestrator)
     install_p = subparsers.add_parser("install", help="Full installation wizard.")
