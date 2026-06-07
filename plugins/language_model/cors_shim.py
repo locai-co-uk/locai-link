@@ -168,6 +168,21 @@ class _ShimHandler(BaseHTTPRequestHandler):
             out["Authorization"] = auth
         return out
 
+    def _safe_send_error(self, code: int, message: str) -> None:
+        """send_error that swallows write failures to an already-closed socket.
+
+        A status poll whose client has navigated away (or a poll that arrives
+        in the brief window between llama-swap stopping and the shim being
+        torn down) leaves us writing the error body to a dead socket.
+        BaseHTTPRequestHandler would let the resulting OSError escape the
+        worker thread and dump a multi-frame traceback to stderr (the
+        ``WinError 10053`` noise). Log one line instead.
+        """
+        try:
+            self.send_error(code, message)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as exc:
+            logger.info("[cors_shim] could not send %d to client: %s", code, exc)
+
     # ------------------------------------------------------------------
     # Routes
     # ------------------------------------------------------------------
@@ -206,15 +221,18 @@ class _ShimHandler(BaseHTTPRequestHandler):
             resp = requests.get(upstream, timeout=5, headers=self._forward_headers())
         except requests.RequestException as exc:
             logger.warning("[cors_shim] GET %s upstream failed: %s", self.path, exc)
-            self.send_error(502, "Upstream unavailable")
+            self._safe_send_error(502, "Upstream unavailable")
             return
 
-        self.send_response(resp.status_code)
-        self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
-        self.send_header("Content-Length", str(len(resp.content)))
-        self._send_cors_response_headers(echo_origin)
-        self.end_headers()
-        self.wfile.write(resp.content)
+        try:
+            self.send_response(resp.status_code)
+            self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+            self.send_header("Content-Length", str(len(resp.content)))
+            self._send_cors_response_headers(echo_origin)
+            self.end_headers()
+            self.wfile.write(resp.content)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            logger.info("[cors_shim] client disconnected during GET %s", self.path)
 
     def do_POST(self) -> None:  # noqa: N802
         """Streaming chat completions. The hot path."""
@@ -240,7 +258,7 @@ class _ShimHandler(BaseHTTPRequestHandler):
             )
         except requests.RequestException as exc:
             logger.warning("[cors_shim] POST %s upstream failed: %s", self.path, exc)
-            self.send_error(502, "Upstream unavailable")
+            self._safe_send_error(502, "Upstream unavailable")
             return
 
         self.send_response(resp.status_code)
@@ -282,11 +300,12 @@ class _ShimHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # Client disconnected mid-stream — common when the user
-            # navigates away or hits Stop. Drop the upstream connection
-            # so llama-swap's maxConcurrent slot frees immediately rather
-            # than at TTL expiry.
+            # navigates away or hits Stop. (On Windows this surfaces as
+            # ConnectionAbortedError / WinError 10053.) Drop the upstream
+            # connection so llama-swap's maxConcurrent slot frees immediately
+            # rather than at TTL expiry.
             logger.info("[cors_shim] client disconnected mid-stream; closing upstream")
         finally:
             resp.close()

@@ -109,9 +109,11 @@ class _FakeUpstream:
                         self.wfile.write(chunk.encode())
                         self.wfile.flush()
                         time.sleep(0.2)
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     # Shim disconnected — that's exactly the signal we want
-                    # to record for the disconnect test.
+                    # to record for the disconnect test. On Windows the
+                    # severed connection surfaces as ConnectionAbortedError
+                    # (WinError 10053) rather than BrokenPipeError.
                     outer.got_close_for_stream.set()
 
         self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)

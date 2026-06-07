@@ -22,12 +22,10 @@ from colorama import Fore, Style
 
 # --- LOCAL IMPORTS ---
 try:
-    from .cors_shim import CorsShim
     from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from .server import ModelServer
     from .swap_manager import SwapManager, get_swap_manager
 except ImportError:
-    from cors_shim import CorsShim
     from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from server import ModelServer
     from swap_manager import SwapManager, get_swap_manager
@@ -65,23 +63,16 @@ class LanguageModel:
 
         self.server: ModelServer | None = None
         self._swap_manager: SwapManager | None = None
-        self._cors_shim: CorsShim | None = None
 
         if self.mode == "serve":
             if _is_swap_installed(LLAMA_SWAP_RELEASE):
                 self._swap_manager = get_swap_manager(self.port, self.host, BIN_LLAMA_DIR)
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
+                # SwapManager owns the browser-facing CORS shim and brings it
+                # up alongside llama-swap (a single shim per public port,
+                # shared across servings and surviving model reloads), so
+                # SafeChat etc. can hit the public port directly.
                 self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
-                # Front llama-swap with the CORS shim so browser clients
-                # (SafeChat etc.) can hit the public port directly. Swap
-                # itself is now loopback-only on _listen_port; the shim
-                # owns the user-visible port.
-                self._cors_shim = CorsShim(
-                    public_port=self.port,
-                    upstream_port=self._swap_manager.listen_port,
-                    host=self.host,
-                )
-                self._cors_shim.start()
             else:
                 logger.warning("llama-swap not installed — falling back to single-model direct serve")
                 self.server = ModelServer(
@@ -135,11 +126,9 @@ class LanguageModel:
 
     def stop(self):
         self.running = False
-        # Stop the shim BEFORE removing the model from swap so the shim
-        # doesn't briefly proxy to a dead llama-swap. shim.stop() is
-        # idempotent — safe to call when start() was a no-op (port-in-use).
-        if self._cors_shim:
-            self._cors_shim.stop()
+        # The CORS shim is owned by SwapManager and torn down with the last
+        # model (remove_model stops the shim before llama-swap, so a status
+        # poll never hits a shim fronting a dead upstream).
         if self._swap_manager:
             self._swap_manager.remove_model(self.model_id)
         if self.server:
@@ -202,21 +191,13 @@ class LanguageModel:
     def _server_heartbeat_loop(self):
         while self.running:
             if self._swap_manager:
-                if not self._swap_manager.is_healthy():
+                if self._swap_manager.is_healthy():
+                    # Keep the public-port shim alive alongside a healthy
+                    # swap. Idempotent and quiet: a no-op when the shim is
+                    # already listening, so there is no restart-flap spam.
+                    self._swap_manager.ensure_shim()
+                else:
                     logger.warning("llama-swap health check failed", extra={"category": "health"})
-                # Restart the shim if it's died — cheap; doesn't touch the
-                # model in llama-swap. Browser clients won't reach inference
-                # without it, so we'd rather flap the shim than wedge the
-                # user-visible port.
-                if self._cors_shim is not None and not self._cors_shim.is_running():
-                    logger.warning(
-                        "CORS shim is down; attempting restart",
-                        extra={"category": "health"},
-                    )
-                    try:
-                        self._cors_shim.start()
-                    except Exception as exc:  # noqa: BLE001 — best-effort restart
-                        logger.error("CORS shim restart failed: %s", exc)
             elif self.server and not self.server.running:
                 logger.error("Server process died!", extra={"category": "health"})
                 self.running = False

@@ -54,6 +54,11 @@ from pathlib import Path
 
 import requests
 
+try:  # package vs. flat import — mirrors adapter.py
+    from .cors_shim import CorsShim
+except ImportError:  # pragma: no cover - flat layout fallback
+    from cors_shim import CorsShim
+
 logger = logging.getLogger(__name__)
 
 # Process-level registry: one SwapManager per (host, port).
@@ -98,6 +103,11 @@ class SwapManager:
         self._log_path = Path("logs") / f"llama-swap_{port}.log"
         self._models: dict[str, dict] = {}
         self._proc: subprocess.Popen | None = None
+        # The browser-facing CORS shim is owned here — one per public port,
+        # shared by every serving pinned to it and surviving model reloads —
+        # rather than per LanguageModel instance, which used to race two
+        # shims for the same port on a second serving.
+        self._cors_shim: CorsShim | None = None
         self._lock = threading.RLock()
 
     @property
@@ -136,6 +146,9 @@ class SwapManager:
                 return
             del self._models[model_id]
             if not self._models:
+                # Stop the browser-facing shim BEFORE llama-swap so a status
+                # poll never briefly hits a shim fronting a dead upstream.
+                self._stop_shim()
                 self._stop()
                 self._config_path.unlink(missing_ok=True)
                 with _global_lock:
@@ -146,8 +159,9 @@ class SwapManager:
                     self._reload()
 
     def shutdown(self) -> None:
-        """Stop llama-swap unconditionally and drop from the registry."""
+        """Stop llama-swap (and its CORS shim) unconditionally and drop from the registry."""
         with self._lock:
+            self._stop_shim()
             self._stop()
         with _global_lock:
             _instances.pop((self.host, self.port), None)
@@ -170,6 +184,28 @@ class SwapManager:
             return resp.status_code == 200
         except Exception:
             return False
+
+    def ensure_shim(self) -> None:
+        """Ensure the CORS shim fronting the public port is running.
+
+        Idempotent and safe to call repeatedly (e.g. from the adapter
+        heartbeat): it only acts when llama-swap is actually running, so we
+        never strand a shim in front of a dead upstream, and
+        ``CorsShim.start()`` no-ops when the shim is already listening — so
+        there is no restart-flap log spam. This is the single place a shim is
+        created, which is why two servings on one port can no longer race two
+        shims for the same socket.
+        """
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                return  # swap not running — nothing to front
+            if self._cors_shim is None:
+                self._cors_shim = CorsShim(
+                    public_port=self.port,
+                    upstream_port=self._listen_port,
+                    host=self.host,
+                )
+            self._cors_shim.start()
 
     # ------------------------------------------------------------------
     # Process lifecycle (all called under self._lock)
@@ -235,7 +271,16 @@ class SwapManager:
                 pass
             raise RuntimeError(f"llama-swap failed to start (exit {self._proc.returncode}). See {self._log_path}")
 
+        # llama-swap is up — bring the browser-facing CORS shim online in
+        # front of it. Idempotent: a model reload re-enters _start while the
+        # shim is already listening, so the public port stays up across swaps.
+        self.ensure_shim()
+
     def _stop(self) -> None:
+        # NOTE: deliberately does NOT stop the shim — _stop is also the
+        # reload path on Windows (_reload -> _stop + _start), and the public
+        # port must stay up across a model swap. The shim is torn down only
+        # when the last model is removed (see remove_model / shutdown).
         if not self._is_running():
             return
         logger.info("Stopping llama-swap")
@@ -247,6 +292,12 @@ class SwapManager:
             self._proc.kill()
             self._proc.wait()
         self._proc = None
+
+    def _stop_shim(self) -> None:
+        """Stop and clear the CORS shim if one is running (idempotent)."""
+        if self._cors_shim is not None:
+            self._cors_shim.stop()
+            self._cors_shim = None
 
     def _reload(self) -> None:
         """Ask llama-swap to reload its config file.
