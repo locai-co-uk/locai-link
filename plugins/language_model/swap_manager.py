@@ -13,13 +13,32 @@ registry below transparently supports multiple ports as a fallback, so a
 stray second port from the control plane gets its own swap instead of tearing
 down the first one (which left earlier adapters polling a dead process).
 
-Internal port layout (per swap)
--------------------------------
-swap port              — externally visible, owned by llama-swap
-swap port + 100 + i    — llama-server for model[i]
+Three-layer port arrangement (per swap)
+---------------------------------------
+The **public** port is what end users (and CLI tools) target; it's owned by
+the CORS shim (``cors_shim.CorsShim``).  llama-swap sits behind the shim on
+a loopback-only "listen port" so browsers and partners interacting via HTTP
+get the CORS / Local Network Access headers they need without llama-swap
+itself implementing CORS.
 
-The +100 offset keeps each swap's internal ports clear of neighbouring swaps'
-external ports.  Internal ports are reachable only from localhost.
+    public port (self.port)         — owned by CorsShim, browser-facing
+    listen port (self._listen_port) — = self.port + _SHIM_OFFSET, llama-swap
+                                       loopback-only (127.0.0.1)
+    listen port + 100 + i           — llama-server for model[i], loopback-only
+
+The offsets keep three independent layers clear of one another and clear of
+neighbouring swaps' ports.  For a default public port of 8100 this lays out
+as:
+
+    8100  -> CorsShim
+    8150  -> llama-swap
+    8250  -> llama-server (model 0)
+    8251  -> llama-server (model 1)
+    …
+
+is_healthy / _port_in_use / _kill_port all repoint to the listen port so
+SwapManager's notion of "is the model server up?" is independent of the
+shim — the shim's own lifecycle is owned by ``adapter.LanguageModel``.
 """
 
 import json
@@ -34,6 +53,11 @@ import time
 from pathlib import Path
 
 import requests
+
+try:  # package vs. flat import — mirrors adapter.py
+    from .cors_shim import CorsShim
+except ImportError:  # pragma: no cover - flat layout fallback
+    from cors_shim import CorsShim
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +87,14 @@ class SwapManager:
     _MAX_CONCURRENT = 1
     _HEALTH_CHECK_TIMEOUT = 120  # seconds llama-swap waits for a model to become ready
     _MODEL_TTL = 300  # seconds a model stays loaded after the last request
-    _INTERNAL_PORT_OFFSET = 100  # internal llama-server ports start at swap_port + offset
+    _SHIM_OFFSET = 50  # llama-swap binds public_port + _SHIM_OFFSET (loopback only)
+    _INTERNAL_PORT_OFFSET = 100  # llama-server ports start at listen_port + offset
 
     def __init__(self, port: int, host: str, bin_dir: Path) -> None:
-        self.port = port
+        self.port = port  # public-facing port (CorsShim binds this)
+        # Listen port is where llama-swap itself binds. Always loopback —
+        # external clients reach llama-swap exclusively via the shim.
+        self._listen_port = port + self._SHIM_OFFSET
         self.host = host
         is_win = platform.system() == "Windows"
         self._swap_bin = bin_dir / ("llama-swap.exe" if is_win else "llama-swap")
@@ -75,7 +103,17 @@ class SwapManager:
         self._log_path = Path("logs") / f"llama-swap_{port}.log"
         self._models: dict[str, dict] = {}
         self._proc: subprocess.Popen | None = None
+        # The browser-facing CORS shim is owned here — one per public port,
+        # shared by every serving pinned to it and surviving model reloads —
+        # rather than per LanguageModel instance, which used to race two
+        # shims for the same port on a second serving.
+        self._cors_shim: CorsShim | None = None
         self._lock = threading.RLock()
+
+    @property
+    def listen_port(self) -> int:
+        """Loopback port llama-swap binds.  CorsShim points its upstream here."""
+        return self._listen_port
 
     # ------------------------------------------------------------------
     # Public API
@@ -108,6 +146,9 @@ class SwapManager:
                 return
             del self._models[model_id]
             if not self._models:
+                # Stop the browser-facing shim BEFORE llama-swap so a status
+                # poll never briefly hits a shim fronting a dead upstream.
+                self._stop_shim()
                 self._stop()
                 self._config_path.unlink(missing_ok=True)
                 with _global_lock:
@@ -118,8 +159,9 @@ class SwapManager:
                     self._reload()
 
     def shutdown(self) -> None:
-        """Stop llama-swap unconditionally and drop from the registry."""
+        """Stop llama-swap (and its CORS shim) unconditionally and drop from the registry."""
         with self._lock:
+            self._stop_shim()
             self._stop()
         with _global_lock:
             _instances.pop((self.host, self.port), None)
@@ -129,16 +171,41 @@ class SwapManager:
         return f"http://{self.host}:{self.port}"
 
     def is_healthy(self) -> bool:
-        """Lightweight HTTP liveness check against llama-swap's /health endpoint."""
+        """Lightweight HTTP liveness check against llama-swap's /health endpoint.
+
+        Hits the loopback ``_listen_port`` directly (bypassing the shim) so
+        health reflects the model server independently of shim status.
+        ``adapter.LanguageModel`` polls its own shim health separately.
+        """
         if self._proc is not None and self._proc.poll() is not None:
             return False  # process already exited — skip the HTTP round-trip
-        # 0.0.0.0 / :: are bind addresses — not valid connect targets.
-        host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
         try:
-            resp = requests.get(f"http://{host}:{self.port}/health", timeout=2)
+            resp = requests.get(f"http://127.0.0.1:{self._listen_port}/health", timeout=2)
             return resp.status_code == 200
         except Exception:
             return False
+
+    def ensure_shim(self) -> None:
+        """Ensure the CORS shim fronting the public port is running.
+
+        Idempotent and safe to call repeatedly (e.g. from the adapter
+        heartbeat): it only acts when llama-swap is actually running, so we
+        never strand a shim in front of a dead upstream, and
+        ``CorsShim.start()`` no-ops when the shim is already listening — so
+        there is no restart-flap log spam. This is the single place a shim is
+        created, which is why two servings on one port can no longer race two
+        shims for the same socket.
+        """
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                return  # swap not running — nothing to front
+            if self._cors_shim is None:
+                self._cors_shim = CorsShim(
+                    public_port=self.port,
+                    upstream_port=self._listen_port,
+                    host=self.host,
+                )
+            self._cors_shim.start()
 
     # ------------------------------------------------------------------
     # Process lifecycle (all called under self._lock)
@@ -155,37 +222,43 @@ class SwapManager:
             )
 
         # Kill any stale llama-swap left over from a previous unclean shutdown
-        # that is still holding our port — new process can't bind otherwise.
+        # that is still holding our listen port — new process can't bind
+        # otherwise. Note this checks the LISTEN port (loopback), not the
+        # public port; the public port is owned by CorsShim, which has its
+        # own bind guard.
         if self._port_in_use():
             if self.is_healthy():
                 logger.warning(
-                    f"Port {self.port} already has a healthy llama-swap; reusing it. "
-                    "Send STOP_SERVING first if you need a clean restart."
+                    f"Listen port {self._listen_port} already has a healthy llama-swap; "
+                    "reusing it. Send STOP_SERVING first if you need a clean restart."
                 )
                 return
-            logger.warning(f"Port {self.port} is in use but not healthy — killing stale process")
+            logger.warning(f"Listen port {self._listen_port} is in use but not healthy — killing stale process")
             self._kill_port()
 
-        display_host = "localhost" if self.host in ("0.0.0.0", "::", "") else self.host
-        logger.info(f"Starting llama-swap on http://{display_host}:{self.port}")
+        logger.info(
+            f"Starting llama-swap on http://127.0.0.1:{self._listen_port} (public port {self.port} fronted by CorsShim)"
+        )
 
         self._log_path.parent.mkdir(exist_ok=True)
         log_fh = open(self._log_path, "a")  # noqa: SIM115 — kept open for subprocess lifetime
 
+        # llama-swap binds 127.0.0.1 exclusively — external clients reach it
+        # through CorsShim. self.host is ignored here on purpose.
         self._proc = subprocess.Popen(
             [
                 str(self._swap_bin),
                 "--config",
                 str(self._config_path.resolve()),
                 "--listen",
-                f"{self.host}:{self.port}",
+                f"127.0.0.1:{self._listen_port}",
             ],
             stdout=log_fh,
             stderr=log_fh,
         )
 
         # Brief sanity check — if the process exits within 1 s the config or
-        # port caused an immediate failure; surface the last log lines.
+        # listen port caused an immediate failure; surface the last log lines.
         time.sleep(1)
         if self._proc.poll() is not None:
             log_fh.flush()
@@ -198,7 +271,16 @@ class SwapManager:
                 pass
             raise RuntimeError(f"llama-swap failed to start (exit {self._proc.returncode}). See {self._log_path}")
 
+        # llama-swap is up — bring the browser-facing CORS shim online in
+        # front of it. Idempotent: a model reload re-enters _start while the
+        # shim is already listening, so the public port stays up across swaps.
+        self.ensure_shim()
+
     def _stop(self) -> None:
+        # NOTE: deliberately does NOT stop the shim — _stop is also the
+        # reload path on Windows (_reload -> _stop + _start), and the public
+        # port must stay up across a model swap. The shim is torn down only
+        # when the last model is removed (see remove_model / shutdown).
         if not self._is_running():
             return
         logger.info("Stopping llama-swap")
@@ -210,6 +292,12 @@ class SwapManager:
             self._proc.kill()
             self._proc.wait()
         self._proc = None
+
+    def _stop_shim(self) -> None:
+        """Stop and clear the CORS shim if one is running (idempotent)."""
+        if self._cors_shim is not None:
+            self._cors_shim.stop()
+            self._cors_shim = None
 
     def _reload(self) -> None:
         """Ask llama-swap to reload its config file.
@@ -225,11 +313,13 @@ class SwapManager:
             self._proc.send_signal(signal.SIGHUP)
 
     def _port_in_use(self) -> bool:
+        # Checks the LISTEN port (where llama-swap binds). The public port
+        # is owned by CorsShim and has its own bind guard.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            return s.connect_ex(("127.0.0.1", self.port)) == 0
+            return s.connect_ex(("127.0.0.1", self._listen_port)) == 0
 
     def _kill_port(self) -> None:
-        """Best-effort kill of whatever process is holding self.port."""
+        """Best-effort kill of whatever process is holding self._listen_port."""
         try:
             import psutil
 
@@ -237,7 +327,7 @@ class SwapManager:
                 laddr = conn.laddr
                 # laddr is `pconn(ip, port)` for INET sockets but pyright sees
                 # it as a union with `tuple[()]`; getattr keeps the check safe.
-                if not laddr or getattr(laddr, "port", None) != self.port or not conn.pid:
+                if not laddr or getattr(laddr, "port", None) != self._listen_port or not conn.pid:
                     continue
                 try:
                     psutil.Process(conn.pid).terminate()
@@ -257,7 +347,10 @@ class SwapManager:
 
         model_entries: dict = {}
         for i, (model_id, m) in enumerate(self._models.items()):
-            internal_port = self.port + self._INTERNAL_PORT_OFFSET + i
+            # Internal llama-server ports start at _listen_port + offset
+            # (NOT self.port + offset), so the three layers — public ->
+            # shim, listen -> swap, listen+100+i -> server — don't overlap.
+            internal_port = self._listen_port + self._INTERNAL_PORT_OFFSET + i
             args = [str(self._server_bin), "--model", m["path"], "--port", str(internal_port)] + m["args"]
             cmd = subprocess.list2cmdline(args) if platform.system() == "Windows" else shlex.join(args)
             entry: dict = {

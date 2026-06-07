@@ -68,6 +68,10 @@ class LanguageModel:
             if _is_swap_installed(LLAMA_SWAP_RELEASE):
                 self._swap_manager = get_swap_manager(self.port, self.host, BIN_LLAMA_DIR)
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
+                # SwapManager owns the browser-facing CORS shim and brings it
+                # up alongside llama-swap (a single shim per public port,
+                # shared across servings and surviving model reloads), so
+                # SafeChat etc. can hit the public port directly.
                 self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
             else:
                 logger.warning("llama-swap not installed — falling back to single-model direct serve")
@@ -122,6 +126,9 @@ class LanguageModel:
 
     def stop(self):
         self.running = False
+        # The CORS shim is owned by SwapManager and torn down with the last
+        # model (remove_model stops the shim before llama-swap, so a status
+        # poll never hits a shim fronting a dead upstream).
         if self._swap_manager:
             self._swap_manager.remove_model(self.model_id)
         if self.server:
@@ -184,7 +191,12 @@ class LanguageModel:
     def _server_heartbeat_loop(self):
         while self.running:
             if self._swap_manager:
-                if not self._swap_manager.is_healthy():
+                if self._swap_manager.is_healthy():
+                    # Keep the public-port shim alive alongside a healthy
+                    # swap. Idempotent and quiet: a no-op when the shim is
+                    # already listening, so there is no restart-flap spam.
+                    self._swap_manager.ensure_shim()
+                else:
                     logger.warning("llama-swap health check failed", extra={"category": "health"})
             elif self.server and not self.server.running:
                 logger.error("Server process died!", extra={"category": "health"})
