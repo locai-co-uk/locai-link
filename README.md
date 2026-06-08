@@ -7,36 +7,7 @@ Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a R
 
 ## Quick Start
 
-The fastest way to get Link running is to download a pre-built binary from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest). No Python, git, or compilers required on the device. The macOS bundle is signed + notarised so it runs without Gatekeeper warnings.
-
-**macOS (Apple Silicon):**
-```bash
-curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-macos-arm64-$TAG.tar.gz | tar -xz
-./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
-```
-
-**Linux (x86_64):**
-```bash
-curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-linux-x86_64-$TAG.tar.gz | tar -xz
-./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
-```
-
-**Windows (PowerShell):**
-```powershell
-Invoke-WebRequest https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-windows-x86_64-$TAG.zip -OutFile locai-link.zip
-Expand-Archive locai-link.zip
-.\locai-link\locai-link.exe run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
-```
-
-Replace `$TAG` with the version you want (e.g. `v1.0.12`); the URLs on the Releases page list the exact filenames. Each release also publishes a `.sha256` sidecar so you can verify the download (`sha256sum -c locai-link-…sha256`).
-
-If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
-
-## Build from Source
-
-The pre-built binaries above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
-
-One-line installer that clones the repo, sets up Python via `uv`, and runs the agent in a single command:
+One-line installer registers the device with Loc.ai Control and starts the agent. Plugins (`language_model`, `audio_transcriber`, `image_classifier`, `audio_classifier`) install on demand the first time a model that uses them is deployed — so a bare Link install is lightweight and useful even when no model is loaded (fleet monitoring, telemetry collection, OTA updates).
 
 **Linux / macOS:**
 ```bash
@@ -57,13 +28,11 @@ curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-l
 
 > `--ssl-no-revoke` is needed because Windows curl uses Schannel, which fails the connection with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` when it can't reach the certificate's revocation endpoint — common on corporate networks and strict firewalls. The flag skips the revocation lookup only; server certificate validation is unaffected.
 
-The installer prompts interactively for anything you omit, including your platform password.
+The installer prompts interactively for anything you omit, including your platform password. If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
 
-### Plugin build prerequisites (source builds only)
+### Build prerequisites for native plugins
 
-Source builds compile native plugin binaries from upstream on first use (notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp — upstream does not publish prebuilts for Linux/macOS). The pre-built bundles ship these binaries pre-compiled, so this section only applies to the source-install path above.
-
-Install `git` and `cmake` on the device before deploying a model that uses these plugins:
+A few plugins compile native components on first use rather than shipping prebuilt binaries — most notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp because the upstream project doesn't publish Linux/macOS prebuilts. The on-demand build needs `git` and `cmake` on the host:
 
 | Platform | Command |
 |---|---|
@@ -72,6 +41,25 @@ Install `git` and `cmake` on the device before deploying a model that uses these
 | Fedora/RHEL | `sudo dnf install cmake git gcc-c++` |
 | Arch | `sudo pacman -S cmake git base-devel` |
 | Windows | No action — prebuilt binaries are downloaded. |
+
+If you only intend to run the agent in monitoring / OTA-update mode (no model deployments), these aren't required. They install once and serve every model deployment thereafter.
+
+## Pre-built bundles for partner integrations
+
+For partner applications that embed Link as a sidecar (e.g. [Meetily](https://github.com/Zackriya-Solutions/meetily)), we publish signed pre-built bundles on the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest). These include a fixed plugin set — currently `language_model` + `audio_transcriber` — already compiled, so the partner's installer doesn't depend on `git` / `cmake` being present on the host machine. The macOS bundles are signed + notarised; the binary runs without a Gatekeeper warning.
+
+**These bundles are partner-shaped.** They make sense when:
+
+- Your application needs LLM inference and/or audio transcription on the host machine.
+- You're shipping Link inside an end-user app installer (Electron, Tauri, Mac `.app`) and can't rely on the host having Python / build tools.
+- Bundle size (~250-400 MB) is acceptable for your distribution channel.
+
+They're the **wrong choice** for:
+
+- Standalone fleet deployments — devices managed by Loc.ai Control with no third-party app. Use the one-liner installer above; it's smaller, lazier, and adopts only the plugins you actually deploy models for.
+- Custom plugin sets — image classification only, or an in-house plugin not in the pre-built mix. See `bundling/README.md` to build a bundle with the plugin set you need (`uv run python bundling/build.py --plugins <name> [<name> ...]`).
+
+Download URLs follow the pattern `https://github.com/locai-co-uk/locai-link/releases/download/<TAG>/locai-link-<os>-<arch>-<TAG>.{tar.gz,zip}`. Each release also publishes a `.sha256` sidecar so you can verify the download (`sha256sum -c locai-link-…sha256`).
 
 ## Hacking on the codebase
 This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
