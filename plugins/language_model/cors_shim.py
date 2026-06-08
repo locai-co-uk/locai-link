@@ -146,7 +146,10 @@ class _ShimHandler(BaseHTTPRequestHandler):
     def _send_cors_response_headers(self, echo_origin: str | None) -> None:
         """Standard ACAO + Vary pair sent on every non-preflight response."""
         if echo_origin:
-            self.send_header("Access-Control-Allow-Origin", echo_origin)
+            if "\r" in echo_origin or "\n" in echo_origin:
+                logger.warning("[cors_shim] refused unsafe origin value for ACAO")
+            else:
+                self.send_header("Access-Control-Allow-Origin", echo_origin)
         # Always Vary on Origin even when no ACAO is sent — tells caches
         # the response varies depending on the request Origin, so a CDN
         # or shared cache doesn't serve a stale cross-origin response.
@@ -182,6 +185,20 @@ class _ShimHandler(BaseHTTPRequestHandler):
             self.send_error(code, message)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as exc:
             logger.info("[cors_shim] could not send %d to client: %s", code, exc)
+
+    def _safe_content_type(self, raw: str | None, default: str) -> str:
+        """Return a header-safe Content-Type, stripping CR/LF from upstream values.
+
+        Defense-in-depth against HTTP response splitting: upstream response
+        headers come from llama-swap on loopback and are trusted in practice,
+        but CodeQL flags any user-controllable value flowing into a header.
+        Strip line terminators and fall back to ``default`` if the result is
+        empty after stripping.
+        """
+        if not raw:
+            return default
+        sanitized = raw.replace("\r", "").replace("\n", "").strip()
+        return sanitized or default
 
     # ------------------------------------------------------------------
     # Routes
@@ -226,7 +243,9 @@ class _ShimHandler(BaseHTTPRequestHandler):
 
         try:
             self.send_response(resp.status_code)
-            self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+            self.send_header(
+                "Content-Type", self._safe_content_type(resp.headers.get("Content-Type"), "application/json")
+            )
             self.send_header("Content-Length", str(len(resp.content)))
             self._send_cors_response_headers(echo_origin)
             self.end_headers()
@@ -267,7 +286,7 @@ class _ShimHandler(BaseHTTPRequestHandler):
         # text/event-stream cleanly, so we standardise here.
         self.send_header(
             "Content-Type",
-            resp.headers.get("Content-Type", "text/event-stream"),
+            self._safe_content_type(resp.headers.get("Content-Type"), "text/event-stream"),
         )
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
