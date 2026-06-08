@@ -28,6 +28,8 @@ curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-l
 
 > `--ssl-no-revoke` is needed because Windows curl uses Schannel, which fails the connection with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` when it can't reach the certificate's revocation endpoint — common on corporate networks and strict firewalls. The flag skips the revocation lookup only; server certificate validation is unaffected.
 
+> **Tip — pin a branch.** Append `--branch <name>` (sh / cmd) or `-Branch <name>` (PowerShell) to install from a non-default branch. Handy for trying a feature branch, reproducing a bug from a PR, or pointing at a partner-specific fork.
+
 The installer prompts interactively for anything you omit, including your platform password. If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
 
 ### Build prerequisites for native plugins
