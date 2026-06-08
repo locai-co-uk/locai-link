@@ -118,7 +118,7 @@ Narrative pages live under `docs/`; `docs/reference/` auto-populates from `src/l
 ### Directory Structure
 
 ```
-src/link/     Application core — app/, components/, infra/, adapters/, config/, utils/
+src/link/    Application core — app/, components/, infra/, adapters/, config/, utils/
 plugins/     Extensions (language_model, audio_transcriber, image_classifier, audio_classifier)
 configs/     Runtime config and session state
 tests/       Unit tests (mocked, fast)
