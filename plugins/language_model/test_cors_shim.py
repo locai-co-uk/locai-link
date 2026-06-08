@@ -5,8 +5,8 @@
 
 Each test stands up a fake "upstream" HTTP server (simulating llama-swap)
 plus a CorsShim pointing at it, then exercises the shim with real HTTP
-requests. Tests are tagged with port offsets so they can run in parallel
-without colliding.
+requests. Each fixture obtains OS-assigned free ports via _free_port() so
+tests can run in parallel without colliding.
 
 What's covered
 --------------
@@ -36,12 +36,6 @@ try:
     from .cors_shim import CorsShim, _resolve_allowed_origins
 except ImportError:
     from cors_shim import CorsShim, _resolve_allowed_origins  # type: ignore
-
-
-# Each test picks its own port offset so parallel pytest workers don't collide.
-# We start from 18000 (well clear of any default link / llama-swap ports a
-# developer might be running locally).
-_BASE_PORT = 18000
 
 
 def _free_port() -> int:
@@ -89,7 +83,7 @@ class _FakeUpstream:
                     self.send_error(404)
                     return
                 length = int(self.headers.get("Content-Length", "0"))
-                _body = self.rfile.read(length)
+                self.rfile.read(length)  # drain request body; result unused
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -305,10 +299,12 @@ def test_env_override_allowlist(monkeypatch):
         "https://partner-a.example.com,https://partner-b.example.com",
     )
     origins = _resolve_allowed_origins()
-    assert "https://partner-a.example.com" in origins
-    assert "https://partner-b.example.com" in origins
+    # Use the set <= (subset) operator so CodeQL sees unambiguous exact set
+    # membership, not a substring check — `"url" in set` is exact in Python
+    # but CodeQL's py/incomplete-url-substring-sanitization rule fires anyway.
+    assert {"https://partner-a.example.com", "https://partner-b.example.com"} <= origins
     # The static defaults must still be present.
-    assert "http://localhost:3000" in origins
+    assert {"http://localhost:3000"} <= origins
 
 
 def test_double_start_is_idempotent(running_shim):
