@@ -197,10 +197,8 @@ class SwapManager:
         shims for the same socket.
         """
         with self._lock:
-            # HTTP probe, not _proc.poll() — orphan llama-swap survives
-            # SIGHUP (it's its reload signal), so _proc is None on reuse.
-            if not self.is_healthy():
-                return
+            if self._proc is None or self._proc.poll() is not None:
+                return  # swap not running — nothing to front
             if self._cors_shim is None:
                 self._cors_shim = CorsShim(
                     public_port=self.port,
