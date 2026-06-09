@@ -376,9 +376,8 @@ class CorsShim:
                 # other process); the caller can stop us and we'll exit
                 # cleanly without touching whatever else owns the port.
                 logger.warning(
-                    "[cors_shim] port %d already in use; refusing to start. "
-                    "Send STOP_SERVING and retry if you need a clean restart.",
-                    self.public_port,
+                    "[cors_shim] public port already in use; refusing to start. "
+                    "Send STOP_SERVING and retry if you need a clean restart."
                 )
                 return
 
@@ -395,10 +394,7 @@ class CorsShim:
             )
             self._thread.start()
             logger.info(
-                "CORS shim listening on http://%s:%d -> %s (allowlist: %d origins)",
-                self.host,
-                self.public_port,
-                upstream,
+                "CORS shim listening (allowlist: %d origins)",
                 len(self._allowed_origins),
             )
 
@@ -413,7 +409,7 @@ class CorsShim:
                 logger.warning("[cors_shim] shutdown raised: %s", exc)
             self._server = None
             self._thread = None
-            logger.info("CORS shim on port %d stopped", self.public_port)
+            logger.info("CORS shim stopped")
 
     def is_running(self) -> bool:
         with self._lock:
