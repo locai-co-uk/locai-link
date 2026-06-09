@@ -5,7 +5,6 @@
 
 import importlib
 import importlib.metadata
-import importlib.util
 import logging
 import shutil
 import subprocess

@@ -46,23 +46,6 @@ A few plugins compile native components on first use rather than shipping prebui
 
 If you only intend to run the agent in monitoring / OTA-update mode (no model deployments), these aren't required. They install once and serve every model deployment thereafter.
 
-## Pre-built bundles for partner integrations
-
-For partner applications that embed Link as a sidecar (e.g. [Meetily](https://github.com/Zackriya-Solutions/meetily)), we publish signed pre-built bundles on the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest). These include a fixed plugin set — currently `language_model` + `audio_transcriber` — already compiled, so the partner's installer doesn't depend on `git` / `cmake` being present on the host machine. The macOS bundles are signed + notarised; the binary runs without a Gatekeeper warning.
-
-**These bundles are partner-shaped.** They make sense when:
-
-- Your application needs LLM inference and/or audio transcription on the host machine.
-- You're shipping Link inside an end-user app installer (Electron, Tauri, Mac `.app`) and can't rely on the host having Python / build tools.
-- Bundle size (~250-400 MB) is acceptable for your distribution channel.
-
-They're the **wrong choice** for:
-
-- Standalone fleet deployments — devices managed by Loc.ai Control with no third-party app. Use the one-liner installer above; it's smaller, lazier, and adopts only the plugins you actually deploy models for.
-- Custom plugin sets — image classification only, or an in-house plugin not in the pre-built mix. See `bundling/README.md` to build a bundle with the plugin set you need (`uv run python bundling/build.py --plugins <name> [<name> ...]`).
-
-Download URLs follow the pattern `https://github.com/locai-co-uk/locai-link/releases/download/<TAG>/locai-link-<os>-<arch>-<TAG>.{tar.gz,zip}`. Each release also publishes a `.sha256` sidecar so you can verify the download (`sha256sum -c locai-link-…sha256`).
-
 ## Hacking on the codebase
 This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
 

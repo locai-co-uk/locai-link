@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Standalone profile — the canonical Loc.ai:Link distribution.
+#
+# No plugins baked in. Plugins install on demand the first time a model
+# that needs them is deployed. Keeps the bundle small (~50 MB compressed)
+# and useful even for pure monitoring / OTA-only deployments.
+
+name: standalone
+display_name: Loc.ai Link
+description: Bare agent for fleet-managed devices with no third-party app embedding.
+asset_name: locai-link
+
+plugins: []

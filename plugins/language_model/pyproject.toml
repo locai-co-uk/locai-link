@@ -25,5 +25,4 @@ packages = [] # Disable auto-discovery
 "client.py" = "link_language_model/client.py"
 "install.py" = "link_language_model/install.py"
 "swap_manager.py" = "link_language_model/swap_manager.py"
-"cors_shim.py" = "link_language_model/cors_shim.py"
 "__init__.py" = "link_language_model/__init__.py"

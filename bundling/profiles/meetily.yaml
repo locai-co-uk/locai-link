@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Meetily profile — Link embedded as a Tauri externalBin sidecar inside
+# the Meetily desktop app. The host app spawns Link in-process and calls
+# it over http://127.0.0.1:<port>, so requests are same-origin from the
+# browser's perspective. No CORS proxy is needed — llama-swap binds the
+# public port directly (zero-overhead path).
+
+name: meetily
+display_name: Link for Meetily
+description: Pre-built bundle for Meetily's Tauri sidecar integration.
+asset_name: locai-link-meetily
+
+plugins:
+  - language_model
+  - audio_transcriber
