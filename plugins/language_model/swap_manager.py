@@ -221,24 +221,17 @@ class SwapManager:
                 "Re-run plugin install or check language_model installation."
             )
 
-        # Kill any stale llama-swap left over from a previous unclean shutdown
-        # that is still holding our listen port — new process can't bind
-        # otherwise. Note this checks the LISTEN port (loopback), not the
-        # public port; the public port is owned by CorsShim, which has its
-        # own bind guard.
+        # Always kill an existing listener on our port — adopting it would
+        # leave the orphan serving with stale config (different model/n_ctx),
+        # and we have no _proc handle to SIGHUP for reload.
         if self._port_in_use():
-            if self.is_healthy():
-                logger.warning(
-                    f"Listen port {self._listen_port} already has a healthy llama-swap; "
-                    "reusing it. Send STOP_SERVING first if you need a clean restart."
-                )
-                return
-            logger.warning(f"Listen port {self._listen_port} is in use but not healthy — killing stale process")
+            logger.warning("Killing orphan llama-swap from prior session")
             self._kill_port()
+            time.sleep(0.5)
+            if self._port_in_use():
+                raise RuntimeError("Listen port still held after kill — another Link instance running?")
 
-        logger.info(
-            f"Starting llama-swap on http://127.0.0.1:{self._listen_port} (public port {self.port} fronted by CorsShim)"
-        )
+        logger.info("Starting llama-swap")
 
         self._log_path.parent.mkdir(exist_ok=True)
         log_fh = open(self._log_path, "a")  # noqa: SIM115 — kept open for subprocess lifetime
@@ -275,6 +268,20 @@ class SwapManager:
         # front of it. Idempotent: a model reload re-enters _start while the
         # shim is already listening, so the public port stays up across swaps.
         self.ensure_shim()
+
+        # Surface useful URLs. Public port (CORS-fronted) is for API clients;
+        # the llama-swap dev UI lives on the loopback listen port and is only
+        # reachable from this machine (CorsShim does not proxy UI paths).
+        public_host = "localhost" if self.host in ("0.0.0.0", "127.0.0.1") else self.host
+        logger.info(
+            "API ready (POST http://%s:%d/v1/chat/completions)",
+            public_host,
+            self.port,
+        )
+        logger.info(
+            "llama-swap dev UI: http://127.0.0.1:%d (loopback only)",
+            self._listen_port,
+        )
 
     def _stop(self) -> None:
         # NOTE: deliberately does NOT stop the shim — _stop is also the
