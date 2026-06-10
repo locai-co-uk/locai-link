@@ -216,8 +216,36 @@ class WindowsBackend(ServiceBackend):
         cmd = f'sc create {self.service_name} binPath= "{bin_path}" start= auto displayname= "{self.description}"'
         _run_cmd(cmd)
 
+        if self.env_vars:
+            self._apply_service_environment()
+
         if start_now:
             self.start()
+
+    def _apply_service_environment(self):
+        """Write per-service environment variables to the registry.
+
+        `sc create` cannot set environment variables; the SCM reads them from
+        the REG_MULTI_SZ value `Environment` under the service's registry key
+        (HKLM\\SYSTEM\\CurrentControlSet\\Services\\<name>). `sc delete`
+        removes the whole key, so uninstall needs no extra cleanup.
+        """
+        import winreg
+
+        entries = [f"{k}={v}" for k, v in self.env_vars.items()]
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                rf"SYSTEM\CurrentControlSet\Services\{self.service_name}",
+                0,
+                winreg.KEY_SET_VALUE,
+            )
+            try:
+                winreg.SetValueEx(key, "Environment", 0, winreg.REG_MULTI_SZ, entries)
+            finally:
+                winreg.CloseKey(key)
+        except OSError as e:
+            logger.warning(f"Could not set service environment for {self.service_name}: {e}")
 
     def start(self):
         if _is_admin():

@@ -1,11 +1,13 @@
 """CLI entry point — dispatches setup, run, install, reset, stop, TUI subcommands."""
 
 import argparse
+import json
 import logging
 import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -24,6 +26,53 @@ logger = setup_logging()
 DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
 DEFAULT_REPO_URL = "https://github.com/locai-co-uk/locai-link.git"
 DEFAULT_BRANCH = "main"
+
+# Non-secret marker written after a successful fleet enrollment. Lets `run`
+# distinguish "fleet device whose session was wiped" (fail loudly, see D0)
+# from a fresh interactive install (factory defaults are fine). Lives next to
+# the session files so `reset --hard` clears the whole local identity at once.
+FLEET_MARKER_PATH = Path("configs") / ".fleet_device"
+
+
+def _resolve_fleet_key(value: str) -> str:
+    """Resolve the --fleet-key argument to the actual key material.
+
+    Accepts either the key itself or ``file:<path>``, where the file holds the
+    key. The file form keeps the secret out of process listings and shell
+    history; the command line then only exposes a path. The key is used in
+    memory only and never persisted by Link.
+
+    Raises:
+        RuntimeError: If the file form is used and the file is missing,
+            unreadable, or empty.
+    """
+    if not value.startswith("file:"):
+        return value
+    key_path = Path(value[len("file:") :])
+    try:
+        key = key_path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise RuntimeError(f"Could not read fleet key file {key_path}: {e}") from e
+    if not key:
+        raise RuntimeError(f"Fleet key file {key_path} is empty.")
+    return key
+
+
+def _write_fleet_marker(device_id) -> None:
+    """Persist the fleet-device marker (best-effort, contains no secrets)."""
+    try:
+        FLEET_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FLEET_MARKER_PATH.write_text(
+            json.dumps(
+                {
+                    "enrolled_at": datetime.now(timezone.utc).isoformat(),
+                    "device_id": str(device_id),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.warning(f"Could not write fleet marker {FLEET_MARKER_PATH}: {e}")
 
 
 def setup(args: argparse.Namespace):
@@ -231,21 +280,37 @@ def run(args: argparse.Namespace):
             sys.exit(1)
 
     # C1. Fleet Enrollment (headless / unattended mode)
-    # Triggered when no local session exists and a fleet key is available —
-    # either via --fleet-key CLI flag or LOCAI_FLEET_KEY environment variable.
-    # The device self-enrolls against POST /devices/enroll with no user
-    # credentials; the returned identity is persisted as a normal session file
-    # so subsequent launches auto-resume (path B) without re-enrolling.
+    # Triggered when no local session exists and --fleet-key was provided on
+    # the command line. The CLI flag is the only input; the environment is
+    # deliberately ignored so the key never lives in ambient process state or
+    # service definitions. The device self-enrolls against POST /devices/enroll
+    # with no user credentials; the returned identity is persisted as a normal
+    # session file so subsequent launches auto-resume (path B) without
+    # re-enrolling.
     if agent_config is None:
-        _fleet_key = getattr(args, "fleet_key", None) or os.environ.get("LOCAI_FLEET_KEY")
-        if _fleet_key:
+        _fleet_key_arg = getattr(args, "fleet_key", None)
+        if _fleet_key_arg:
             api_url = args.api_url if args.api_url else DEFAULT_API_URL
             try:
+                _fleet_key = _resolve_fleet_key(_fleet_key_arg)
                 agent_config = enroll_device(fleet_key=_fleet_key, api_url=api_url)
                 state_manager.bootstrap(agent_config)
+                _write_fleet_marker(agent_config.identity.device_id)
             except Exception as e:
                 logger.critical(f"Fleet enrollment failed: {e}", exc_info=True)
                 sys.exit(1)
+
+    # D0. Fail loudly for wiped fleet devices. A fleet-enrolled machine whose
+    # session files are gone must not boot as an unregistered zombie on
+    # factory defaults; enrollment has to be re-run (normally the partner
+    # installer's job). The marker survives individual session-file loss but
+    # not a full `reset --hard`, which behaves as a fresh install by design.
+    if agent_config is None and FLEET_MARKER_PATH.exists():
+        logger.critical(
+            "This device was fleet-enrolled but no local session was found. "
+            "Re-run enrollment with --fleet-key (normally done by the partner installer)."
+        )
+        sys.exit(1)
 
     # D. Factory Defaults
     if agent_config is None:
@@ -348,13 +413,11 @@ def _deploy_service(cwd: Path):
     python_exe = cwd / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     cmd = f"{python_exe} main.py run"
 
-    # Propagate the fleet key into the service environment so that if the
-    # local session is ever wiped (e.g. `reset --hard`) the service can
-    # re-enroll on next start without requiring a manual re-install.
+    # The service environment intentionally carries no secrets. The fleet key
+    # is CLI-only and exists only inside the short-lived enrolling process; a
+    # wiped session requires re-running enrollment (the partner installer's
+    # job), which the D0 guard in `run` reports loudly.
     svc_env: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
-    _svc_fleet_key = os.environ.get("LOCAI_FLEET_KEY")
-    if _svc_fleet_key:
-        svc_env["LOCAI_FLEET_KEY"] = _svc_fleet_key
 
     agent = ServiceManager(
         "locai-link",
@@ -482,7 +545,8 @@ def main():
     run_p.add_argument(
         "--fleet-key",
         help="Org-scoped fleet enrollment key for headless/unattended mode. "
-        "Also read from the LOCAI_FLEET_KEY environment variable. "
+        "Accepts the key itself or file:<path> to read the key from a file, "
+        "which keeps the secret out of process listings and shell history. "
         "When present and no local session exists, the device self-enrolls "
         "against POST /devices/enroll with no user interaction.",
     )

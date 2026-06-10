@@ -3,6 +3,7 @@
 import glob
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -69,6 +70,7 @@ class StateManager:
             if data.get("version") == 2.1:
                 self._cache = data
                 self.current_session_path = target_path
+                self._tighten_permissions(target_path)
                 return data
             else:
                 # Malformed or incompatible version
@@ -214,10 +216,34 @@ class StateManager:
             if not self.load_state():
                 self._cache = {"identity": {}, "pipelines": []}
 
+    @staticmethod
+    def _tighten_permissions(path: Path) -> None:
+        """Best-effort chmod 0600 for session files created by older versions.
+
+        Session files hold the device api_key, so they must not be readable by
+        other local users. No-op in practice on Windows, where effective access
+        comes from the parent directory's ACLs.
+        """
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
     def _flush(self):
-        """Writes the current state cache to the active session file."""
+        """Writes the current state cache to the active session file.
+
+        The file holds the device api_key, so it is created owner-only (0600)
+        from the first byte rather than with default umask-derived permissions.
+        Best-effort on Windows (see _tighten_permissions).
+        """
         if self._cache and self.current_session_path:
             try:
-                self.current_session_path.write_text(json.dumps(self._cache, indent=2))
+                fd = os.open(
+                    self.current_session_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(self._cache, indent=2))
             except Exception as e:
                 logger.error(f"Failed to save state: {e}")

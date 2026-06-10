@@ -303,16 +303,20 @@ def register_device(
         raise
 
 
-# Headless enroll retry policy. Enrollment runs unattended at scale, so transient
-# failures must be retried with exponential backoff + jitter rather than crashing
-# the agent. Under a Restart=always service a crash becomes a tight restart loop,
-# and during a fleet-wide rollout the 300/min per-key backend limit means many
-# devices hit 429 at once — without backoff they would form a thundering herd.
-# Permanent failures (bad/expired/revoked key, cap full, malformed request) are
-# NOT retried; they cannot resolve without operator action.
+# Headless enroll retry policy. Enrollment runs unattended at scale, so
+# transient failures (429, 5xx, network) are retried with jittered exponential
+# backoff rather than crashing the agent. When the server supplies a
+# Retry-After header it is authoritative; the constants below are only the
+# client-side fallback when no header is present. Permanent failures
+# (bad/expired/revoked key, cap full, malformed request) are NOT retried;
+# they cannot resolve without operator action.
 _ENROLL_MAX_ATTEMPTS = 8
 _ENROLL_BACKOFF_BASE_SECONDS = 2.0
 _ENROLL_BACKOFF_CAP_SECONDS = 60.0
+# Ceiling when honouring a server-sent Retry-After. Guards against an absurd
+# or hostile value stalling the agent while leaving the server a real range
+# to pace clients with.
+_RETRY_AFTER_HONOR_CAP_SECONDS = 300.0
 
 
 def _enroll_backoff_seconds(attempt: int) -> float:
@@ -327,8 +331,9 @@ def _enroll_backoff_seconds(attempt: int) -> float:
 def _retry_after_seconds(resp) -> float | None:
     """Return the Retry-After header in seconds if present and parseable, else None.
 
-    Only the integer-seconds form is honoured; the HTTP-date form falls back to
-    computed backoff. Capped so a hostile/absurd value can't stall the agent.
+    The server's value is authoritative for pacing. Only the integer-seconds
+    form is honoured; the HTTP-date form falls back to computed backoff.
+    Capped so a hostile/absurd value can't stall the agent.
     """
     raw = resp.headers.get("Retry-After") if getattr(resp, "headers", None) else None
     if not raw:
@@ -339,7 +344,7 @@ def _retry_after_seconds(resp) -> float | None:
         return None
     if secs < 0:
         return None
-    return min(secs, _ENROLL_BACKOFF_CAP_SECONDS)
+    return min(secs, _RETRY_AFTER_HONOR_CAP_SECONDS)
 
 
 def _enroll_error_detail(resp) -> str:
@@ -368,9 +373,9 @@ def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
                        device_id/name, does NOT touch the device_count cap.
 
     Args:
-        fleet_key: Reusable org-scoped fleet enrollment key, obtained from the
-            ``LOCAI_FLEET_KEY`` environment variable or the ``--fleet-key`` CLI
-            flag.  Must start with ``flk_``.
+        fleet_key: Reusable org-scoped fleet enrollment key, passed via the
+            ``--fleet-key`` CLI flag (either the key itself or ``file:<path>``;
+            the environment is never read).  Must start with ``flk_``.
         api_url: Control-plane API base URL (e.g. ``https://api.locai.co.uk/api/v1``).
 
     Returns:
