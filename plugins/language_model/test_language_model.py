@@ -4,6 +4,7 @@
 import shutil
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -28,15 +29,41 @@ MODEL_PATH = TEMP_DIR / "smollm2-135m.gguf"
 TEST_PORT = 8099
 
 
+def _download_smollm2_with_retry(max_attempts: int = 4) -> bool:
+    """Fetch the SmolLM2 GGUF model; tolerate transient CDN flakes.
+
+    huggingface.co rate-limits anonymous downloads (returns HTTP 429) when
+    parallel CI runs hit it in close succession. Retry with exponential
+    backoff, then return False so the caller can skip the test rather
+    than fail it.
+    """
+    req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
+    for attempt in range(max_attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp, open(MODEL_PATH, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            return True
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            if attempt == max_attempts - 1:
+                print(f"SmolLM2 download failed after {max_attempts} attempts: {exc}")
+                return False
+            backoff = 2**attempt  # 1s, 2s, 4s, 8s
+            print(f"SmolLM2 download attempt {attempt + 1} failed ({exc}); retrying in {backoff}s")
+            time.sleep(backoff)
+    return False
+
+
 @pytest.fixture(scope="module", autouse=True)
 def setup_teardown():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     if not MODEL_PATH.exists():
         print(f"Downloading SmolLM2 to {MODEL_PATH}...")
-        # User-Agent added to prevent 403s from some model hosts
-        req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req) as resp, open(MODEL_PATH, "wb") as f:
-            shutil.copyfileobj(resp, f)  # type: ignore
+        if not _download_smollm2_with_retry():
+            # Skip rather than fail — the model lives on an external CDN
+            # we don't control, and a transient 429/outage shouldn't block
+            # unrelated PR merges. Mirrors the behaviour of audio_classifier
+            # test_audio_classifier.py.
+            pytest.skip("SmolLM2 CDN unavailable; skipping language_model integration test.")
     yield
     if TEMP_DIR.exists():
         shutil.rmtree(TEMP_DIR)

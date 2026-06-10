@@ -37,7 +37,7 @@ def _download_yamnet_with_retry(max_attempts: int = 4) -> bool:
             if attempt == max_attempts - 1:
                 print(f"YAMNet download failed after {max_attempts} attempts: {exc}")
                 return False
-            backoff = 2 ** attempt  # 1s, 2s, 4s, 8s
+            backoff = 2**attempt  # 1s, 2s, 4s, 8s
             print(f"YAMNet download attempt {attempt + 1} failed ({exc}); retrying in {backoff}s")
             time.sleep(backoff)
     return False

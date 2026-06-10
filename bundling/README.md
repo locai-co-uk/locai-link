@@ -19,22 +19,104 @@ bundling/
             └── llama-swap
 ```
 
-## Local build
+## Profiles
+
+A *profile* is the canonical recipe for a bundle: which plugins to compile in,
+what to name the artifact, what to stamp into `manifest.json`. One YAML file
+per integrator under `profiles/`. Today:
+
+| Profile | Shape | Plugins |
+|---|---|---|
+| `standalone` | Bare agent for fleet-managed devices | — (lazy-install on first deploy) |
+| `meetily` | Tauri externalBin sidecar, no browser CORS | `language_model`, `audio_transcriber` |
+| `safechat` | Browser-direct inference | `language_model` |
+
+### Building from a profile
 
 ```bash
-# Build a Meetily-shaped bundle (LLM + transcription)
+# Canonical path — committed, reproducible
+uv run python bundling/build.py --profile meetily
+uv run python bundling/build.py --profile safechat
+uv run python bundling/build.py --profile standalone
+```
+
+### Building from CLI flags (ad-hoc / dev)
+
+```bash
+# Pure CLI, no profile file
+uv run python bundling/build.py --plugins language_model --asset-name locai-link-x
+
+# Profile + per-flag override (debug a single field)
+uv run python bundling/build.py --profile safechat --asset-name locai-link-test
+```
+
+CLI flags layer on top of a profile if both are supplied — CLI wins on
+conflict. The merged result drives PyInstaller, manifest writing, and asset
+naming downstream.
+
+### Adding a new profile
+
+Create `profiles/<name>.yaml` with the required fields:
+
+```yaml
+name: <name>                  # filesystem-safe identifier
+display_name: <human-readable name>
+description: <free text>
+asset_name: <release-artifact prefix>
+plugins:
+  - <plugin>
+  - <plugin>
+```
+
+Then `uv run python bundling/build.py --profile <name>` — the loader
+validates the YAML (unknown top-level fields rejected, unknown plugins
+rejected) before any work happens.
+
+### `manifest.json`
+
+Each built bundle ships a `manifest.json` at its root, written after
+PyInstaller finishes. Read-only metadata describing what was built — not
+consumed by the running agent (that reads `configs/agent.json`). Useful for
+bug reports, telemetry (the agent reports `profile` at registration), and
+integrity checks.
+
+Fields:
+
+| Field | Source |
+|---|---|
+| `manifest_version` | constant (`1`) — bump on schema change |
+| `profile` | profile `name` (or `"custom"` for pure-CLI builds) |
+| `display_name` / `description` | profile or CLI override |
+| `asset_name` | profile or CLI override; read by CI for tarball naming |
+| `version` | root `pyproject.toml` `[project].version` |
+| `git_sha` | short SHA of working tree, or `"unknown"` |
+| `built_at` | UTC ISO 8601 timestamp |
+| `plugins[]` | `{name, version}` per baked-in plugin |
+
+Inspect it directly:
+
+```bash
+cat dist/locai-link/manifest.json
+```
+
+## Local build (manual plugin selection)
+
+When you don't want to commit a profile YAML — e.g. one-off testing:
+
+```bash
+# Specific plugin set
 uv run python bundling/build.py --plugins language_model audio_transcriber
 
-# Or include every known plugin (avoid for partner bundles)
+# Every known plugin (rarely what you want)
 uv run python bundling/build.py --all-plugins
 ```
 
-Plugin selection is **explicit by design** — bundles are partner-scoped, so
-only the plugins listed get installed, have their dist-info collected, and
-contribute hidden imports / native binaries.  Run without arguments to see
-the known-plugin list.
+Plugin selection is **explicit by design** — bundles are integrator-scoped,
+so only the plugins listed get installed, have their dist-info collected,
+and contribute hidden imports / native binaries. Run without arguments to
+see the known-plugin list.
 
-Output goes to `dist/locai-link/`.  Native binaries are pre-fetched into
+Output goes to `dist/locai-link/`. Native binaries are pre-fetched into
 `bundling/_artifacts/<os>-<arch>/` as a build-time side effect (cached
 across runs so re-builds are fast).
 

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# SafeChat profile — Link as a device-side inference service called from
+# the SafeChat web app. Browser hits the public port from a different
+# origin, so the CORS proxy is required on the runtime side.
+#
+# This profile selects the right plugin set; the SafeChat-specific
+# allowed origins are still set per-device in the agent config
+# (configs/agent.json -> pipelines[*].source.args.cors_allowed_origins).
+# They're left out of the build because:
+#   1. Source-installed devs may want a different localhost origin.
+#   2. The control plane is the right place to push the production
+#      origin list per device — keeps it editable without rebuilding.
+
+name: safechat
+display_name: Link for SafeChat
+description: Pre-built bundle for SafeChat's browser-direct inference.
+asset_name: locai-link-safechat
+
+plugins:
+  - language_model
