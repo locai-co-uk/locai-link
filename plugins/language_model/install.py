@@ -118,11 +118,7 @@ def _prebuilt_url(tag):
 
 
 def _install_prebuilt(url, bin_dir, tag):
-    """Download a prebuilt release archive and install binaries to bin_dir.
-
-    Returns True on success, False on failure so the caller can fall back to cmake.
-    Uses a tag file to skip re-download when already at the correct version.
-    """
+    """Download + extract a prebuilt llama.cpp archive. Returns True/False; tag-cached."""
     system = platform.system()
     binary_filename = "llama-server.exe" if system == "Windows" else "llama-server"
     binary_dest = bin_dir / binary_filename
@@ -243,12 +239,7 @@ def _detect_gpu_cmake_flags():
 
 
 def _cmake_build(tag, cmake_flags, bin_dir):
-    """Clone llama.cpp at tag, build llama-server with cmake, and install to bin_dir.
-
-    Uses a persistent build cache so subsequent runs with the same tag are skipped,
-    and tag-change rebuilds are incremental where possible. ccache and Ninja are
-    used automatically when available.
-    """
+    """Clone llama.cpp@tag, cmake-build llama-server, install to bin_dir. ccache/Ninja used if present."""
     if not _command_exists("git"):
         logger.error("git is required to build from source but was not found.")
         sys.exit(1)
@@ -346,12 +337,7 @@ def _cmake_build(tag, cmake_flags, bin_dir):
 
 
 def _is_already_installed(tag: str) -> bool:
-    """True when llama-server binary is present and the cached tag matches.
-
-    Same check both prebuilt and cmake paths use — kept here so callers can
-    early-return before any log line fires.  In a frozen bundle the binary is
-    shipped without a tag file, so presence alone counts as installed.
-    """
+    """True if llama-server is on disk and at ``tag``. Frozen bundles skip the tag check."""
     binary_filename = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
     binary_dest = BIN_LLAMA_DIR / binary_filename
     if FROZEN:
@@ -401,14 +387,7 @@ def install_inference_engine():
 
 
 def _swap_prebuilt_url(tag: str) -> str | None:
-    """Returns the platform-appropriate llama-swap release URL, or None if unsupported.
-
-    Release naming on https://github.com/mostlygeek/llama-swap/releases:
-        llama-swap_<tag>_<os>_<arch>.<ext>
-
-    Where <os> ∈ {linux, darwin, windows, freebsd}, <arch> ∈ {amd64, arm64},
-    <ext> = zip on Windows, tar.gz everywhere else.
-    """
+    """Platform-appropriate llama-swap release URL, or None. Asset names: llama-swap_<tag>_<os>_<arch>.{tar.gz,zip}."""
     system = platform.system()
     machine = platform.machine().lower()
     is_arm = machine in ("arm64", "aarch64")
@@ -430,12 +409,7 @@ def _swap_prebuilt_url(tag: str) -> str | None:
 
 
 def _is_swap_installed(tag: str) -> bool:
-    """True when the llama-swap binary is present and the cached tag matches.
-
-    Mirrors `_is_already_installed`: a tag file under the build cache lets us
-    skip re-download on subsequent runs even when the binary is already on disk.
-    In a frozen bundle no tag file is shipped — binary presence is sufficient.
-    """
+    """True if llama-swap is on disk and at ``tag``. Frozen bundles skip the tag check."""
     binary_filename = "llama-swap.exe" if platform.system() == "Windows" else "llama-swap"
     binary_dest = BIN_LLAMA_DIR / binary_filename
     if FROZEN:
@@ -445,12 +419,7 @@ def _is_swap_installed(tag: str) -> bool:
 
 
 def _install_swap_prebuilt(url: str, bin_dir: Path, tag: str) -> bool:
-    """Download the llama-swap release archive and install its binary to bin_dir.
-
-    Returns True on success, False on any failure (caller decides whether to
-    bail or fall back). Tag-cached: a repeated call with the same tag is a
-    no-op after the first success.
-    """
+    """Download + extract a llama-swap release. Returns True/False; tag-cached."""
     system = platform.system()
     binary_filename = "llama-swap.exe" if system == "Windows" else "llama-swap"
     binary_dest = bin_dir / binary_filename
@@ -515,14 +484,7 @@ def _install_swap_prebuilt(url: str, bin_dir: Path, tag: str) -> bool:
 
 
 def install_swap():
-    """Installs the pinned llama-swap binary alongside llama-server.
-
-    No-op when the binary at the configured tag is already on disk. Logs a
-    warning (but does NOT fail the overall install) when the current platform
-    has no published prebuilt — the language_model plugin will still work for
-    single-model serving via the dedicated llama-server path; only the
-    multi-model swap path is unavailable.
-    """
+    """Install the pinned llama-swap binary. Soft-fails on unsupported platforms (single-serve still works)."""
     if FROZEN:
         return  # binary ships in the bundle; nothing to install
     BIN_LLAMA_DIR.mkdir(parents=True, exist_ok=True)

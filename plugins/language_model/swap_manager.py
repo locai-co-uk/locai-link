@@ -1,44 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""SwapManager — manages llama-swap processes keyed by external port.
+"""Manages llama-swap subprocesses keyed by (host, port).
 
-llama-swap is a small proxy that loads/unloads llama-server instances on demand,
-keeping one listener port per swap with `maxConcurrent: 1` so only one model
-sits in RAM at a time.
+One swap per public port; ``maxConcurrent: 1`` keeps a single model in RAM.
 
-link uses one SwapManager per (host, port).  In normal operation the frontend
-pins every model to the same port and they all share a single swap.  The
-registry below transparently supports multiple ports as a fallback, so a
-stray second port from the control plane gets its own swap instead of tearing
-down the first one (which left earlier adapters polling a dead process).
+Port layout (offsets fixed at construction):
 
-Port arrangement
-----------------
-Two layouts are possible per swap, decided once at construction based on
-whether the adapter passed a non-empty CORS allowlist:
+    no CORS:  public_port  -> llama-swap  ;  public_port + 100 + i -> llama-server[i]
+    with CORS: public_port -> CorsProxy  ;  public_port + 50 -> llama-swap (loopback)
+                                          ;  public_port + 150 + i -> llama-server[i]
 
-**Without CORS (default — zero added overhead):**
-
-    public port (self.port)      -> llama-swap binds directly
-    public port + 100 + i        -> llama-server for model[i], loopback-only
-
-No proxy in the request path. Identical wire path to pre-shim code, for
-CLI / native HTTP callers that don't need cross-origin browser support.
-
-**With CORS (`allowed_origins` non-empty):**
-
-    public port (self.port)             -> CorsProxy (browser-facing, CORS)
-    listen port (self.port + 50)        -> llama-swap on 127.0.0.1 only
-    listen port + 100 + i               -> llama-server for model[i]
-
-The CORS proxy owns the public port; llama-swap moves to a loopback-only
-internal port so browsers and partners interacting via HTTP get the CORS
-/ Local Network Access headers they need without llama-swap itself
-implementing CORS.
-
-The choice is read once from the adapter — there is no per-request
-branching on the hot path.
+Orphan handling: each start records its PID in ``state/swap_<port>.pid``;
+the next start reclaims its own orphan (verified by cmdline) and refuses to
+touch a foreign process holding the port. See ``_reclaim_previous_instance``.
 """
 
 import json
@@ -52,6 +27,7 @@ import threading
 import time
 from pathlib import Path
 
+import psutil
 import requests
 
 from link.infra.cors_proxy import CorsProxy
@@ -69,13 +45,7 @@ def get_swap_manager(
     bin_dir: Path,
     allowed_origins: list[str] | None = None,
 ) -> "SwapManager":
-    """Return the SwapManager for (host, port), creating it on first use.
-
-    ``allowed_origins`` is honoured only on the *first* call for a given
-    (host, port): once the swap exists, subsequent servings share its
-    CORS configuration. That matches the production case where every
-    serving on a port belongs to the same deployment.
-    """
+    """Return the SwapManager for (host, port); ``allowed_origins`` honoured on first creation only."""
     key = (host, port)
     with _global_lock:
         sm = _instances.get(key)
@@ -86,17 +56,13 @@ def get_swap_manager(
 
 
 class SwapManager:
-    """Manages a single llama-swap process for one (host, port) pair.
-
-    Config and log files are keyed by port (configs/swap_config_<port>.json,
-    logs/llama-swap_<port>.log) so two swaps in the same process don't collide.
-    """
+    """Single llama-swap process keyed by (host, port)."""
 
     _MAX_CONCURRENT = 1
-    _HEALTH_CHECK_TIMEOUT = 120  # seconds llama-swap waits for a model to become ready
-    _MODEL_TTL = 300  # seconds a model stays loaded after the last request
-    _PROXY_OFFSET = 50  # when CORS is on, llama-swap binds public_port + offset (loopback only)
-    _INTERNAL_PORT_OFFSET = 100  # llama-server ports start at listen_port + offset
+    _HEALTH_CHECK_TIMEOUT = 120
+    _MODEL_TTL = 300
+    _PROXY_OFFSET = 50
+    _INTERNAL_PORT_OFFSET = 100
 
     def __init__(
         self,
@@ -105,10 +71,7 @@ class SwapManager:
         bin_dir: Path,
         allowed_origins: list[str] | None = None,
     ) -> None:
-        self.port = port  # public-facing port
-        # When CORS is enabled, the public port is owned by CorsProxy and
-        # llama-swap moves to a loopback offset. When CORS is off, llama-swap
-        # binds the public port directly — same wire path as pre-shim code.
+        self.port = port
         self._allowed_origins: list[str] = [o for o in (allowed_origins or []) if o]
         self._cors_enabled = bool(self._allowed_origins)
         self._listen_port = port + self._PROXY_OFFSET if self._cors_enabled else port
@@ -118,26 +81,18 @@ class SwapManager:
         self._server_bin = bin_dir / ("llama-server.exe" if is_win else "llama-server")
         self._config_path = Path("configs") / f"swap_config_{port}.json"
         self._log_path = Path("logs") / f"llama-swap_{port}.log"
+        self._pid_path = Path("state") / f"swap_{port}.pid"
         self._models: dict[str, dict] = {}
         self._proc: subprocess.Popen | None = None
-        # The browser-facing CORS proxy is owned here — one per public port
-        # when CORS is enabled, shared by every serving pinned to it and
-        # surviving model reloads. ``None`` when CORS is disabled (zero-cost
-        # path: llama-swap binds the public port directly).
         self._cors_proxy: CorsProxy | None = None
         self._lock = threading.RLock()
 
     @property
     def listen_port(self) -> int:
-        """Port llama-swap binds.  When CORS is enabled this is the loopback
-        offset that the proxy points at; when CORS is disabled it equals the
-        public port (llama-swap binds it directly).
-        """
         return self._listen_port
 
     @property
     def cors_enabled(self) -> bool:
-        """True when this swap has an active CORS proxy in front of it."""
         return self._cors_enabled
 
     # ------------------------------------------------------------------
@@ -171,8 +126,8 @@ class SwapManager:
                 return
             del self._models[model_id]
             if not self._models:
-                # Stop the browser-facing proxy BEFORE llama-swap so a status
-                # poll never briefly hits a proxy fronting a dead upstream.
+                # Proxy first, then llama-swap, so a status poll never hits
+                # a proxy fronting a dead upstream.
                 self._stop_proxy()
                 self._stop()
                 self._config_path.unlink(missing_ok=True)
@@ -184,7 +139,6 @@ class SwapManager:
                     self._reload()
 
     def shutdown(self) -> None:
-        """Stop llama-swap (and its CORS proxy if any) and drop from the registry."""
         with self._lock:
             self._stop_proxy()
             self._stop()
@@ -196,13 +150,9 @@ class SwapManager:
         return f"http://{self.host}:{self.port}"
 
     def is_healthy(self) -> bool:
-        """Lightweight HTTP liveness check against llama-swap's /health endpoint.
-
-        Hits the listen port directly (bypassing any CORS proxy) so health
-        reflects the model server independently of proxy status.
-        """
+        """Hit llama-swap's /health on the listen port (bypasses any proxy)."""
         if self._proc is not None and self._proc.poll() is not None:
-            return False  # process already exited — skip the HTTP round-trip
+            return False
         try:
             resp = requests.get(f"http://127.0.0.1:{self._listen_port}/health", timeout=2)
             return resp.status_code == 200
@@ -210,19 +160,7 @@ class SwapManager:
             return False
 
     def ensure_proxy(self) -> None:
-        """Ensure the CORS proxy fronting the public port is running.
-
-        No-op when CORS is disabled for this swap (the zero-cost path —
-        llama-swap binds the public port directly, no proxy ever exists).
-
-        When CORS is enabled, this is idempotent and safe to call repeatedly
-        (e.g. from the adapter heartbeat): it only acts when llama-swap is
-        actually running, so we never strand a proxy in front of a dead
-        upstream, and ``CorsProxy.start()`` no-ops when already listening —
-        so there is no restart-flap log spam. This is the single place a
-        proxy is created, which is why two servings on one port can no
-        longer race two proxies for the same socket.
-        """
+        """Idempotent. No-op when CORS is disabled or llama-swap isn't running."""
         with self._lock:
             if not self._cors_enabled:
                 return
@@ -251,18 +189,13 @@ class SwapManager:
                 "Re-run plugin install or check language_model installation."
             )
 
-        # Kill any stale llama-swap left over from a previous unclean shutdown
-        # that is still holding our listen port — new process can't bind
-        # otherwise.
+        self._reclaim_previous_instance()
         if self._port_in_use():
-            if self.is_healthy():
-                logger.warning(
-                    f"Listen port {self._listen_port} already has a healthy llama-swap; "
-                    "reusing it. Send STOP_SERVING first if you need a clean restart."
-                )
-                return
-            logger.warning(f"Listen port {self._listen_port} is in use but not healthy — killing stale process")
-            self._kill_port()
+            raise RuntimeError(
+                f"Listen port {self._listen_port} is held by a process we don't own (no pidfile). "
+                f"Investigate with `lsof -i :{self._listen_port}` (Linux/macOS) or "
+                f"`netstat -ano | findstr {self._listen_port}` (Windows) and clear it before retrying."
+            )
 
         if self._cors_enabled:
             logger.info(
@@ -288,12 +221,13 @@ class SwapManager:
             stdout=log_fh,
             stderr=log_fh,
         )
+        self._write_pid(self._proc.pid)
 
-        # Brief sanity check — if the process exits within 1 s the config or
-        # listen port caused an immediate failure; surface the last log lines.
+        # 1s settle — if it exits this fast, the config / listen port is bad.
         time.sleep(1)
         if self._proc.poll() is not None:
             log_fh.flush()
+            self._clear_pid()
             try:
                 tail = self._log_path.read_text(errors="replace").splitlines()[-10:]
                 logger.error("llama-swap exited immediately. Last log lines:")
@@ -303,15 +237,12 @@ class SwapManager:
                 pass
             raise RuntimeError(f"llama-swap failed to start (exit {self._proc.returncode}). See {self._log_path}")
 
-        # llama-swap is up — bring the CORS proxy online if configured.
-        # No-op when CORS is disabled.
         self.ensure_proxy()
 
     def _stop(self) -> None:
-        # NOTE: deliberately does NOT stop the proxy — _stop is also the
-        # reload path on Windows (_reload -> _stop + _start), and the public
-        # port must stay up across a model swap. The proxy is torn down only
-        # when the last model is removed (see remove_model / shutdown).
+        # NOT responsible for the proxy — _stop is also the Windows reload
+        # path (_stop + _start) and the public port must stay up across model
+        # swaps. Proxy teardown happens in remove_model / shutdown.
         if not self._is_running():
             return
         logger.info("Stopping llama-swap")
@@ -323,19 +254,15 @@ class SwapManager:
             self._proc.kill()
             self._proc.wait()
         self._proc = None
+        self._clear_pid()
 
     def _stop_proxy(self) -> None:
-        """Stop and clear the CORS proxy if one is running (idempotent)."""
         if self._cors_proxy is not None:
             self._cors_proxy.stop()
             self._cors_proxy = None
 
     def _reload(self) -> None:
-        """Ask llama-swap to reload its config file.
-
-        Linux/macOS: SIGHUP triggers an in-process reload without dropping
-        connections.  Windows has no SIGHUP equivalent — restart the process.
-        """
+        """SIGHUP on Linux/macOS; stop+start on Windows (no SIGHUP equivalent)."""
         assert self._proc is not None
         if platform.system() == "Windows":
             self._stop()
@@ -347,36 +274,85 @@ class SwapManager:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(("127.0.0.1", self._listen_port)) == 0
 
-    def _kill_port(self) -> None:
-        """Best-effort kill of whatever process is holding self._listen_port."""
-        try:
-            import psutil
+    # ------------------------------------------------------------------
+    # Pidfile + orphan reclaim
+    # ------------------------------------------------------------------
 
-            for conn in psutil.net_connections(kind="inet"):
-                laddr = conn.laddr
-                if not laddr or getattr(laddr, "port", None) != self._listen_port or not conn.pid:
-                    continue
-                try:
-                    psutil.Process(conn.pid).terminate()
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-        except Exception:
+    def _write_pid(self, pid: int) -> None:
+        self._pid_path.parent.mkdir(parents=True, exist_ok=True)
+        self._pid_path.write_text(str(pid), encoding="utf-8")
+
+    def _read_pid(self) -> int | None:
+        try:
+            return int(self._pid_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+
+    def _clear_pid(self) -> None:
+        try:
+            self._pid_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug(f"Failed to remove pidfile {self._pid_path}: {exc}")
+
+    def _reclaim_previous_instance(self) -> None:
+        """Terminate our previous orphan (pidfile + cmdline match); skip on mismatch."""
+        prev_pid = self._read_pid()
+        if prev_pid is None:
+            return
+
+        try:
+            proc = psutil.Process(prev_pid)
+        except psutil.NoSuchProcess:
+            logger.info(f"Stale pidfile (PID {prev_pid} not running); cleaning up")
+            self._clear_pid()
+            return
+        except psutil.Error as exc:
+            logger.warning(f"Cannot inspect PID {prev_pid}: {exc}. Leaving alone.")
+            self._clear_pid()
+            return
+
+        if not self._looks_like_llama_swap(proc):
+            logger.warning(f"Pidfile PID {prev_pid} isn't llama-swap (likely PID reuse); cleaning up")
+            self._clear_pid()
+            return
+
+        logger.info(f"Reclaiming previous llama-swap (PID {prev_pid})")
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                logger.warning(f"PID {prev_pid} didn't exit on SIGTERM; sending SIGKILL")
+                proc.kill()
+                proc.wait(timeout=2)
+        except psutil.NoSuchProcess:
             pass
+        except psutil.Error as exc:
+            logger.error(f"Failed to terminate PID {prev_pid}: {exc}")
+            # Leave the pidfile so the next attempt retries.
+            return
+
+        self._clear_pid()
+
+    @staticmethod
+    def _looks_like_llama_swap(proc: psutil.Process) -> bool:
+        """Process name OR cmdline contains 'llama-swap'."""
+        try:
+            if "llama-swap" in proc.name().lower():
+                return True
+            return any("llama-swap" in arg.lower() for arg in proc.cmdline())
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
 
     # ------------------------------------------------------------------
     # Config generation
     # ------------------------------------------------------------------
 
     def _write_config(self) -> None:
-        """(Over)write the JSON config consumed by llama-swap."""
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
 
         model_entries: dict = {}
         for i, (model_id, m) in enumerate(self._models.items()):
-            # Internal llama-server ports start at _listen_port + offset, so
-            # whichever layout is in use (with or without proxy), the
-            # internal layer never overlaps with the listen port.
             internal_port = self._listen_port + self._INTERNAL_PORT_OFFSET + i
             args = [str(self._server_bin), "--model", m["path"], "--port", str(internal_port)] + m["args"]
             cmd = subprocess.list2cmdline(args) if platform.system() == "Windows" else shlex.join(args)
@@ -386,7 +362,7 @@ class SwapManager:
                 "ttl": self._MODEL_TTL,
             }
             if m["env"]:
-                # llama-swap expects env as []string of "KEY=VALUE" entries, not a map.
+                # llama-swap expects env as ["KEY=VAL", ...] not a map.
                 entry["env"] = [f"{k}={v}" for k, v in m["env"].items()]
             model_entries[model_id] = entry
 

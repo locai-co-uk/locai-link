@@ -282,9 +282,7 @@ def test_post_client_disconnect_closes_upstream(running_proxy, fake_upstream):
     # the client (triggered when the upstream emits the next chunk after
     # its 200 ms sleep). 5 seconds is a generous ceiling — typical
     # detection is well under 500 ms.
-    assert fake_upstream.got_close_for_stream.wait(timeout=5.0), (
-        "proxy did not close upstream when client disconnected"
-    )
+    assert fake_upstream.got_close_for_stream.wait(timeout=5.0), "proxy did not close upstream when client disconnected"
 
 
 def test_empty_allowlist_rejects_browser_callers(fake_upstream):

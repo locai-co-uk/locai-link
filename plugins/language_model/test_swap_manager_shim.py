@@ -67,10 +67,15 @@ class _FakeProxy:
 class _FakeProc:
     """Stand-in for the llama-swap subprocess — always reports alive until terminated."""
 
+    # Deterministic PIDs across the test suite so pidfile assertions are stable.
+    _next_pid = 90000
+
     def __init__(self, events: list) -> None:
         self.events = events
         self.returncode = None
         self._alive = True
+        _FakeProc._next_pid += 1
+        self.pid = _FakeProc._next_pid
 
     def poll(self):
         return None if self._alive else self.returncode
@@ -107,8 +112,13 @@ def _make_manager(tmp_path, monkeypatch, *, allowed_origins: list[str] | None) -
     monkeypatch.setattr(sm_mod.subprocess, "Popen", _fake_popen)
 
     sm = SwapManager(_free_base_port(), "127.0.0.1", tmp_path, allowed_origins=allowed_origins)
-    # Pretend the binary exists so _start proceeds to spawn the fake proc.
-    monkeypatch.setattr(type(sm._swap_bin), "exists", lambda _self: True, raising=False)
+    # Create the binary path so _start's existence check passes. Real file
+    # rather than a monkeypatch on Path.exists — patching the class globally
+    # makes every other Path.exists() in the process return True too, which
+    # silently breaks anything that checks for file removal (pidfile cleanup,
+    # config cleanup, etc.).
+    sm._swap_bin.parent.mkdir(parents=True, exist_ok=True)
+    sm._swap_bin.touch()
     sm._events = events  # expose for assertions
     return sm
 
@@ -204,3 +214,168 @@ def test_no_cors_remove_does_not_touch_proxy(manager_no_cors):
     manager_no_cors.remove_model("m1")
     assert manager_no_cors._cors_proxy is None
     assert not any(e[0] == "proxy_stop" for e in manager_no_cors._events)
+
+
+# ---------------------------------------------------------------------------
+# Pidfile + orphan reclaim
+# ---------------------------------------------------------------------------
+#
+# These tests pin the contract that Link survives an unclean shutdown:
+# the next _start() must identify *its own* orphan via the pidfile,
+# terminate it cleanly, and refuse to touch foreign processes.
+
+
+class _FakePsutilProcess:
+    """Stand-in for psutil.Process — controllable name/cmdline and termination."""
+
+    def __init__(self, events: list, pid: int, name: str, cmdline: list[str], alive: bool = True) -> None:
+        self.events = events
+        self.pid = pid
+        self._name = name
+        self._cmdline = cmdline
+        self._alive = alive
+
+    def name(self) -> str:
+        return self._name
+
+    def cmdline(self) -> list[str]:
+        return list(self._cmdline)
+
+    def terminate(self) -> None:
+        self.events.append(("reclaim_terminate", self.pid))
+        self._alive = False
+
+    def kill(self) -> None:
+        self.events.append(("reclaim_kill", self.pid))
+        self._alive = False
+
+    def wait(self, timeout=None):
+        return 0
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+
+def _install_fake_psutil(monkeypatch, events, *, alive_processes: dict[int, _FakePsutilProcess]):
+    """Patch sm_mod.psutil so Process(pid) hits our table.
+
+    Any PID not in ``alive_processes`` raises NoSuchProcess — which is exactly
+    what real psutil does for a dead PID.
+    """
+
+    class _NoSuchProcess(Exception):
+        pass
+
+    class _AccessDenied(Exception):
+        pass
+
+    class _TimeoutExpired(Exception):
+        pass
+
+    class _PsutilError(Exception):
+        pass
+
+    def _process(pid: int):
+        if pid not in alive_processes:
+            raise _NoSuchProcess(pid)
+        return alive_processes[pid]
+
+    fake = type("FakePsutil", (), {})()
+    fake.Process = _process
+    fake.NoSuchProcess = _NoSuchProcess
+    fake.AccessDenied = _AccessDenied
+    fake.TimeoutExpired = _TimeoutExpired
+    fake.Error = _PsutilError
+    monkeypatch.setattr(sm_mod, "psutil", fake)
+    return fake
+
+
+def test_pidfile_written_on_start(manager):
+    manager.add_model("m1", "/models/m1.gguf")
+    pidfile = manager._pid_path
+    assert pidfile.exists(), "pidfile should be created when llama-swap starts"
+    assert int(pidfile.read_text()) == manager._proc.pid
+
+
+def test_pidfile_cleared_on_stop(manager):
+    manager.add_model("m1", "/models/m1.gguf")
+    pidfile = manager._pid_path
+    assert pidfile.exists()
+    manager.remove_model("m1")
+    assert not pidfile.exists(), "pidfile should be removed when llama-swap stops cleanly"
+
+
+def test_reclaim_kills_orphan_with_matching_cmdline(tmp_path, monkeypatch):
+    """Live PID whose cmdline matches → terminate cleanly, then proceed with start."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+    sm._pid_path.parent.mkdir(parents=True, exist_ok=True)
+    sm._pid_path.write_text("4242")
+
+    orphan = _FakePsutilProcess(
+        sm._events,
+        pid=4242,
+        name="llama-swap",
+        cmdline=["/usr/local/bin/llama-swap", "--config", "swap_config_8100.json"],
+    )
+    _install_fake_psutil(monkeypatch, sm._events, alive_processes={4242: orphan})
+    # After reclaim_previous_instance terminates the orphan, the port is free.
+    monkeypatch.setattr(SwapManager, "_port_in_use", lambda _self: False)
+
+    sm.add_model("m1", "/models/m1.gguf")
+    assert ("reclaim_terminate", 4242) in sm._events
+    assert sm._pid_path.exists()  # new pid written
+    assert int(sm._pid_path.read_text()) == sm._proc.pid
+
+
+def test_reclaim_dead_pid_just_clears_pidfile(tmp_path, monkeypatch):
+    """Pidfile points at a PID nothing's using anymore → clean up, proceed."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+    sm._pid_path.parent.mkdir(parents=True, exist_ok=True)
+    sm._pid_path.write_text("9999")
+    _install_fake_psutil(monkeypatch, sm._events, alive_processes={})  # PID dead
+    monkeypatch.setattr(SwapManager, "_port_in_use", lambda _self: False)
+
+    sm.add_model("m1", "/models/m1.gguf")
+    # No reclaim_terminate event — there was nothing to terminate.
+    assert not any(e[0] == "reclaim_terminate" for e in sm._events)
+    # But the new run wrote its own pidfile.
+    assert sm._pid_path.exists()
+    assert int(sm._pid_path.read_text()) == sm._proc.pid
+
+
+def test_reclaim_skips_unrelated_process(tmp_path, monkeypatch):
+    """PID reused by something that isn't llama-swap → don't kill, clear pidfile, refuse port-conflict."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+    sm._pid_path.parent.mkdir(parents=True, exist_ok=True)
+    sm._pid_path.write_text("4242")
+
+    unrelated = _FakePsutilProcess(
+        sm._events,
+        pid=4242,
+        name="postgres",
+        cmdline=["/usr/local/bin/postgres", "-D", "/var/lib/postgresql/data"],
+    )
+    _install_fake_psutil(monkeypatch, sm._events, alive_processes={4242: unrelated})
+    # Port held by the unrelated process — should refuse rather than kill.
+    monkeypatch.setattr(SwapManager, "_port_in_use", lambda _self: True)
+
+    with pytest.raises(RuntimeError) as exc:
+        sm.add_model("m1", "/models/m1.gguf")
+    assert "we don't own" in str(exc.value)
+    # Crucially, the unrelated process was NOT terminated.
+    assert not any(e[0] in ("reclaim_terminate", "reclaim_kill") for e in sm._events)
+    # Stale pidfile was cleaned up so the next attempt starts fresh.
+    assert not sm._pid_path.exists()
+
+
+def test_foreign_port_holder_raises_without_pidfile(tmp_path, monkeypatch):
+    """No pidfile + port held by someone else → raise with diagnostic message."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+    _install_fake_psutil(monkeypatch, sm._events, alive_processes={})
+    monkeypatch.setattr(SwapManager, "_port_in_use", lambda _self: True)
+
+    with pytest.raises(RuntimeError) as exc:
+        sm.add_model("m1", "/models/m1.gguf")
+    msg = str(exc.value)
+    assert "we don't own" in msg
+    assert str(sm._listen_port) in msg  # diagnostic mentions the offending port

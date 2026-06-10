@@ -19,7 +19,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from bundle_profile import (
     MANIFEST_VERSION,
     BundleSpec,
@@ -112,9 +111,7 @@ def test_invalid_yaml(tmp_path):
 
 
 def test_plugins_must_be_strings(tmp_path):
-    (tmp_path / "x.yaml").write_text(
-        "name: x\ndisplay_name: X\ndescription: x\nasset_name: x\nplugins: [1, 2]\n"
-    )
+    (tmp_path / "x.yaml").write_text("name: x\ndisplay_name: X\ndescription: x\nasset_name: x\nplugins: [1, 2]\n")
     with pytest.raises(SystemExit) as exc:
         load_profile("x", tmp_path)
     assert "list of strings" in str(exc.value)
@@ -149,9 +146,7 @@ def test_cli_asset_name_overrides_profile():
 
 def test_cli_display_and_description_override():
     base = load_profile("safechat", PROFILES_DIR)
-    merged = merge_cli(
-        base, _cli(display_name="Custom Name", description="Custom description"), KNOWN_PLUGINS
-    )
+    merged = merge_cli(base, _cli(display_name="Custom Name", description="Custom description"), KNOWN_PLUGINS)
     assert merged.display_name == "Custom Name"
     assert merged.description == "Custom description"
 
