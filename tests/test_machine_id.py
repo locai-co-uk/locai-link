@@ -11,7 +11,7 @@ and the raw OS id must never leak — only the digest is returned.
 import hashlib
 import re
 
-import link.infra.machine_id as mid
+import link.infra.utils as mid
 
 
 def test_hash_is_64_char_lowercase_hex(mocker):
@@ -36,35 +36,35 @@ def test_raw_id_never_returned_to_caller(mocker):
 
 
 def test_linux_reader_dispatched(mocker):
-    mocker.patch("link.infra.machine_id.platform.system", return_value="Linux")
-    reader = mocker.patch("link.infra.machine_id._read_linux", return_value="linux-id")
+    mocker.patch("link.infra.utils.platform.system", return_value="Linux")
+    reader = mocker.patch("link.infra.utils._read_linux", return_value="linux-id")
     assert mid._read_raw_id() == "linux-id"
     reader.assert_called_once()
 
 
 def test_windows_reader_dispatched(mocker):
-    mocker.patch("link.infra.machine_id.platform.system", return_value="Windows")
-    mocker.patch("link.infra.machine_id._read_windows", return_value="win-guid")
+    mocker.patch("link.infra.utils.platform.system", return_value="Windows")
+    mocker.patch("link.infra.utils._read_windows", return_value="win-guid")
     assert mid._read_raw_id() == "win-guid"
 
 
 def test_macos_reader_dispatched(mocker):
-    mocker.patch("link.infra.machine_id.platform.system", return_value="Darwin")
-    mocker.patch("link.infra.machine_id._read_macos", return_value="mac-uuid")
+    mocker.patch("link.infra.utils.platform.system", return_value="Darwin")
+    mocker.patch("link.infra.utils._read_macos", return_value="mac-uuid")
     assert mid._read_raw_id() == "mac-uuid"
 
 
 def test_native_read_failure_falls_back(mocker):
     """A failing native reader must not propagate — it falls back to the UUID file."""
-    mocker.patch("link.infra.machine_id.platform.system", return_value="Linux")
-    mocker.patch("link.infra.machine_id._read_linux", side_effect=OSError("no /etc/machine-id"))
-    mocker.patch("link.infra.machine_id._fallback_id", return_value="fallback-uuid")
+    mocker.patch("link.infra.utils.platform.system", return_value="Linux")
+    mocker.patch("link.infra.utils._read_linux", side_effect=OSError("no /etc/machine-id"))
+    mocker.patch("link.infra.utils._fallback_id", return_value="fallback-uuid")
     assert mid._read_raw_id() == "fallback-uuid"
 
 
 def test_unknown_os_uses_fallback(mocker):
-    mocker.patch("link.infra.machine_id.platform.system", return_value="Plan9")
-    mocker.patch("link.infra.machine_id._fallback_id", return_value="fallback-uuid")
+    mocker.patch("link.infra.utils.platform.system", return_value="Plan9")
+    mocker.patch("link.infra.utils._fallback_id", return_value="fallback-uuid")
     assert mid._read_raw_id() == "fallback-uuid"
 
 
@@ -86,6 +86,6 @@ def test_fallback_creates_then_reuses_file(mocker, tmp_path):
 
 def test_fallback_hash_stable_across_calls(mocker, tmp_path):
     """End-to-end: with no native id, the hash is stable because the UUID persists."""
-    mocker.patch("link.infra.machine_id.platform.system", return_value="Plan9")
+    mocker.patch("link.infra.utils.platform.system", return_value="Plan9")
     mocker.patch.object(mid, "_FALLBACK_FILE", tmp_path / ".machine_id")
     assert mid.get_machine_id_hash() == mid.get_machine_id_hash()

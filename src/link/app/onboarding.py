@@ -355,7 +355,7 @@ def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
     Resolves file: key references, posts to /devices/enroll with retry/backoff,
     and writes the fleet marker on success. No user credentials required.
     """
-    from link.infra.machine_id import get_machine_id_hash
+    from link.infra.utils import get_machine_id_hash
 
     fleet_key = _resolve_fleet_key(fleet_key)
 
