@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -41,17 +41,33 @@ _DEVICE_POLL_MAX_ITERATIONS = 240
 # "wiped fleet device" (fail loudly) from a fresh interactive install (factory defaults ok).
 FLEET_MARKER_PATH = Path("configs") / ".fleet_device"
 
-# Enroll retry policy: transient failures (429, 5xx, network) use jittered backoff.
-# Permanent failures (bad key, cap full, 4xx) are not retried.
-_ENROLL_MAX_ATTEMPTS = 8
-_ENROLL_BACKOFF_BASE_SECONDS = 2.0
-_ENROLL_BACKOFF_CAP_SECONDS = 60.0
+# Onboarding retry policy: retries transient control-plane call failures (HTTP 429/5xx, network)
+# with jittered backoff; honors Retry-After. Permanent client errors are not retried.
+_RETRY_MAX_ATTEMPTS = 8
+_RETRY_BACKOFF_BASE_SECONDS = 2.0
+_RETRY_BACKOFF_CAP_SECONDS = 60.0
 # Cap on Retry-After to prevent a hostile/absurd value from stalling the agent.
 _RETRY_AFTER_HONOR_CAP_SECONDS = 300.0
 
 
 class UseDeviceFlowError(Exception):
     """HTTP 409 use_device_flow — account uses SSO, no password set."""
+
+
+def _login_permanent(resp: requests.Response) -> None:
+    """Maps a permanent /auth/login client error to the right exception.
+
+    A 409 ``use_device_flow`` is the SSO-account signal (handled as a flow switch,
+    never a retry); any other client error is a hard authentication failure. Raises
+    in both cases, so control never returns to the generic rejection path.
+    """
+    try:
+        detail = resp.json().get("detail", resp.text)
+    except Exception:
+        detail = resp.text
+    if resp.status_code == 409 and isinstance(detail, dict) and detail.get("error") == "use_device_flow":
+        raise UseDeviceFlowError(detail.get("message", "Account requires device authorization."))
+    raise RuntimeError(f"Authentication failed ({resp.status_code}): {detail}")
 
 
 def login_and_get_token(email: str, password: str, api_url: str) -> str:
@@ -71,29 +87,16 @@ def login_and_get_token(email: str, password: str, api_url: str) -> str:
         RuntimeError: If authentication fails for any other reason.
     """
     logger.info("Authenticating with the platform...")
-    try:
-        resp = requests.post(f"{api_url}/auth/login", data={"email": email, "password": password}, timeout=10)
-        if resp.status_code == 200:
-            token = resp.json().get("access_token")
-            if token:
-                logger.info("Authentication successful.")
-                return token
-            raise RuntimeError("Login succeeded but no access token returned.")
-        if resp.status_code == 409:
-            try:
-                detail = resp.json().get("detail", {})
-            except Exception:
-                detail = {}
-            if isinstance(detail, dict) and detail.get("error") == "use_device_flow":
-                raise UseDeviceFlowError(detail.get("message", "Account requires device authorization."))
-        detail = ""
-        try:
-            detail = resp.json().get("detail", resp.text)
-        except Exception:
-            detail = resp.text
-        raise RuntimeError(f"Authentication failed ({resp.status_code}): {detail}")
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Network error during authentication: {e}") from e
+    resp = _request_with_retry(
+        lambda: requests.post(f"{api_url}/auth/login", data={"email": email, "password": password}, timeout=10),
+        op_name="Authentication",
+        permanent_handler=_login_permanent,
+    )
+    token = resp.json().get("access_token")
+    if token:
+        logger.info("Authentication successful.")
+        return token
+    raise RuntimeError("Login succeeded but no access token returned.")
 
 
 def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) -> str:
@@ -106,12 +109,11 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
     if client_metadata:
         payload["client_metadata"] = client_metadata
 
-    try:
-        resp = requests.post(f"{api_url}/auth/device/code", json=payload, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Failed to initiate device authorization: {e}") from e
+    resp = _request_with_retry(
+        lambda: requests.post(f"{api_url}/auth/device/code", json=payload, timeout=10),
+        op_name="Device authorization initiation",
+    )
+    data = resp.json()
 
     device_code = data["device_code"]
     user_code = data["user_code"]
@@ -152,6 +154,14 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
                 raise RuntimeError("Device approval succeeded but no access token returned.")
             print("Device approved.", file=sys.stderr, flush=True)
             return token
+
+        # Control-plane rate limiting (not RFC 8628 slow_down). Honor any server-driven
+        # Retry-After beyond the already-elapsed poll interval, without disturbing it.
+        if resp.status_code == 429:
+            extra = _retry_after_seconds(resp)
+            if extra is not None and extra > interval:
+                time.sleep(extra - interval)
+            continue
 
         try:
             detail = resp.json().get("detail", {})
@@ -268,8 +278,10 @@ def register_device(
     headers = {"Authorization": f"Bearer {auth_token}"}
 
     try:
-        resp = requests.post(f"{api_url}/devices/register-with-key", json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
+        resp = _request_with_retry(
+            lambda: requests.post(f"{api_url}/devices/register-with-key", json=payload, headers=headers, timeout=10),
+            op_name="Device registration",
+        )
         data = resp.json()
 
         return _resolve_agent_config(
@@ -316,11 +328,11 @@ def _write_fleet_marker(device_id) -> None:
         logger.warning(f"Could not write fleet marker {FLEET_MARKER_PATH}: {e}")
 
 
-def _enroll_backoff_seconds(attempt: int) -> float:
+def _retry_backoff_seconds(attempt: int) -> float:
     """Full-jitter exponential backoff: uniform random in [0, min(cap, base*2^(n-1))]."""
     ceiling = min(
-        _ENROLL_BACKOFF_CAP_SECONDS,
-        _ENROLL_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+        _RETRY_BACKOFF_CAP_SECONDS,
+        _RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
     )
     return random.uniform(0, ceiling)
 
@@ -339,7 +351,7 @@ def _retry_after_seconds(resp) -> float | None:
     return min(secs, _RETRY_AFTER_HONOR_CAP_SECONDS)
 
 
-def _enroll_error_detail(resp) -> str:
+def _response_error_detail(resp) -> str:
     try:
         body = resp.json()
         if isinstance(body, dict) and "detail" in body:
@@ -347,6 +359,76 @@ def _enroll_error_detail(resp) -> str:
         return str(body)
     except Exception:
         return (getattr(resp, "text", "") or "")[:200]
+
+
+def _request_with_retry(
+    do_request: Callable[[], requests.Response],
+    op_name: str,
+    permanent_handler: Callable[[requests.Response], None] | None = None,
+) -> requests.Response:
+    """Issues control-plane onboarding requests, retrying transient failures.
+
+    Retries network, 429, and 5xx errors using jittered backoff and Retry-After.
+
+    Args:
+        do_request: Callable returning the HTTP response.
+        op_name: Operation name for log/error context.
+        permanent_handler: Callback on permanent failures before generic rejection.
+
+    Returns:
+        The successful Response.
+
+    Raises:
+        RuntimeError: On retry exhaustion or permanent failure.
+    """
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        try:
+            resp = do_request()
+        except requests.exceptions.RequestException as exc:
+            if attempt >= _RETRY_MAX_ATTEMPTS:
+                raise RuntimeError(f"{op_name} failed after {attempt} attempts (network error): {exc}") from exc
+            delay = _retry_backoff_seconds(attempt)
+            logger.warning(
+                "%s attempt %d/%d failed (network error: %s); retrying in %.1fs",
+                op_name,
+                attempt,
+                _RETRY_MAX_ATTEMPTS,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        status_code = resp.status_code
+
+        # Transient: 429 (rate-limited) and 5xx.
+        if status_code == 429 or 500 <= status_code < 600:
+            if attempt >= _RETRY_MAX_ATTEMPTS:
+                raise RuntimeError(f"{op_name} failed after {attempt} attempts (HTTP {status_code}).")
+            delay = _retry_after_seconds(resp)
+            if delay is None:
+                delay = _retry_backoff_seconds(attempt)
+            logger.warning(
+                "%s attempt %d/%d got HTTP %d; retrying in %.1fs",
+                op_name,
+                attempt,
+                _RETRY_MAX_ATTEMPTS,
+                status_code,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        # Permanent: any other client error (4xx).
+        if status_code >= 400:
+            if permanent_handler is not None:
+                permanent_handler(resp)
+            raise RuntimeError(f"{op_name} rejected (HTTP {status_code}): {_response_error_detail(resp)}")
+
+        return resp
+
+    # Defensive: the loop returns, retries, or raises on the final attempt.
+    raise RuntimeError(f"{op_name} failed: no response received.")
 
 
 def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
@@ -375,60 +457,14 @@ def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
 
     headers = {"Authorization": f"Bearer {fleet_key}"}
 
-    data: dict[str, Any] | None = None
-    for attempt in range(1, _ENROLL_MAX_ATTEMPTS + 1):
-        try:
-            resp = requests.post(
-                f"{api_url}/devices/enroll",
-                json=payload,
-                headers=headers,
-                timeout=15,
-            )
-        except requests.exceptions.RequestException as exc:
-            if attempt >= _ENROLL_MAX_ATTEMPTS:
-                raise RuntimeError(f"Fleet enrollment failed after {attempt} attempts (network error): {exc}") from exc
-            delay = _enroll_backoff_seconds(attempt)
-            logger.warning(
-                "Enroll attempt %d/%d failed (network error: %s); retrying in %.1fs",
-                attempt,
-                _ENROLL_MAX_ATTEMPTS,
-                exc,
-                delay,
-            )
-            time.sleep(delay)
-            continue
-
-        status_code = resp.status_code
-
-        if status_code == 200:
-            try:
-                data = resp.json()
-            except ValueError as exc:
-                raise RuntimeError(f"Enrollment response was not valid JSON: {exc}") from exc
-            break
-
-        # Transient: 429 (rate-limited) and 5xx.
-        if status_code == 429 or 500 <= status_code < 600:
-            if attempt >= _ENROLL_MAX_ATTEMPTS:
-                raise RuntimeError(f"Fleet enrollment failed after {attempt} attempts (HTTP {status_code}).")
-            delay = _retry_after_seconds(resp)
-            if delay is None:
-                delay = _enroll_backoff_seconds(attempt)
-            logger.warning(
-                "Enroll attempt %d/%d got HTTP %d; retrying in %.1fs",
-                attempt,
-                _ENROLL_MAX_ATTEMPTS,
-                status_code,
-                delay,
-            )
-            time.sleep(delay)
-            continue
-
-        # Permanent: 401/403 (bad/expired key), 409 (cap full), 422, other 4xx.
-        raise RuntimeError(f"Fleet enrollment rejected (HTTP {status_code}): {_enroll_error_detail(resp)}")
-
-    if data is None:
-        raise RuntimeError("Fleet enrollment failed: no response received.")
+    resp = _request_with_retry(
+        lambda: requests.post(f"{api_url}/devices/enroll", json=payload, headers=headers, timeout=15),
+        op_name="Fleet enrollment",
+    )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Enrollment response was not valid JSON: {exc}") from exc
 
     device_id = data.get("device_id")
     api_key = data.get("api_key")
@@ -465,8 +501,10 @@ def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:
     payload = {"device_id": device_id, "registration_key": reg_key, "device_type": "edge_device"}
 
     try:
-        resp = requests.post(f"{api_url}/agent/activate-with-key", json=payload, timeout=10)
-        resp.raise_for_status()
+        resp = _request_with_retry(
+            lambda: requests.post(f"{api_url}/agent/activate-with-key", json=payload, timeout=10),
+            op_name="Device activation",
+        )
         data = resp.json()
 
         return _resolve_agent_config(
