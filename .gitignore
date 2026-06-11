@@ -25,6 +25,8 @@ models/**
 **/.todo
 
 configs/session*.json
+configs/swap_config_*.json
+configs/.fleet_device
 state
 
 **/*.pem
