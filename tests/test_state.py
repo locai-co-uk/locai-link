@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import json
+import os
+import stat
+
+import pytest
 
 from link.app.state import StateManager
 from link.config.models import AgentConfig
@@ -203,3 +207,35 @@ def test_update_full_config_replaces_non_pipeline_fields(tmp_path):
 
     data = json.loads(mgr.current_session_path.read_text())
     assert data["reporting"]["interval"] == 120
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes; Windows uses directory ACLs")
+def test_session_file_is_owner_only(tmp_path):
+    """Session files hold the device api_key and must be created mode 0600."""
+    mgr = StateManager()
+    mgr.STATE_DIR = tmp_path
+
+    config = AgentConfig.model_validate(
+        {"version": 2.1, "identity": {"device_id": "d", "api_key": "secret"}, "pipelines": []}
+    )
+    mgr.bootstrap(config)
+
+    assert mgr.current_session_path is not None
+    mode = stat.S_IMODE(os.stat(mgr.current_session_path).st_mode)
+    assert mode == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes; Windows uses directory ACLs")
+def test_load_tightens_legacy_session_permissions(tmp_path):
+    """Pre-existing world-readable session files are chmodded to 0600 on load."""
+    state = {"version": 2.1, "identity": {"device_id": "d1"}, "pipelines": []}
+    session_file = tmp_path / "session_20260101_120000.json"
+    session_file.write_text(json.dumps(state))
+    os.chmod(session_file, 0o644)
+
+    mgr = StateManager()
+    mgr.STATE_DIR = tmp_path
+    assert mgr.load_state() is not None
+
+    mode = stat.S_IMODE(os.stat(session_file).st_mode)
+    assert mode == 0o600

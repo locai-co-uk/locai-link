@@ -4,10 +4,14 @@
 """Device registration and activation against the Loc.ai control plane."""
 
 import getpass
+import json
 import logging
 import platform
+import random
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -23,23 +27,31 @@ from link.config.models import (
     TransportConfig,
 )
 from link.config.templating import resolve_templates
-from link.utils.logger import _AGENT_VERSION, _resolve_agent_version
+from link.utils.version import resolve_agent_version
 
 logger = logging.getLogger(__name__)
 
-# RFC 8628 grant_type — long enough to merit a name.
+# RFC 8628 grant_type.
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 
-# Hard cap on poll-loop iterations (defense in depth — the backend's
-# `expired_token` is the authoritative terminator). expires_in is 600s with
-# a 5s interval, so ~120 polls; we cap at 240 to leave headroom for slow_down.
+# expires_in is 600s with a 5s interval (~120 polls); cap at 240 to leave room for slow_down.
 _DEVICE_POLL_MAX_ITERATIONS = 240
+
+# Non-secret marker written after successful fleet enrollment. Lets `run` distinguish
+# "wiped fleet device" (fail loudly) from a fresh interactive install (factory defaults ok).
+FLEET_MARKER_PATH = Path("configs") / ".fleet_device"
+
+# Enroll retry policy: transient failures (429, 5xx, network) use jittered backoff.
+# Permanent failures (bad key, cap full, 4xx) are not retried.
+_ENROLL_MAX_ATTEMPTS = 8
+_ENROLL_BACKOFF_BASE_SECONDS = 2.0
+_ENROLL_BACKOFF_CAP_SECONDS = 60.0
+# Cap on Retry-After to prevent a hostile/absurd value from stalling the agent.
+_RETRY_AFTER_HONOR_CAP_SECONDS = 300.0
 
 
 class UseDeviceFlowError(Exception):
-    """Backend signalled HTTP 409 `use_device_flow` — caller should fall through
-    to the OAuth 2.0 Device Authorization Grant. Not an error condition per se;
-    a control-flow signal that the account has no password set (SSO-only)."""
+    """HTTP 409 use_device_flow — account uses SSO, no password set."""
 
 
 def login_and_get_token(email: str, password: str, api_url: str) -> str:
@@ -74,7 +86,6 @@ def login_and_get_token(email: str, password: str, api_url: str) -> str:
                 detail = {}
             if isinstance(detail, dict) and detail.get("error") == "use_device_flow":
                 raise UseDeviceFlowError(detail.get("message", "Account requires device authorization."))
-            # 409 without the expected payload — fall through to generic failure.
         detail = ""
         try:
             detail = resp.json().get("detail", resp.text)
@@ -88,24 +99,8 @@ def login_and_get_token(email: str, password: str, api_url: str) -> str:
 def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) -> str:
     """Drives the OAuth 2.0 Device Authorization Grant (RFC 8628) from the CLI.
 
-    Asks the backend for a `user_code` + `verification_uri`, prints them to
-    stderr so the user can approve in a browser on any device, then polls
-    `/auth/device/token` per RFC §3.5 until the request is approved, denied,
-    or expired. Used as a fallback for SSO-only users who cannot complete
-    the password flow.
-
-    Args:
-        api_url: The API base URL (already includes the `/api/v1` prefix).
-        client_metadata: Optional `{device_name, os, hostname}` shown to the
-            user on the approval page so they can confirm which device is
-            asking. Omitted from the request body when None.
-
-    Returns:
-        str: The JWT access token.
-
-    Raises:
-        RuntimeError: On `access_denied`, `expired_token`, or any unrecoverable
-            HTTP / network failure.
+    Prints a verification URI/code to stderr, then polls until approved, denied, or expired.
+    Used as a fallback for SSO-only users who cannot complete the password flow.
     """
     payload: dict[str, Any] = {}
     if client_metadata:
@@ -124,8 +119,7 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
     verification_uri_complete = data.get("verification_uri_complete", verification_uri)
     interval = int(data.get("interval", 5))
 
-    # Banner to stderr — matches getpass convention so it stays visible
-    # regardless of stdout redirection.
+    # Print to stderr so the banner stays visible regardless of stdout redirection.
     print(
         "\n"
         "To authenticate, open this URL on any device:\n"
@@ -149,9 +143,6 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
         try:
             resp = requests.post(token_url, json=token_body, timeout=10)
         except requests.exceptions.RequestException as e:
-            # Transient network blip — keep polling. The user has up to
-            # `expires_in` seconds to complete approval; the backend's
-            # `expired_token` is the authoritative terminator.
             logger.warning(f"Network error while polling for device authorization: {e}")
             continue
 
@@ -162,7 +153,6 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
             print("Device approved.", file=sys.stderr, flush=True)
             return token
 
-        # Non-200: parse RFC §3.5 error code.
         try:
             detail = resp.json().get("detail", {})
             error = detail.get("error") if isinstance(detail, dict) else None
@@ -179,7 +169,6 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
         if error == "expired_token":
             raise RuntimeError("Device authorization expired — please re-run.")
 
-        # Anything else — surface the raw response so the user can debug.
         raise RuntimeError(f"Device authorization failed ({resp.status_code}): {resp.text}")
 
     raise RuntimeError("Device authorization timed out.")
@@ -215,10 +204,7 @@ def _resolve_token(
         if password is None:
             password = getpass.getpass("Enter platform password (leave blank for SSO accounts): ")
         if not password:
-            # Empty password → skip the login call and go straight to device
-            # flow. The backend's form parser rejects empty passwords with 422
-            # before the SSO check runs, so we can't probe via /auth/login; and
-            # an empty password is never valid for a password user anyway.
+            # Empty password: skip /auth/login (backend rejects it with 422 before the SSO check).
             print(
                 "No password provided; using device authorization flow.",
                 file=sys.stderr,
@@ -262,9 +248,6 @@ def register_device(
     """
     logger.info(f"Registering new device: {name}")
 
-    # client_metadata is shown on the /link approval page so the user can
-    # confirm which device is asking before approving. Best-effort — falls
-    # back gracefully if platform inspection fails on exotic runtimes.
     client_metadata = {
         "device_name": name,
         "os": platform.system(),
@@ -272,7 +255,7 @@ def register_device(
     }
     auth_token = _resolve_token(email, password, token, api_url, client_metadata=client_metadata)
 
-    _agent_ver = _AGENT_VERSION or _resolve_agent_version()
+    _agent_ver = resolve_agent_version()
     _metadata: dict[str, Any] = {"os": platform.system(), "arch": platform.machine()}
     if _agent_ver:
         _metadata["agent_version"] = _agent_ver
@@ -302,6 +285,170 @@ def register_device(
         raise
 
 
+def _resolve_fleet_key(value: str) -> str:
+    """Resolves the --fleet-key arg to the actual key; accepts the key itself or file:<path>."""
+    if not value.startswith("file:"):
+        return value
+    key_path = Path(value[len("file:") :])
+    try:
+        key = key_path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise RuntimeError(f"Could not read fleet key file {key_path}: {e}") from e
+    if not key:
+        raise RuntimeError(f"Fleet key file {key_path} is empty.")
+    return key
+
+
+def _write_fleet_marker(device_id) -> None:
+    """Persists the fleet-device marker (best-effort, contains no secrets)."""
+    try:
+        FLEET_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FLEET_MARKER_PATH.write_text(
+            json.dumps(
+                {
+                    "enrolled_at": datetime.now(timezone.utc).isoformat(),
+                    "device_id": str(device_id),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.warning(f"Could not write fleet marker {FLEET_MARKER_PATH}: {e}")
+
+
+def _enroll_backoff_seconds(attempt: int) -> float:
+    """Full-jitter exponential backoff: uniform random in [0, min(cap, base*2^(n-1))]."""
+    ceiling = min(
+        _ENROLL_BACKOFF_CAP_SECONDS,
+        _ENROLL_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+    )
+    return random.uniform(0, ceiling)
+
+
+def _retry_after_seconds(resp) -> float | None:
+    """Returns the Retry-After header in seconds if present and parseable, else None. Capped."""
+    raw = resp.headers.get("Retry-After") if getattr(resp, "headers", None) else None
+    if not raw:
+        return None
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if secs < 0:
+        return None
+    return min(secs, _RETRY_AFTER_HONOR_CAP_SECONDS)
+
+
+def _enroll_error_detail(resp) -> str:
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and "detail" in body:
+            return str(body["detail"])
+        return str(body)
+    except Exception:
+        return (getattr(resp, "text", "") or "")[:200]
+
+
+def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
+    """Headless fleet enrollment via a reusable org-scoped fleet key.
+
+    Resolves file: key references, posts to /devices/enroll with retry/backoff,
+    and writes the fleet marker on success. No user credentials required.
+    """
+    from link.infra.utils import get_machine_id_hash
+
+    fleet_key = _resolve_fleet_key(fleet_key)
+
+    logger.info("Starting headless fleet enrollment...")
+
+    machine_id_hash = get_machine_id_hash()
+
+    _agent_ver = resolve_agent_version()
+    payload: dict[str, Any] = {
+        "machine_id_hash": machine_id_hash,
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "hostname": platform.node(),
+    }
+    if _agent_ver:
+        payload["agent_version"] = _agent_ver
+
+    headers = {"Authorization": f"Bearer {fleet_key}"}
+
+    data: dict[str, Any] | None = None
+    for attempt in range(1, _ENROLL_MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                f"{api_url}/devices/enroll",
+                json=payload,
+                headers=headers,
+                timeout=15,
+            )
+        except requests.exceptions.RequestException as exc:
+            if attempt >= _ENROLL_MAX_ATTEMPTS:
+                raise RuntimeError(f"Fleet enrollment failed after {attempt} attempts (network error): {exc}") from exc
+            delay = _enroll_backoff_seconds(attempt)
+            logger.warning(
+                "Enroll attempt %d/%d failed (network error: %s); retrying in %.1fs",
+                attempt,
+                _ENROLL_MAX_ATTEMPTS,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        status_code = resp.status_code
+
+        if status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise RuntimeError(f"Enrollment response was not valid JSON: {exc}") from exc
+            break
+
+        # Transient: 429 (rate-limited) and 5xx.
+        if status_code == 429 or 500 <= status_code < 600:
+            if attempt >= _ENROLL_MAX_ATTEMPTS:
+                raise RuntimeError(f"Fleet enrollment failed after {attempt} attempts (HTTP {status_code}).")
+            delay = _retry_after_seconds(resp)
+            if delay is None:
+                delay = _enroll_backoff_seconds(attempt)
+            logger.warning(
+                "Enroll attempt %d/%d got HTTP %d; retrying in %.1fs",
+                attempt,
+                _ENROLL_MAX_ATTEMPTS,
+                status_code,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        # Permanent: 401/403 (bad/expired key), 409 (cap full), 422, other 4xx.
+        raise RuntimeError(f"Fleet enrollment rejected (HTTP {status_code}): {_enroll_error_detail(resp)}")
+
+    if data is None:
+        raise RuntimeError("Fleet enrollment failed: no response received.")
+
+    device_id = data.get("device_id")
+    api_key = data.get("api_key")
+    if not device_id or not api_key:
+        raise RuntimeError(f"Enrollment response missing device_id or api_key: {data}")
+
+    device_name = data.get("device_name") or device_id
+    logger.info(f"Fleet enrollment successful. Device: {device_name} ({device_id})")
+
+    _write_fleet_marker(device_id)
+
+    return _resolve_agent_config(
+        server_config=data.get("config"),
+        device_id=device_id,
+        device_name=device_name,
+        api_key=api_key,
+        api_url=api_url,
+    )
+
+
 def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:
     """Exchanges a Registration Key + Existing Device ID for a NEW API Key.
 
@@ -325,7 +472,7 @@ def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:
         return _resolve_agent_config(
             server_config=data.get("config"),
             device_id=device_id,
-            device_name="recovered-device",  # Name is already on server
+            device_name="recovered-device",
             api_key=data["api_key"],
             api_url=api_url,
         )

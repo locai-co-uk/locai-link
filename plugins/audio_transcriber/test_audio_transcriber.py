@@ -9,6 +9,7 @@ verifies health + transcription, then shuts down cleanly.
 
 import shutil
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -26,6 +27,23 @@ AUDIO_PATH = TEMP_DIR / "jfk.wav"
 TEST_PORT = 8098
 
 
+def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> None:
+    """Download url to path, retrying on 429 with jittered backoff."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
+                shutil.copyfileobj(resp, f)  # type: ignore
+            return
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == max_attempts:
+                raise
+            retry_after = int(exc.headers.get("Retry-After", 0))
+            wait = max(retry_after, min(2**attempt, 60))
+            print(f"\nRate-limited downloading {label} (attempt {attempt}/{max_attempts}); retrying in {wait}s...")
+            time.sleep(wait)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def setup_teardown():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,9 +54,7 @@ def setup_teardown():
     ]:
         if not path.exists():
             print(f"\nDownloading {label} to {path}...")
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
-                shutil.copyfileobj(resp, f)  # type: ignore
+            _download(url, path, label)
 
     yield
 
