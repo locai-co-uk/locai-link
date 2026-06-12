@@ -9,55 +9,13 @@ import queue
 import sys
 import threading
 import time
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 from typing import Any
 
 import requests
 from pydantic import BaseModel
 
+from link.utils.version import resolve_agent_version
 
-def _resolve_agent_version() -> str | None:
-    """Determine the agent version, tolerating uninstalled checkouts.
-
-    Resolution order:
-    1. importlib.metadata — works when the package is installed with dist-info.
-    2. pyproject.toml walk-up from __file__ — works for editable installs where
-       the source tree is directly on sys.path.
-    3. pyproject.toml walk-up from sys.argv[0] — works on Mac/Windows when
-       uv run main.py is invoked from the project root and __file__ points deep
-       into site-packages beyond the 8-level walk limit.
-    """
-    try:
-        v = version("locai-link")
-        if v:
-            return v
-    except (PackageNotFoundError, Exception):
-        pass
-
-    try:
-        import tomllib
-
-        search_roots = [Path(__file__).resolve()]
-        if getattr(sys, "argv", None) and sys.argv[0]:
-            search_roots.append(Path(sys.argv[0]).resolve())
-
-        for start in search_roots:
-            for parent in [start, *start.parents]:
-                candidate = parent / "pyproject.toml"
-                if not candidate.is_file():
-                    continue
-                data = tomllib.loads(candidate.read_text(encoding="utf-8"))
-                project = data.get("project") or {}
-                if project.get("name") == "locai-link" and "version" in project:
-                    return project["version"]
-    except Exception:
-        pass
-
-    return None
-
-
-_AGENT_VERSION: str | None = _resolve_agent_version()
 _SEVERITY_MAP = {
     "DEBUG": "info",
     "INFO": "info",
@@ -119,7 +77,7 @@ class LinkReporter(logging.Logger):
             status (str): The lifecycle status ('online' or 'offline').
         """
         payload: dict[str, Any] = {"status": status}
-        v = _AGENT_VERSION or _resolve_agent_version()
+        v = resolve_agent_version()
         if v:
             payload["agent_version"] = v
         if status == "offline":
