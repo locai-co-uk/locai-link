@@ -203,7 +203,7 @@ def run(args: argparse.Namespace):
         except Exception as e:
             logger.warning(f"State corrupted ({e}).")
 
-    # C. JIT Onboarding
+    # C. Fallback ladder: JIT onboarding → fleet-marker fail-loud → factory defaults.
     if agent_config is None:
         api_url = args.api_url or DEFAULT_API_URL
         if args.registration_key:
@@ -237,24 +237,21 @@ def run(args: argparse.Namespace):
             except Exception as e:
                 logger.critical(f"Fleet enrollment failed: {e}", exc_info=True)
                 sys.exit(1)
-
-    # D0. Fail loudly for wiped fleet devices — re-enrollment is required.
-    if agent_config is None and FLEET_MARKER_PATH.exists():
-        logger.critical(
-            "This device was fleet-enrolled but no local session was found. "
-            "Re-run enrollment with --fleet-key (normally done by the partner installer)."
-        )
-        sys.exit(1)
-
-    # D. Factory Defaults
-    if agent_config is None:
-        logger.info("Initialising from default configuration.")
-        try:
-            agent_config = load_config(Path("configs/default_config.json").absolute())
-            state_manager.bootstrap(agent_config)
-        except Exception as e:
-            logger.critical(f"Default Config Load Failed: {e}")
+        elif FLEET_MARKER_PATH.exists():
+            # Wiped fleet device — refuse to silently re-bootstrap as a fresh agent.
+            logger.critical(
+                "This device was fleet-enrolled but no local session was found. "
+                "Re-run enrollment with --fleet-key (normally done by the partner installer)."
+            )
             sys.exit(1)
+        else:
+            logger.info("Initialising from default configuration.")
+            try:
+                agent_config = load_config(Path("configs/default_config.json").absolute())
+                state_manager.bootstrap(agent_config)
+            except Exception as e:
+                logger.critical(f"Default Config Load Failed: {e}")
+                sys.exit(1)
 
     # --- PHASE 2: DEPLOYMENT ---
     if args.prod:
