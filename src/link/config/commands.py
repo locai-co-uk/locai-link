@@ -76,6 +76,31 @@ class StopServingCommand(_CommandBase):
     pipeline_id: str
 
 
+class UninstallModelCommand(_CommandBase):
+    """Drop a pipeline's config and delete its on-disk artifact."""
+
+    type: Literal["UNINSTALL_MODEL"] = "UNINSTALL_MODEL"
+    pipeline_id: str
+    force_stop: bool = Field(
+        default=False,
+        description="Stop the pipeline first if it's running, instead of refusing.",
+    )
+    # Orphaned-file fallback: let the agent locate the artifact under models/ even
+    # when it no longer has a local config for this pipeline.
+    filename_on_server: str | None = None
+    file_extension: str | None = None
+
+
+class UpdatePipelineCommand(_CommandBase):
+    """Replace a deployed pipeline's definition with an updated one."""
+
+    type: Literal["UPDATE_PIPELINE"] = "UPDATE_PIPELINE"
+    pipeline_id: str
+    config: PipelineConfig = Field(
+        description="Complete pipeline definition; stored as-is and restarted if running.",
+    )
+
+
 class StatusCommand(_CommandBase):
     """Emit a status snapshot to the agent's log."""
 
@@ -103,6 +128,8 @@ Command = Annotated[
         StopModelInferenceCommand,
         StartServingCommand,
         StopServingCommand,
+        UninstallModelCommand,
+        UpdatePipelineCommand,
         StatusCommand,
         UpdateAgentCommand,
         UpdateAgentConfigCommand,
