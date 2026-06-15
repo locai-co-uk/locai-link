@@ -3,20 +3,25 @@
 
 """End-to-end Link bundle build.
 
-A *profile* (``bundling/profiles/<name>.yaml``) is the canonical recipe:
-which plugins to compile in, what to name the artifact, what to stamp
-into ``manifest.json``. CLI flags can override individual fields or
-build from scratch with no profile at all.
+A bundle is identified by the plugin set compiled into it. The artifact
+name is derived from that plugin set (see ``bundling/manifest.py`` for
+the codes and ordering). There is no separate "profile" concept — the
+plugin list IS the recipe.
+
+Bare (zero-plugin) bundles aren't a release shape; for that, use the
+source install path (``curl … | bash`` from the README).
 
 Examples::
-    # Profile-driven (the reproducible release path)
-    uv run python bundling/build.py --profile meetily
 
-    # Profile + override (debug a single field)
-    uv run python bundling/build.py --profile safechat --asset-name locai-link-test
+    uv run python bundling/build.py --plugins language_model
+    uv run python bundling/build.py --plugins language_model audio_transcriber
 
-    # Pure CLI (ad-hoc, no committed profile)
-    uv run python bundling/build.py --plugins language_model --asset-name locai-link-x
+Steps:
+    1. Validate plugin selection against the known + codable set.
+    2. Pre-fetch native binaries needed by the selected plugins.
+    3. Editable-install each plugin so its dist-info is visible to PyInstaller.
+    4. Run PyInstaller (with LOCAI_BUNDLE_PLUGINS in the env).
+    5. Write manifest.json into the bundle root.
 """
 
 import argparse
@@ -28,12 +33,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from bundle_profile import (  # type: ignore[import-not-found]
-    BundleSpec,
-    empty_spec,
-    load_profile,
-    merge_cli,
-    validate,
+from manifest import (  # type: ignore[import-not-found]
+    PLUGIN_CODES,
+    derive_asset_name,
     write_manifest,
 )
 from prefetch import PREFETCHERS, _platform_tag  # type: ignore[import-not-found]
@@ -41,17 +43,11 @@ from prefetch import PREFETCHERS, _platform_tag  # type: ignore[import-not-found
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
-PROFILES_DIR = SPEC_DIR / "profiles"
 
-# Plugins this bundler knows how to include.  A plugin appearing in
-# bundling.prefetch.PREFETCHERS has native binaries that must be staged before
-# PyInstaller runs; the rest are pure Python.
-KNOWN_PLUGINS: list[str] = [
-    "language_model",
-    "audio_transcriber",
-    "audio_classifier",
-    "image_classifier",
-]
+# Bundleable plugins — the keys of PLUGIN_CODES, in their canonical order.
+# Anything outside this set is a config error at parse time; bundling a
+# plugin without a code would produce an un-nameable artifact.
+KNOWN_PLUGINS: list[str] = list(PLUGIN_CODES.keys())
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -61,34 +57,32 @@ def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def _resolve_spec(args: argparse.Namespace) -> BundleSpec:
-    """Profile (if any) + CLI overrides → final BundleSpec."""
-    spec = load_profile(args.profile, PROFILES_DIR) if args.profile else empty_spec()
-    spec = merge_cli(spec, args, KNOWN_PLUGINS)
-    if not spec.plugins:
+def _resolve_plugins(args: argparse.Namespace) -> tuple[str, ...]:
+    if not args.plugins:
         raise SystemExit(
-            "No plugins selected.\n"
-            "Pass --profile <name>, --plugins <name> [<name> ...], or --all-plugins.\n"
-            f"Known plugins: {', '.join(KNOWN_PLUGINS)}\n"
-            f"Available profiles: {', '.join(sorted(p.stem for p in PROFILES_DIR.glob('*.yaml')))}"
+            "No plugins selected. Pass --plugins <name> [<name> ...].\n"
+            f"Bundleable plugins: {', '.join(KNOWN_PLUGINS)}\n"
+            "Bare bundles aren't a release shape; use the curl source install instead."
         )
-    validate(spec, KNOWN_PLUGINS)
-    return spec
+    unknown = [p for p in args.plugins if p not in KNOWN_PLUGINS]
+    if unknown:
+        raise SystemExit(f"Unknown plugins: {', '.join(unknown)}\nBundleable plugins: {', '.join(KNOWN_PLUGINS)}")
+    # De-dupe + canonicalise via PLUGIN_CODES order
+    seen = set(args.plugins)
+    return tuple(p for p in KNOWN_PLUGINS if p in seen)
 
 
 def run_prefetch(plugins: tuple[str, ...], tag: str) -> None:
-    """Stage native binaries for whichever selected plugins need them."""
     artifacts_root = SPEC_DIR / "_artifacts" / tag
     for name in plugins:
         prefetcher = PREFETCHERS.get(name)
         if prefetcher is None:
-            continue  # pure-Python plugin, nothing to stage
+            continue
         logger.info(f"Pre-fetching native binaries for {name}")
         prefetcher(artifacts_root)
 
 
 def ensure_plugins_installed(plugins: tuple[str, ...]) -> None:
-    """Editable-install each selected plugin into the active venv."""
     if not _have("uv"):
         raise SystemExit("uv is required to install plugins. https://docs.astral.sh/uv/")
     for name in plugins:
@@ -124,70 +118,33 @@ def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-
     parser.add_argument(
-        "--profile",
-        metavar="NAME",
-        help=(
-            "Load bundling/profiles/<NAME>.yaml as the base recipe. "
-            "CLI flags below override profile values. "
-            f"Available: {', '.join(sorted(p.stem for p in PROFILES_DIR.glob('*.yaml'))) or '(none)'}"
-        ),
-    )
-
-    plugin_group = parser.add_mutually_exclusive_group()
-    plugin_group.add_argument(
         "--plugins",
         nargs="+",
+        required=True,
         metavar="NAME",
-        help=f"Plugins to include. Known: {', '.join(KNOWN_PLUGINS)}. Overrides --profile.",
+        help=f"Plugins to compile into the bundle. Bundleable: {', '.join(KNOWN_PLUGINS)}.",
     )
-    plugin_group.add_argument(
-        "--all-plugins",
-        action="store_true",
-        help="Include every known plugin. Rarely what you want — see PROFILES.md.",
-    )
-
-    parser.add_argument(
-        "--asset-name",
-        metavar="NAME",
-        default=None,
-        help="Artifact name prefix (becomes part of the release filename). Overrides --profile.",
-    )
-    parser.add_argument(
-        "--display-name",
-        metavar="TEXT",
-        default=None,
-        help="Human-readable name for manifest.json. Overrides --profile.",
-    )
-    parser.add_argument(
-        "--description",
-        metavar="TEXT",
-        default=None,
-        help="Free-text description for manifest.json. Overrides --profile.",
-    )
-
     args = parser.parse_args()
 
-    spec = _resolve_spec(args)
+    plugins = _resolve_plugins(args)
     tag = _platform_tag(_pf.system(), _pf.machine())
+    asset_name = derive_asset_name(plugins)
 
     logger.info(f"== Bundle target: {tag} ==")
-    logger.info(f"== Profile: {spec.name} ({spec.display_name}) ==")
-    logger.info(f"== Plugins: {', '.join(spec.plugins)} ==")
-    logger.info(f"== Asset name: {spec.asset_name} ==")
+    logger.info(f"== Plugins: {', '.join(plugins)} ==")
+    logger.info(f"== Asset name: {asset_name} ==")
 
-    run_prefetch(spec.plugins, tag)
-    ensure_plugins_installed(spec.plugins)
-    bundle_dir = run_pyinstaller(spec.plugins)
-    manifest_path = write_manifest(bundle_dir, spec, REPO_ROOT)
+    run_prefetch(plugins, tag)
+    ensure_plugins_installed(plugins)
+    bundle_dir = run_pyinstaller(plugins)
+    manifest_path = write_manifest(bundle_dir, list(plugins), REPO_ROOT)
 
     logger.info(f"Manifest written: {manifest_path}")
     logger.info(f"Bundle ready: {bundle_dir}")
     logger.info(f"Test with: {bundle_dir / 'locai-link'} --help")
     logger.info(
-        f"Package as: {spec.asset_name}-{tag}-<version>.tar.gz "
-        "(or .zip on Windows) — CI reads asset_name from manifest.json."
+        f"Package as: {asset_name}-{tag}-v<version>.tar.gz (.zip on Windows). CI reads asset_name from manifest.json."
     )
 
 
