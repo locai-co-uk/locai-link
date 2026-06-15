@@ -46,17 +46,17 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.11"
-            asset_basename: locai-link-linux-x86_64
+            platform_tag: linux-x86_64
             archive_ext: tar.gz
           - os: windows-latest
             python: "3.11"
-            asset_basename: locai-link-windows-x86_64
+            platform_tag: windows-x86_64
             archive_ext: zip
           - os: macos-latest
             python: "3.11"
             # GitHub-hosted macos-latest is arm64; x86_64 needs a separate
             # runner (`macos-13`) when we choose to add Intel support.
-            asset_basename: locai-link-macos-arm64
+            platform_tag: macos-arm64
             archive_ext: tar.gz
 
     steps:
@@ -110,6 +110,18 @@ jobs:
       - name: Build bundle
         shell: bash
         run: uv run python bundling/build.py --plugins language_model audio_transcriber
+
+      - name: Read asset name from manifest
+        id: manifest
+        shell: bash
+        # Single source of truth: build.py writes the derived asset name into
+        # dist/locai-link/manifest.json. Reading it back here means changing
+        # --plugins above auto-updates the published filename, no matrix edit.
+        run: |
+          set -euo pipefail
+          ASSET_BASE=$(python -c "import json,sys; print(json.load(open('dist/locai-link/manifest.json'))['asset_name'])")
+          echo "asset_base=$ASSET_BASE" >> "$GITHUB_OUTPUT"
+          echo "Asset basename from manifest: $ASSET_BASE"
 
       # macOS signing block — same logic as bundle.yml. On a release we
       # treat missing secrets as a hard error rather than skipping; we
@@ -185,14 +197,12 @@ jobs:
       # locally; the .sha256 sidecar lets users verify the download.
       - name: Package bundle
         shell: bash
-        # All vars in one env block — the prior version had two separate
-        # `env:` keys which is invalid YAML and GitHub rejected the file
-        # at parse time. ARCHIVE_EXT drives the if/else (tar vs zip),
-        # ASSET is the full filename used by both the archive step and
-        # the Python heredoc (env-passed so the heredoc subprocess sees it).
+        # Asset filename composes the build-derived basename (from
+        # manifest.json, e.g. locai-link-llm-stt), the platform tag
+        # (matrix), and the release tag.
         env:
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
-          ASSET: ${{ matrix.asset_basename }}-${{ steps.tag.outputs.name }}.${{ matrix.archive_ext }}
+          ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ steps.tag.outputs.name }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets

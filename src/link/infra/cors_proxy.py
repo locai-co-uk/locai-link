@@ -220,9 +220,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         #    which calls http.client.HTTPResponse.read(N). Per the stdlib
         #    docs that *should* return up to N bytes immediately, but in
         #    practice with chunked transfer encoding it can block until
-        #    a full N bytes accumulate. To bypass this we go one layer
-        #    deeper and use raw.read1, which yields as bytes arrive on
-        #    the socket regardless of HTTP framing boundaries.
+        #    a full N bytes accumulate.
         try:
             while True:
                 chunk = resp.raw.read1(8192)

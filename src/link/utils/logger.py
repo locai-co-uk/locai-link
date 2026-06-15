@@ -415,10 +415,6 @@ def rebuild_handlers(logging_config: Any, reporting_config: Any, zenoh_session: 
     preserved; only its handler set is swapped. AsyncHandler worker threads
     are stopped via `.close()` before the handlers are dropped.
 
-    Note: in-flight records in AsyncHandler queues may be dropped at close time.
-    Plugins that add handlers directly to `logging.getLogger(...)` will have
-    those handlers removed too — plugins should not install their own handlers.
-
     Args:
         logging_config: New `LoggingConfig` (or dict).
         reporting_config: New `ReportingConfig` (or dict).
