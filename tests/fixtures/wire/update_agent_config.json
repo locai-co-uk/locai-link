@@ -1,0 +1,13 @@
+{
+  "id": "cmd_updatecfg_0001",
+  "type": "UPDATE_AGENT_CONFIG",
+  "agent_config": {
+    "version": 2.1,
+    "identity": {
+      "device_id": "${identity.device_id}",
+      "api_url": "https://api.locai.co.uk",
+      "api_key": "device-key"
+    },
+    "pipelines": []
+  }
+}

@@ -186,17 +186,15 @@ def test_identity_templates_resolved(agent):
 def test_dispatch_via_handle_command(agent):
     cmd = {
         "id": "cmd-1",
-        "command": "UPDATE_AGENT_CONFIG",
-        "payload": {
-            "agent_config": {
-                "version": 2.1,
-                "identity": {
-                    "device_id": "dev-1",
-                    "api_url": "https://api.test",
-                    "api_key": "key-1",
-                },
-                "pipelines": [],
-            }
+        "type": "UPDATE_AGENT_CONFIG",
+        "agent_config": {
+            "version": 2.1,
+            "identity": {
+                "device_id": "dev-1",
+                "api_url": "https://api.test",
+                "api_key": "key-1",
+            },
+            "pipelines": [],
         },
     }
 
@@ -204,10 +202,12 @@ def test_dispatch_via_handle_command(agent):
     assert agent.pipeline_configs == {}
 
 
-def test_dispatch_rejects_missing_payload(agent):
+def test_dispatch_rejects_missing_agent_config(agent):
     original = dict(agent.pipeline_configs)
 
-    cmd = {"id": "cmd-1", "command": "UPDATE_AGENT_CONFIG", "payload": {}}
+    # agent_config is required by the schema; without it the command fails
+    # validation and is reported failed, leaving state untouched.
+    cmd = {"id": "cmd-1", "type": "UPDATE_AGENT_CONFIG"}
     agent.handle_command(cmd)
 
     # Unchanged

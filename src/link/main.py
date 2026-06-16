@@ -9,7 +9,7 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-from link.app.onboarding import activate_device, register_device
+from link.app.onboarding import FLEET_MARKER_PATH, activate_device, enroll_device, register_device
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
 from link.app.updater import pull_and_update, reinstall_plugin_binaries
@@ -166,6 +166,7 @@ def run(args: argparse.Namespace):
     agent_config = None
 
     # --- PHASE 1: RESOLVE IDENTITY ---
+
     # A. CLI Override
     if args.config:
         config_path = (cwd / args.config).absolute()
@@ -202,43 +203,55 @@ def run(args: argparse.Namespace):
         except Exception as e:
             logger.warning(f"State corrupted ({e}).")
 
-    # C. JIT Onboarding
-    if agent_config is None and args.registration_key:
-        api_url = args.api_url if args.api_url else DEFAULT_API_URL
-        try:
-            if args.device_name and (args.email or args.token):
-                agent_config = register_device(
-                    name=args.device_name,
-                    reg_key=args.registration_key,
-                    api_url=api_url,
-                    email=args.email,
-                    password=getattr(args, "password", None),
-                    token=args.token,
-                )
-            elif args.device_id:
-                agent_config = activate_device(
-                    device_id=args.device_id,
-                    reg_key=args.registration_key,
-                    api_url=api_url,
-                )
-            else:
-                logger.critical("Onboarding requires (--device-name AND --email/--token) OR (--device-id)")
-                sys.exit(1)
-
-            state_manager.bootstrap(agent_config)
-        except Exception as e:
-            logger.critical(f"Onboarding failed: {e}", exc_info=True)
-            sys.exit(1)
-
-    # D. Factory Defaults
+    # C. Fallback ladder: JIT onboarding → fleet-marker fail-loud → factory defaults.
     if agent_config is None:
-        logger.info("Initialising from default configuration.")
-        try:
-            agent_config = load_config(Path("configs/default_config.json").absolute())
-            state_manager.bootstrap(agent_config)
-        except Exception as e:
-            logger.critical(f"Default Config Load Failed: {e}")
+        api_url = args.api_url or DEFAULT_API_URL
+        if args.registration_key:
+            try:
+                if args.device_name and (args.email or args.token):
+                    agent_config = register_device(
+                        name=args.device_name,
+                        reg_key=args.registration_key,
+                        api_url=api_url,
+                        email=args.email,
+                        password=args.password,
+                        token=args.token,
+                    )
+                elif args.device_id:
+                    agent_config = activate_device(
+                        device_id=args.device_id,
+                        reg_key=args.registration_key,
+                        api_url=api_url,
+                    )
+                else:
+                    logger.critical("Onboarding requires (--device-name AND --email/--token) OR (--device-id)")
+                    sys.exit(1)
+                state_manager.bootstrap(agent_config)
+            except Exception as e:
+                logger.critical(f"Onboarding failed: {e}", exc_info=True)
+                sys.exit(1)
+        elif args.fleet_key:
+            try:
+                agent_config = enroll_device(fleet_key=args.fleet_key, api_url=api_url)
+                state_manager.bootstrap(agent_config)
+            except Exception as e:
+                logger.critical(f"Fleet enrollment failed: {e}", exc_info=True)
+                sys.exit(1)
+        elif FLEET_MARKER_PATH.exists():
+            # Wiped fleet device — refuse to silently re-bootstrap as a fresh agent.
+            logger.critical(
+                "This device was fleet-enrolled but no local session was found. "
+                "Re-run enrollment with --fleet-key (normally done by the partner installer)."
+            )
             sys.exit(1)
+        else:
+            logger.info("Initialising from default configuration.")
+            try:
+                agent_config = load_config(Path("configs/default_config.json").absolute())
+                state_manager.bootstrap(agent_config)
+            except Exception as e:
+                logger.critical(f"Default Config Load Failed: {e}")
+                sys.exit(1)
 
     # --- PHASE 2: DEPLOYMENT ---
     if args.prod:
@@ -275,11 +288,8 @@ def run(args: argparse.Namespace):
         logger.critical(f"Runtime crash: {e}")
         sys.exit(1)
     finally:
-        # Flush logging handlers BEFORE closing the Zenoh session — otherwise
-        # the offline lifecycle message (queued by AsyncZenohHandler in the
-        # runtime's finally block) would be drained against an already-closed
-        # session and silently dropped. logging.shutdown() calls handler.close()
-        # on every handler, which now drains its queue (see AsyncHandler.close).
+        # Flush logging handlers BEFORE closing Zenoh — the offline lifecycle message queued
+        # by AsyncZenohHandler must drain against an open session, not a closed one.
         try:
             logging.shutdown()
         except Exception:
@@ -331,12 +341,14 @@ def _deploy_service(cwd: Path):
     python_exe = cwd / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     cmd = f"{python_exe} main.py run"
 
+    svc_env: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
+
     agent = ServiceManager(
         "locai-link",
         cmd,
         "Loc.ai Agent",
         str(cwd),
-        env_vars={"PYTHONUNBUFFERED": "1"},
+        env_vars=svc_env,
     )
 
     try:
@@ -454,6 +466,10 @@ def main():
     run_p.add_argument("--password", help="Platform password (prompted securely if omitted).")
     run_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email/password).")
     run_p.add_argument("--api-url", help="Override API URL.")
+    run_p.add_argument(
+        "--fleet-key",
+        help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
+    )
 
     # Install (one-liner orchestrator)
     install_p = subparsers.add_parser("install", help="Full installation wizard.")

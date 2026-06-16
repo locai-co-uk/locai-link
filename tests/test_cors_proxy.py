@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""End-to-end behaviour tests for the CORS shim.
+"""End-to-end behaviour tests for the CORS proxy.
 
 Each test stands up a fake "upstream" HTTP server (simulating llama-swap)
-plus a CorsShim pointing at it, then exercises the shim with real HTTP
+plus a CorsProxy pointing at it, then exercises the proxy with real HTTP
 requests. Each fixture obtains OS-assigned free ports via _free_port() so
 tests can run in parallel without colliding.
 
@@ -32,10 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 import requests
 
-try:
-    from .cors_shim import CorsShim, _resolve_allowed_origins
-except ImportError:
-    from cors_shim import CorsShim, _resolve_allowed_origins  # type: ignore
+from link.infra.cors_proxy import CorsProxy
 
 
 def _free_port() -> int:
@@ -51,7 +48,7 @@ def _free_port() -> int:
 
 
 class _FakeUpstream:
-    """Programmable HTTP server mocking llama-swap for the shim's upstream."""
+    """Programmable HTTP server mocking llama-swap for the proxy's upstream."""
 
     def __init__(self, port: int) -> None:
         self.port = port
@@ -91,7 +88,7 @@ class _FakeUpstream:
                 # Emit five SSE chunks with a 200 ms gap between each.
                 # The gap has to be larger than urllib3's read coalescing
                 # threshold (~50 ms in practice) so honest streaming is
-                # observable on the receiving end — if the shim were
+                # observable on the receiving end — if the proxy were
                 # buffering, the chunks would all arrive within a few
                 # milliseconds at the end. Each chunk is padded above
                 # urllib3's read-ahead size so it can't fit two together
@@ -104,7 +101,7 @@ class _FakeUpstream:
                         self.wfile.flush()
                         time.sleep(0.2)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    # Shim disconnected — that's exactly the signal we want
+                    # Proxy disconnected — that's exactly the signal we want
                     # to record for the disconnect test. On Windows the
                     # severed connection surfaces as ConnectionAbortedError
                     # (WinError 10053) rather than BrokenPipeError.
@@ -131,15 +128,21 @@ def fake_upstream():
 
 
 @pytest.fixture
-def running_shim(fake_upstream):
-    """A CorsShim bound to a free port, forwarding to the fake upstream."""
+def running_proxy(fake_upstream):
+    """A CorsProxy bound to a free port, forwarding to the fake upstream.
+
+    Origins are passed via the constructor — the surface the agent config
+    plumbs through. The proxy ships with no baked-in origins; callers
+    have to supply their own.
+    """
     public_port = _free_port()
-    shim = CorsShim(
+    proxy = CorsProxy(
         public_port=public_port,
         upstream_port=fake_upstream.port,
+        allowed_origins=["http://localhost:3000"],
         host="127.0.0.1",
     )
-    shim.start()
+    proxy.start()
     # Tiny settle so the server thread is accepting before tests hit it.
     deadline = time.time() + 2.0
     while time.time() < deadline:
@@ -148,9 +151,9 @@ def running_shim(fake_upstream):
                 break
         time.sleep(0.02)
     try:
-        yield (shim, public_port)
+        yield (proxy, public_port)
     finally:
-        shim.stop()
+        proxy.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +161,8 @@ def running_shim(fake_upstream):
 # ---------------------------------------------------------------------------
 
 
-def test_options_preflight_includes_lna_header(running_shim):
-    _shim, port = running_shim
+def test_options_preflight_includes_lna_header(running_proxy):
+    _proxy, port = running_proxy
     resp = requests.options(
         f"http://127.0.0.1:{port}/v1/chat/completions",
         headers={
@@ -180,8 +183,8 @@ def test_options_preflight_includes_lna_header(running_shim):
     assert resp.headers.get("Vary") == "Origin"
 
 
-def test_options_disallowed_origin_omits_acao(running_shim):
-    _shim, port = running_shim
+def test_options_disallowed_origin_omits_acao(running_proxy):
+    _proxy, port = running_proxy
     resp = requests.options(
         f"http://127.0.0.1:{port}/v1/chat/completions",
         headers={"Origin": "https://evil.example.com"},
@@ -193,8 +196,8 @@ def test_options_disallowed_origin_omits_acao(running_shim):
     assert resp.headers.get("Vary") == "Origin"
 
 
-def test_get_models_passes_through(running_shim):
-    _shim, port = running_shim
+def test_get_models_passes_through(running_proxy):
+    _proxy, port = running_proxy
     resp = requests.get(
         f"http://127.0.0.1:{port}/v1/models",
         headers={"Origin": "http://localhost:3000"},
@@ -205,9 +208,9 @@ def test_get_models_passes_through(running_shim):
     assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
 
 
-def test_get_no_origin_pass_through_for_cli_callers(running_shim):
+def test_get_no_origin_pass_through_for_cli_callers(running_proxy):
     """Non-browser callers (curl, requests, etc.) work without CORS pollution."""
-    _shim, port = running_shim
+    _proxy, port = running_proxy
     resp = requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=5)
     assert resp.status_code == 200
     assert resp.json() == {"data": [{"id": "fake-model"}]}
@@ -217,13 +220,12 @@ def test_get_no_origin_pass_through_for_cli_callers(running_shim):
     assert resp.headers.get("Vary") == "Origin"
 
 
-def test_post_streams_chunks_progressively(running_shim):
-    """Total response time must reflect upstream pacing — no shim buffering.
+def test_post_streams_chunks_progressively(running_proxy):
+    """Total response time must reflect upstream pacing — no proxy buffering.
 
     The fake upstream sends 5 chunks with 200 ms gaps = at least 800 ms of
-    inter-chunk waiting. If the shim buffered the whole response, the
-    client would see everything in one burst at the end (still 800 ms
-    total wall clock, but no progressive arrival). To distinguish:
+    inter-chunk waiting. If the proxy buffered the whole response, the
+    client would see everything in one burst at the end.
 
       - We measure the time from POST until the FIRST chunk arrives.
         Buffered = ~1000 ms (after upstream finishes); streaming = ~200 ms
@@ -231,7 +233,7 @@ def test_post_streams_chunks_progressively(running_shim):
       - We assert the first chunk arrived well before the last chunk would
         have been sent. Anything < 600 ms proves we're streaming.
     """
-    _shim, port = running_shim
+    _proxy, port = running_proxy
     payload = {"model": "fake-model", "messages": [{"role": "user", "content": "hi"}]}
 
     request_start = time.monotonic()
@@ -256,60 +258,61 @@ def test_post_streams_chunks_progressively(running_shim):
 
     assert first_chunk_at is not None, "no chunks received"
     time_to_first_byte = first_chunk_at - request_start
-    # Upstream emits 5 chunks at 200 ms intervals (total ~1000 ms). If the
-    # shim were buffering, first-chunk arrival would be ~1000 ms. Streaming
-    # cleanly puts it at ~200 ms.
-    assert time_to_first_byte < 0.6, f"first chunk arrived after {time_to_first_byte:.3f}s — shim is buffering"
-    # And we should have received all 5 chunks' worth of content.
+    assert time_to_first_byte < 0.6, f"first chunk arrived after {time_to_first_byte:.3f}s — proxy is buffering"
     assert body.count(b"chunk-") == 5, f"received {body.count(b'chunk-')} chunks, expected 5"
 
 
-def test_post_client_disconnect_closes_upstream(running_shim, fake_upstream):
+def test_post_client_disconnect_closes_upstream(running_proxy, fake_upstream):
     """Bailing mid-stream releases llama-swap's maxConcurrent=1 slot."""
-    _shim, port = running_shim
+    _proxy, port = running_proxy
     payload = {"model": "fake-model", "messages": [{"role": "user", "content": "hi"}]}
 
-    # Open the streaming POST, read the first chunk, abandon the connection.
-    # The fake upstream sets its `got_close_for_stream` flag in its except
-    # block when it observes the broken pipe.
     with requests.post(
         f"http://127.0.0.1:{port}/v1/chat/completions",
         json=payload,
         stream=True,
         timeout=10,
     ) as resp:
-        # chunk_size > 0 — see test_post_streams_chunks_progressively
-        # comment on why iter_content(None) is a buffering trap.
         for raw in resp.iter_content(chunk_size=64):
             if raw:
                 break  # got at least one chunk, now abandon
         resp.close()
 
-    # Give the shim time to notice the broken pipe on its NEXT write to
+    # Give the proxy time to notice the broken pipe on its NEXT write to
     # the client (triggered when the upstream emits the next chunk after
     # its 200 ms sleep). 5 seconds is a generous ceiling — typical
     # detection is well under 500 ms.
-    assert fake_upstream.got_close_for_stream.wait(timeout=5.0), "shim did not close upstream when client disconnected"
+    assert fake_upstream.got_close_for_stream.wait(timeout=5.0), "proxy did not close upstream when client disconnected"
 
 
-def test_env_override_allowlist(monkeypatch):
-    """LOCAI_CORS_ALLOWED_ORIGINS extends the static defaults."""
-    monkeypatch.setenv(
-        "LOCAI_CORS_ALLOWED_ORIGINS",
-        "https://partner-a.example.com,https://partner-b.example.com",
+def test_empty_allowlist_rejects_browser_callers(fake_upstream):
+    """A proxy constructed with no origins echoes no ACAO (secure default)."""
+    public_port = _free_port()
+    proxy = CorsProxy(
+        public_port=public_port,
+        upstream_port=fake_upstream.port,
+        allowed_origins=[],
+        host="127.0.0.1",
     )
-    origins = _resolve_allowed_origins()
-    # Use the set <= (subset) operator so CodeQL sees unambiguous exact set
-    # membership, not a substring check — `"url" in set` is exact in Python
-    # but CodeQL's py/incomplete-url-substring-sanitization rule fires anyway.
-    assert {"https://partner-a.example.com", "https://partner-b.example.com"} <= origins
-    # The static defaults must still be present.
-    assert {"http://localhost:3000"} <= origins
+    proxy.start()
+    try:
+        resp = requests.options(
+            f"http://127.0.0.1:{public_port}/v1/chat/completions",
+            headers={"Origin": "http://localhost:3000"},
+            timeout=5,
+        )
+        # Preflight still returns 204 (the proxy doesn't 4xx unknown origins)
+        # but with no ACAO — Chrome will fail the actual request, which is
+        # the secure-by-default outcome.
+        assert resp.status_code == 204
+        assert "Access-Control-Allow-Origin" not in resp.headers
+        assert resp.headers.get("Vary") == "Origin"
+    finally:
+        proxy.stop()
 
 
-def test_double_start_is_idempotent(running_shim):
-    shim, _port = running_shim
-    # Already started by the fixture; a second start() should no-op,
-    # not raise.
-    shim.start()
-    assert shim.is_running()
+def test_double_start_is_idempotent(running_proxy):
+    proxy, _port = running_proxy
+    # Already started by the fixture; a second start() should no-op, not raise.
+    proxy.start()
+    assert proxy.is_running()

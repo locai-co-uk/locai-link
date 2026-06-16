@@ -73,7 +73,7 @@ convention = "google"
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra -q -m 'not ci'"
-pythonpath = ["src"]
+pythonpath = ["src", "bundling"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [

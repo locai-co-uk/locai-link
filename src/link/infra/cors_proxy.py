@@ -1,56 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Browser-facing CORS / streaming proxy in front of llama-swap.
-
-Why this exists
----------------
-llama-swap doesn't answer CORS preflights and doesn't set
-``Access-Control-*`` headers. Browser-direct partner integrations
-(SafeChat, Tauri webviews, etc.) require both, plus Chrome 142+'s Local
-Network Access permission grant. This shim sits on the public port the
-browser already targets and forwards every request to llama-swap on a
-loopback-only port, attaching CORS headers and answering preflights.
-
-Port arrangement
-----------------
-The shim owns the **public** port — browsers and CLI users keep targeting
-the port they were always told about. llama-swap is moved to a loopback
-internal port one offset away (see ``SwapManager._SHIM_OFFSET``).
-
-    public_port    -> CorsShim (browser-facing, CORS)
-    upstream_port  -> llama-swap on 127.0.0.1 only
-    upstream_port + 100 + i -> llama-server per model (internal)
-
-CLI / native HTTP clients are unaffected: requests without an ``Origin``
-header are forwarded transparently with no CORS headers attached (no need
-— they're not subject to browser same-origin enforcement). Browser clients
-must be in the allowlist to receive the echoed ``Access-Control-Allow-Origin``.
-
-The allowlist is hard-coded for the two well-known clients (SafeChat prod
-+ ``localhost:3000`` for local dev) AND env-overridable via the
-``LOCAI_CORS_ALLOWED_ORIGINS`` env var (comma-separated). Env override
-exists so partners on staging/feature-flag environments don't need a Link
-release to register their origin.
-
-Streaming semantics
--------------------
-``POST /v1/chat/completions`` forwards with ``stream=True`` and re-emits
-chunks via ``iter_content(chunk_size=None)`` so each upstream chunk is
-flushed to the client immediately — no buffering. ``Connection: close``
-on responses simplifies the stream lifecycle (each chat completion is
-its own TCP connection).
-
-If the client disconnects mid-stream, we catch ``BrokenPipeError`` /
-``ConnectionResetError`` and call ``response.close()`` to release
-llama-swap's single ``maxConcurrent`` slot — otherwise a cancelled stream
-would wedge the swap until model TTL expiry.
-"""
-
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,30 +13,8 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-# Default allowlist — well-known browser clients. Adding here requires a
-# Link release; for ad-hoc additions use the LOCAI_CORS_ALLOWED_ORIGINS
-# env var.
-_DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = (
-    "https://safechat.locai.co.uk",
-    "https://dev.safechat.locai.co.uk",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-)
-
-
-def _resolve_allowed_origins(extra: list[str] | None = None) -> set[str]:
-    """Default allowlist + LOCAI_CORS_ALLOWED_ORIGINS env override + caller extras."""
-    origins: set[str] = set(_DEFAULT_ALLOWED_ORIGINS)
-    env = os.environ.get("LOCAI_CORS_ALLOWED_ORIGINS", "")
-    if env:
-        origins.update(o.strip() for o in env.split(",") if o.strip())
-    if extra:
-        origins.update(extra)
-    return origins
-
-
-class _ShimServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer carrying shim-scoped config to handlers.
+class _ProxyServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer carrying proxy-scoped config to handlers.
 
     Threading is required (not the single-threaded HTTPServer): a long-
     running streaming POST must not block /health and /v1/models polls
@@ -99,33 +30,33 @@ class _ShimServer(ThreadingHTTPServer):
         upstream_base_url: str,
         allowed_origins: set[str],
     ) -> None:
-        super().__init__(server_address, _ShimHandler)
+        super().__init__(server_address, _ProxyHandler)
         self.upstream_base_url = upstream_base_url
         self.allowed_origins = allowed_origins
 
 
-class _ShimHandler(BaseHTTPRequestHandler):
+class _ProxyHandler(BaseHTTPRequestHandler):
     """OPTIONS / GET / POST endpoints — everything else returns 404.
 
     Surface intentionally minimal: only the three llama-swap endpoints
-    SafeChat actually hits. Adding routes here is a deliberate design
-    decision, not a "throw a kitchen sink in front" — we don't want this
-    to become a general HTTP proxy.
+    used by browser clients today (preflight, model list, chat
+    completions). Adding routes here is a deliberate design decision,
+    not a "throw a kitchen sink in front" — we don't want this to become
+    a general HTTP proxy.
     """
 
     # Suppress BaseHTTPRequestHandler's default per-request stderr log spam;
-    # route through Python logging instead so the shim respects link's
+    # route through Python logging instead so the proxy respects link's
     # logging config.
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        logger.debug("[cors_shim] %s - %s", self.address_string(), format % args)
+        logger.debug("[cors_proxy] %s - %s", self.address_string(), format % args)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _shim_server(self) -> _ShimServer:
-        # self.server is typed as `BaseServer` by stdlib; assert for clarity.
-        assert isinstance(self.server, _ShimServer)
+    def _proxy_server(self) -> _ProxyServer:
+        assert isinstance(self.server, _ProxyServer)
         return self.server
 
     def _resolve_echo_origin(self) -> str | None:
@@ -138,16 +69,16 @@ class _ShimHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin", "").strip()
         if not origin:
             return None
-        if origin in self._shim_server().allowed_origins:
+        if origin in self._proxy_server().allowed_origins:
             return origin
-        logger.debug("[cors_shim] rejecting origin %r (not in allowlist)", origin)
+        logger.debug("[cors_proxy] rejecting origin %r (not in allowlist)", origin)
         return None
 
     def _send_cors_response_headers(self, echo_origin: str | None) -> None:
         """Standard ACAO + Vary pair sent on every non-preflight response."""
         if echo_origin:
             if "\r" in echo_origin or "\n" in echo_origin:
-                logger.warning("[cors_shim] refused unsafe origin value for ACAO")
+                logger.warning("[cors_proxy] refused unsafe origin value for ACAO")
             else:
                 self.send_header("Access-Control-Allow-Origin", echo_origin)
         # Always Vary on Origin even when no ACAO is sent — tells caches
@@ -172,29 +103,14 @@ class _ShimHandler(BaseHTTPRequestHandler):
         return out
 
     def _safe_send_error(self, code: int, message: str) -> None:
-        """send_error that swallows write failures to an already-closed socket.
-
-        A status poll whose client has navigated away (or a poll that arrives
-        in the brief window between llama-swap stopping and the shim being
-        torn down) leaves us writing the error body to a dead socket.
-        BaseHTTPRequestHandler would let the resulting OSError escape the
-        worker thread and dump a multi-frame traceback to stderr (the
-        ``WinError 10053`` noise). Log one line instead.
-        """
+        """send_error that swallows write failures to an already-closed socket."""
         try:
             self.send_error(code, message)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as exc:
-            logger.info("[cors_shim] could not send %d to client: %s", code, exc)
+            logger.info("[cors_proxy] could not send %d to client: %s", code, exc)
 
     def _safe_content_type(self, raw: str | None, default: str) -> str:
-        """Return a header-safe Content-Type, stripping CR/LF from upstream values.
-
-        Defense-in-depth against HTTP response splitting: upstream response
-        headers come from llama-swap on loopback and are trusted in practice,
-        but CodeQL flags any user-controllable value flowing into a header.
-        Strip line terminators and fall back to ``default`` if the result is
-        empty after stripping.
-        """
+        """Return a header-safe Content-Type, stripping CR/LF from upstream values."""
         if not raw:
             return default
         sanitized = raw.replace("\r", "").replace("\n", "").strip()
@@ -226,18 +142,18 @@ class _ShimHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        """Forward small JSON endpoints used by partner status/discovery."""
+        """Forward small JSON endpoints used by web clients for status/discovery."""
         if self.path not in ("/v1/models", "/health"):
             self.send_error(404, "Not Found")
             return
 
         echo_origin = self._resolve_echo_origin()
-        upstream = self._shim_server().upstream_base_url + self.path
+        upstream = self._proxy_server().upstream_base_url + self.path
 
         try:
             resp = requests.get(upstream, timeout=5, headers=self._forward_headers())
         except requests.RequestException as exc:
-            logger.warning("[cors_shim] GET %s upstream failed: %s", self.path, exc)
+            logger.warning("[cors_proxy] GET %s upstream failed: %s", self.path, exc)
             self._safe_send_error(502, "Upstream unavailable")
             return
 
@@ -251,7 +167,7 @@ class _ShimHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(resp.content)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            logger.info("[cors_shim] client disconnected during GET %s", self.path)
+            logger.info("[cors_proxy] client disconnected during GET %s", self.path)
 
     def do_POST(self) -> None:  # noqa: N802
         """Streaming chat completions. The hot path."""
@@ -262,7 +178,7 @@ class _ShimHandler(BaseHTTPRequestHandler):
         echo_origin = self._resolve_echo_origin()
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length) if content_length > 0 else b""
-        upstream = self._shim_server().upstream_base_url + self.path
+        upstream = self._proxy_server().upstream_base_url + self.path
 
         try:
             resp = requests.post(
@@ -276,7 +192,7 @@ class _ShimHandler(BaseHTTPRequestHandler):
                 timeout=600,
             )
         except requests.RequestException as exc:
-            logger.warning("[cors_shim] POST %s upstream failed: %s", self.path, exc)
+            logger.warning("[cors_proxy] POST %s upstream failed: %s", self.path, exc)
             self._safe_send_error(502, "Upstream unavailable")
             return
 
@@ -304,14 +220,7 @@ class _ShimHandler(BaseHTTPRequestHandler):
         #    which calls http.client.HTTPResponse.read(N). Per the stdlib
         #    docs that *should* return up to N bytes immediately, but in
         #    practice with chunked transfer encoding it can block until
-        #    a full N bytes accumulate. To bypass this we go one layer
-        #    deeper and use raw.read1 / raw.stream, which yields as bytes
-        #    arrive on the socket regardless of HTTP framing boundaries.
-        #
-        # resp.raw.read1(size) is what urllib3 exposes for "give me what
-        # you have right now"; the read1() semantics match os.read().
-        # decode_content=False keeps gzip/etc. transparent (upstream
-        # doesn't compress SSE anyway, but no need to decode).
+        #    a full N bytes accumulate.
         try:
             while True:
                 chunk = resp.raw.read1(8192)
@@ -320,44 +229,48 @@ class _ShimHandler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            # Client disconnected mid-stream — common when the user
-            # navigates away or hits Stop. (On Windows this surfaces as
-            # ConnectionAbortedError / WinError 10053.) Drop the upstream
-            # connection so llama-swap's maxConcurrent slot frees immediately
-            # rather than at TTL expiry.
-            logger.info("[cors_shim] client disconnected mid-stream; closing upstream")
+            # Client disconnected mid-stream — common when the user navigates
+            # away or hits Stop. (On Windows: ConnectionAbortedError /
+            # WinError 10053.) Drop the upstream so llama-swap's
+            # maxConcurrent slot frees immediately rather than at TTL expiry.
+            logger.info("[cors_proxy] client disconnected mid-stream; closing upstream")
         finally:
             resp.close()
 
 
-class CorsShim:
-    """Lifecycle wrapper around _ShimServer.
+class CorsProxy:
+    """Lifecycle wrapper around _ProxyServer.
 
     Usage::
 
-        shim = CorsShim(public_port=8100, upstream_port=8150, host="0.0.0.0")
-        shim.start()
+        proxy = CorsProxy(
+            public_port=8100,
+            upstream_port=8150,
+            allowed_origins=["https://app.example.com"],
+            host="0.0.0.0",
+        )
+        proxy.start()
         ...
-        shim.stop()
+        proxy.stop()
 
-    Idempotent ``start()`` / ``stop()`` — calling them when already in
-    the target state is a no-op. Survives upstream restarts: the shim
-    only cares about its own listen socket; upstream availability is
-    a per-request concern surfaced as 502s.
+    Idempotent ``start()`` / ``stop()`` — calling them when already in the
+    target state is a no-op. Survives upstream restarts: the proxy only
+    cares about its own listen socket; upstream availability is a
+    per-request concern surfaced as 502s.
     """
 
     def __init__(
         self,
         public_port: int,
         upstream_port: int,
+        allowed_origins: list[str] | set[str],
         host: str = "0.0.0.0",
-        extra_allowed_origins: list[str] | None = None,
     ) -> None:
         self.public_port = int(public_port)
         self.upstream_port = int(upstream_port)
         self.host = host
-        self._allowed_origins = _resolve_allowed_origins(extra_allowed_origins)
-        self._server: _ShimServer | None = None
+        self._allowed_origins: set[str] = {o for o in allowed_origins if o}
+        self._server: _ProxyServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -370,19 +283,15 @@ class CorsShim:
             if self._server is not None:
                 return  # already started
             if self._port_in_use():
-                # If a healthy shim is already on our port, reuse it —
-                # mirrors swap_manager's reuse pattern after unclean shutdown.
-                # We don't try to verify it's actually our shim (vs some
-                # other process); the caller can stop us and we'll exit
-                # cleanly without touching whatever else owns the port.
                 logger.warning(
-                    "[cors_shim] public port already in use; refusing to start. "
-                    "Send STOP_SERVING and retry if you need a clean restart."
+                    "[cors_proxy] port %d already in use; refusing to start. "
+                    "Stop the existing listener and retry if you need a clean restart.",
+                    self.public_port,
                 )
                 return
 
             upstream = f"http://127.0.0.1:{self.upstream_port}"
-            self._server = _ShimServer(
+            self._server = _ProxyServer(
                 (self.host, self.public_port),
                 upstream_base_url=upstream,
                 allowed_origins=self._allowed_origins,
@@ -390,11 +299,14 @@ class CorsShim:
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
                 daemon=True,
-                name=f"cors-shim-{self.public_port}",
+                name=f"cors-proxy-{self.public_port}",
             )
             self._thread.start()
             logger.info(
-                "CORS shim listening (allowlist: %d origins)",
+                "CORS proxy listening on http://%s:%d -> %s (allowlist: %d origins)",
+                self.host,
+                self.public_port,
+                upstream,
                 len(self._allowed_origins),
             )
 
@@ -406,10 +318,10 @@ class CorsShim:
                 self._server.shutdown()
                 self._server.server_close()
             except Exception as exc:  # noqa: BLE001 — best-effort teardown
-                logger.warning("[cors_shim] shutdown raised: %s", exc)
+                logger.warning("[cors_proxy] shutdown raised: %s", exc)
             self._server = None
             self._thread = None
-            logger.info("CORS shim stopped")
+            logger.info("CORS proxy on port %d stopped", self.public_port)
 
     def is_running(self) -> bool:
         with self._lock:
@@ -420,7 +332,5 @@ class CorsShim:
     # ------------------------------------------------------------------
 
     def _port_in_use(self) -> bool:
-        # Mirrors SwapManager._port_in_use — connect_ex returns 0 if the
-        # port is accepting connections, anything else if nothing's there.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(("127.0.0.1", self.public_port)) == 0

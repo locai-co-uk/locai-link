@@ -8,7 +8,8 @@ Build a self-contained, embeddable distribution of Link via PyInstaller.
 bundling/
 ├── README.md                  # this file
 ├── prefetch.py                # downloads native binaries into _artifacts/<platform>/
-├── build.py                   # orchestrator: prefetch → pyinstaller
+├── build.py                   # orchestrator: prefetch → pyinstaller → manifest
+├── manifest.py                # plugin codes, asset-name derivation, manifest writer
 ├── locai-link.spec            # PyInstaller spec
 ├── entitlements.plist         # macOS hardened-runtime entitlements
 ├── sign_macos.py              # codesign + notarytool + staple (macOS only)
@@ -19,22 +20,80 @@ bundling/
             └── llama-swap
 ```
 
-## Local build
+## Building a bundle
+
+A bundle is identified by its plugin set. Pass `--plugins`; the artifact
+name is derived. No profile YAMLs, no `--asset-name` override — one knob.
 
 ```bash
-# Build a Meetily-shaped bundle (LLM + transcription)
-uv run python bundling/build.py --plugins language_model audio_transcriber
+# LLM-only bundle
+uv run python bundling/build.py --plugins language_model
 
-# Or include every known plugin (avoid for partner bundles)
-uv run python bundling/build.py --all-plugins
+# LLM + transcription
+uv run python bundling/build.py --plugins language_model audio_transcriber
 ```
 
-Plugin selection is **explicit by design** — bundles are partner-scoped, so
-only the plugins listed get installed, have their dist-info collected, and
-contribute hidden imports / native binaries.  Run without arguments to see
-the known-plugin list.
+Bare (zero-plugin) bundles aren't a release shape. For that, install from
+source via the curl one-liner in the top-level README.
 
-Output goes to `dist/locai-link/`.  Native binaries are pre-fetched into
+## Asset naming convention
+
+```
+locai-link-<plugin-codes>-<os>-<arch>-v<version>.<ext>
+```
+
+Examples:
+
+```
+locai-link-llm-linux-x86_64-v1.0.14.tar.gz
+locai-link-llm-stt-linux-x86_64-v1.0.14.tar.gz
+locai-link-llm-stt-macos-arm64-v1.0.14.tar.gz
+locai-link-llm-windows-x86_64-v1.0.14.zip
+```
+
+Plugin codes (canonical, in `bundling/manifest.py::PLUGIN_CODES`):
+
+| Plugin | Code |
+|---|---|
+| `language_model` | `llm` |
+| `audio_transcriber` | `stt` |
+
+Codes appear in fixed canonical order (`llm` before `stt`), so two CI runs
+of the same plugin set always produce the same name regardless of how the
+operator typed `--plugins`.
+
+### Adding a new plugin to the bundleable set
+
+1. Add the plugin → short-code mapping to `PLUGIN_CODES` in `manifest.py`.
+2. Add the plugin to `PLUGIN_ORDER` at the position you want it to appear.
+3. Done — `--plugins <new>` now works.
+
+Without an entry in `PLUGIN_CODES`, the build hard-fails. This is intentional:
+the asset name is part of the public release surface, so adding a plugin
+should force a deliberate naming decision.
+
+## `manifest.json`
+
+Each built bundle ships a `manifest.json` at its root. Read-only metadata
+describing what was built. Not consumed by the running agent (that reads
+`configs/agent.json`). Useful for bug reports, telemetry, integrity checks.
+
+| Field | Source |
+|---|---|
+| `manifest_version` | constant (`1`); bump on schema change |
+| `asset_name` | derived from plugins (see above); read by CI for tarball naming |
+| `version` | root `pyproject.toml` `[project].version` |
+| `git_sha` | short SHA of working tree, or `"unknown"` |
+| `built_at` | UTC ISO 8601 timestamp |
+| `plugins[]` | `{name, version}` per baked-in plugin |
+
+Inspect it directly:
+
+```bash
+cat dist/locai-link/manifest.json
+```
+
+Output goes to `dist/locai-link/`. Native binaries are pre-fetched into
 `bundling/_artifacts/<os>-<arch>/` as a build-time side effect (cached
 across runs so re-builds are fast).
 

@@ -1,0 +1,8 @@
+{
+  "id": "cmd_serve_0001",
+  "type": "START_SERVING",
+  "pipeline_id": "llama-3-8b",
+  "port": 8100,
+  "host": "0.0.0.0",
+  "model_display_name": "Llama 3 8B"
+}

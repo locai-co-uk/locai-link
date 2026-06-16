@@ -4,6 +4,21 @@ All notable changes. Newest at top. The migration narrative from
 `locai-link-old` is preserved below the per-version entries as historical
 record.
 
+## [1.0.15] - 2026-06-15
+
+### Added
+- `UninstallModelCommand` and `UpdatePipelineCommand` to the typed command schema (`config/commands.py`).
+- `AgentRuntime._update_pipeline()` - applies an updated pipeline definition (`UPDATE_PIPELINE`), restarting it in place when the pipeline is already running.
+
+### Changed
+- `handle_command` now validates every command against the shared typed `Command` contract via `parse_command` (after resolving `${identity.*}` placeholders) and dispatches on the typed object. The wire format is the flat `{id, type, ...}` shape; the old `command`/`command_type`/`payload` envelope is no longer accepted. A command that fails validation is reported `failed` (when it carries an `id`) instead of being silently dropped.
+- `_deploy_model` stores the provided `config` (`PipelineConfig`) verbatim; the agent no longer derives a pipeline from `runtime_config`.
+- `AgentCommand` dedup now keys on the wire `id` field (was `command_id`).
+
+### Removed
+- `AgentRuntime._normalise_command` and `_map_runtime_to_pipeline_config`. The control plane now sends a ready-made pipeline, so the agent does no parsing or mapping.
+- The legacy `REMOVE_MODEL` command alias. Use `UNINSTALL_MODEL`.
+
 ## [1.0.9] — 2026-05-08
 
 ### Added
