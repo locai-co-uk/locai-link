@@ -151,9 +151,7 @@ def test_uninstall_running_pipeline_with_force_stop_succeeds(empty_agent, mocker
     assert "live" in empty_agent.pipelines
     mocker.patch.object(empty_agent, "status_logger")
 
-    empty_agent.handle_command(
-        {"id": "c3", "type": "UNINSTALL_MODEL", "pipeline_id": "live", "force_stop": True}
-    )
+    empty_agent.handle_command({"id": "c3", "type": "UNINSTALL_MODEL", "pipeline_id": "live", "force_stop": True})
 
     assert "live" not in empty_agent.pipelines
     assert "live" not in empty_agent.pipeline_configs

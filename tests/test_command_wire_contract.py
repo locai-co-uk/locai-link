@@ -129,6 +129,5 @@ def test_contract_fingerprint_matches():
     """
     actual = _fingerprint(FIXTURES_DIR)
     assert actual == CONTRACT_SHA256, (
-        f"Wire fixtures changed. New fingerprint: {actual}\n"
-        f"If intentional, update CONTRACT_SHA256 to match."
+        f"Wire fixtures changed. New fingerprint: {actual}\nIf intentional, update CONTRACT_SHA256 to match."
     )
