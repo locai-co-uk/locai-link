@@ -386,39 +386,56 @@ def test_foreign_port_holder_raises_without_pidfile(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Telemetry callback wiring — SwapManager forwards on_telemetry to the proxy
+# Telemetry callback wiring + multi-model fanout
 # ---------------------------------------------------------------------------
-#
-# The actual response-parsing + token-counting contract is tested directly
-# against ServingProxy in tests/test_serving_proxy.py (it's the unit that
-# owns the protocol logic). This test pins the SwapManager-side wiring:
-# the callback handed to get_swap_manager / SwapManager() must reach the
-# proxy constructor unchanged.
 
 
-def test_on_telemetry_callback_threaded_to_proxy(tmp_path, monkeypatch):
-    """The proxy is constructed with the SwapManager's on_telemetry callback."""
-
-    captured_kwargs: dict = {}
-
-    class _CapturingProxy(_FakeProxy):
-        def __init__(self, events, **kw):
-            super().__init__(events, **kw)
-            captured_kwargs.update(kw)
-
-    monkeypatch.chdir(tmp_path)
-    events: list = []
-    monkeypatch.setattr(sm_mod.time, "sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(sm_mod.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(sm_mod, "ServingProxy", lambda **kw: _CapturingProxy(events, **kw))
-    monkeypatch.setattr(sm_mod.subprocess, "Popen", lambda *_a, **_k: _FakeProc(events))
-
-    def my_callback(record: dict) -> None:
-        pass
-
-    sm = SwapManager(_free_base_port(), "127.0.0.1", tmp_path, on_telemetry=my_callback)
-    sm._swap_bin.parent.mkdir(parents=True, exist_ok=True)
-    sm._swap_bin.touch()
+def test_registered_callback_receives_fanned_out_record(tmp_path, monkeypatch):
+    """The fanout the proxy receives invokes every registered callback."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+    received: list[dict] = []
+    sm.add_telemetry_callback(received.append)
     sm.add_model("m1", "/models/m1.gguf")
 
-    assert captured_kwargs.get("on_telemetry") is my_callback
+    # The proxy is constructed with sm._fanout_telemetry; invoking it
+    # synthesises what would happen when a real inference completes.
+    sm._fanout_telemetry({"model": "m1", "tokens_generated": 7})
+
+    assert received == [{"model": "m1", "tokens_generated": 7}]
+
+
+def test_multi_model_fanout_lets_each_adapter_filter(tmp_path, monkeypatch):
+    """Two adapters on one port — fanout reaches both; each filters by model."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+
+    # Simulate two adapters' callbacks: each one keeps only its own model's records.
+    a_records: list[dict] = []
+    b_records: list[dict] = []
+
+    def adapter_a(record: dict) -> None:
+        if record.get("model") == "model-a":
+            a_records.append(record)
+
+    def adapter_b(record: dict) -> None:
+        if record.get("model") == "model-b":
+            b_records.append(record)
+
+    sm.add_telemetry_callback(adapter_a)
+    sm.add_telemetry_callback(adapter_b)
+    sm.add_model("model-a", "/models/a.gguf")
+
+    sm._fanout_telemetry({"model": "model-a", "tokens_generated": 10})
+    sm._fanout_telemetry({"model": "model-b", "tokens_generated": 20})
+
+    assert a_records == [{"model": "model-a", "tokens_generated": 10}]
+    assert b_records == [{"model": "model-b", "tokens_generated": 20}]
+
+
+def test_add_telemetry_callback_is_idempotent(tmp_path, monkeypatch):
+    """Re-registering the same callback doesn't double-fire."""
+    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
+    received: list[dict] = []
+    sm.add_telemetry_callback(received.append)
+    sm.add_telemetry_callback(received.append)  # duplicate
+    sm._fanout_telemetry({"model": "m1"})
+    assert len(received) == 1

@@ -138,9 +138,10 @@ class _ChatTelemetry:
         usage = obj.get("usage")
         if isinstance(usage, dict):
             self._usage = usage
-        model = obj.get("model")
-        if isinstance(model, str) and model:
-            self._model = model
+        # NOTE: we deliberately don't update self._model from the response. The
+        # request body's model is the canonical id (what the client asked for —
+        # the pipeline_id UUID). The response echoes the llama-server file stem,
+        # which doesn't match the adapter's id and breaks per-model attribution.
         for choice in obj.get("choices") or []:
             if not isinstance(choice, dict):
                 continue

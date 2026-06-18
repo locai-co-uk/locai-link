@@ -48,19 +48,17 @@ def get_swap_manager(
     allowed_origins: list[str] | None = None,
     on_telemetry: Callable[[dict], None] | None = None,
 ) -> "SwapManager":
-    """Return the SwapManager for (host, port). First-call args win."""
+    """Return the SwapManager for (host, port). ``allowed_origins`` is first-call only;
+    ``on_telemetry`` accumulates so multi-model servings each get their callback registered.
+    """
     key = (host, port)
     with _global_lock:
         sm = _instances.get(key)
         if sm is None:
-            sm = SwapManager(
-                port,
-                host,
-                bin_dir,
-                allowed_origins=allowed_origins,
-                on_telemetry=on_telemetry,
-            )
+            sm = SwapManager(port, host, bin_dir, allowed_origins=allowed_origins)
             _instances[key] = sm
+        if on_telemetry is not None:
+            sm.add_telemetry_callback(on_telemetry)
         return sm
 
 
@@ -79,7 +77,6 @@ class SwapManager:
         host: str,
         bin_dir: Path,
         allowed_origins: list[str] | None = None,
-        on_telemetry: Callable[[dict], None] | None = None,
     ) -> None:
         self.port = port
         self._allowed_origins: list[str] = [o for o in (allowed_origins or []) if o]
@@ -96,8 +93,27 @@ class SwapManager:
         self._models: dict[str, dict] = {}
         self._proc: subprocess.Popen | None = None
         self._proxy: ServingProxy | None = None
-        self._on_telemetry = on_telemetry
+        # One callback per adapter; each filters by record["model"] so two
+        # adapters sharing one port don't mis-attribute each other's inferences.
+        self._on_telemetry_callbacks: list[Callable[[dict], None]] = []
         self._lock = threading.RLock()
+
+    def add_telemetry_callback(self, cb: Callable[[dict], None]) -> None:
+        """Register an inference-telemetry sink. Idempotent."""
+        with self._lock:
+            if cb not in self._on_telemetry_callbacks:
+                self._on_telemetry_callbacks.append(cb)
+
+    def _fanout_telemetry(self, record: dict) -> None:
+        """ServingProxy hands each inference record here; we fan out to every
+        registered adapter. Adapters filter by record["model"] internally."""
+        with self._lock:
+            callbacks = list(self._on_telemetry_callbacks)
+        for cb in callbacks:
+            try:
+                cb(record)
+            except Exception as exc:
+                logger.debug("telemetry callback raised: %s", exc)
 
     @property
     def listen_port(self) -> int:
@@ -182,7 +198,7 @@ class SwapManager:
                     public_port=self.port,
                     upstream_port=self._listen_port,
                     allowed_origins=self._allowed_origins,
-                    on_telemetry=self._on_telemetry,
+                    on_telemetry=self._fanout_telemetry,
                     host=self.host,
                 )
             self._proxy.start()

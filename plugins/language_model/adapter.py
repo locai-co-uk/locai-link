@@ -154,6 +154,10 @@ class LanguageModel:
 
     def _on_proxy_telemetry(self, record):
         """Build a queue payload from one ServingProxy inference record (swap mode)."""
+        # Multi-model safety: a shared SwapManager fans each record to every
+        # adapter's callback. Drop records that aren't ours.
+        if record.get("model") != self.model_id:
+            return
         try:
             payload = ModelServer.build_telemetry_payload(
                 model_id=self.model_id,
