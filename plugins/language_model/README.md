@@ -27,10 +27,15 @@ When the model is serving, two ports are listening:
 llama-swap ships a built-in chat UI at `http://127.0.0.1:8150/ui/`. It's handy for triage but it talks to itself on `:8150`, so **chats from that UI never reach the ServingProxy** — no `model_inference_result_received` event, no row on the control UI's Inference Results page. If you're verifying observability, drive the model through `:8100`:
 
 ```bash
+# The "model" field must be the model's display name (what llama-swap routes by),
+# not the pipeline_id UUID. Get it from /v1/models:
+curl http://localhost:8100/v1/models
+# → {"data":[{"id":"<display_name>", ...}], ...}
+
 curl -N -X POST http://localhost:8100/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "<pipeline_id or alias from /v1/models>",
+    "model": "<display_name from /v1/models>",
     "messages": [{"role":"user","content":"hello"}],
     "stream": true,
     "stream_options": {"include_usage": true},
@@ -38,4 +43,4 @@ curl -N -X POST http://localhost:8100/v1/chat/completions \
   }'
 ```
 
-SafeChat and any other production client already point at `:8100` by default — this caveat only affects manual testing via the bundled UI.
+Backend attribution (Firestore, PostHog, control UI) still uses the pipeline_id UUID — the topic key the agent publishes on carries it, independently of what llama-swap routes by. SafeChat and any other production client already point at `:8100` by default — this caveat only affects manual testing via the bundled UI.
