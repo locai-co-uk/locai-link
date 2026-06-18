@@ -53,6 +53,7 @@ class ZenohStorageBackend(StorageBackend):
             data (Any): The data payload.
         """
         if not self.session:
+            logger.warning("Zenoh put dropped (no active session): key=%s", key)
             return
 
         payload = json.dumps(data) if isinstance(data, (dict, list)) else str(data)

@@ -1,5 +1,5 @@
-"""Infrastructure layer: OS service management, Zenoh router, provisioning, CORS proxy."""
+"""Infrastructure layer: OS service management, Zenoh router, provisioning, serving proxy."""
 
-from link.infra.cors_proxy import CorsProxy
+from link.infra.serving_proxy import ServingProxy
 
-__all__ = ["CorsProxy"]
+__all__ = ["ServingProxy"]

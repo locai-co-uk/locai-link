@@ -5,15 +5,16 @@
 
 One swap per public port; ``maxConcurrent: 1`` keeps a single model in RAM.
 
-Port layout (offsets fixed at construction):
+Port layout (ServingProxy always fronts llama-swap so telemetry capture
+runs regardless of CORS):
 
-    no CORS:  public_port  -> llama-swap  ;  public_port + 100 + i -> llama-server[i]
-    with CORS: public_port -> CorsProxy  ;  public_port + 50 -> llama-swap (loopback)
-                                          ;  public_port + 150 + i -> llama-server[i]
+    public_port      -> ServingProxy        (CORS + telemetry, both optional)
+    public_port + 50 -> llama-swap          (loopback only)
+    public_port +150 -> llama-server[i]     (one per registered model)
 
 Orphan handling: each start records its PID in ``state/swap_<port>.pid``;
-the next start reclaims its own orphan (verified by cmdline) and refuses to
-touch a foreign process holding the port. See ``_reclaim_previous_instance``.
+the next start reclaims its own orphan (cmdline-verified) and refuses to
+touch foreign processes. See ``_reclaim_previous_instance``.
 """
 
 import json
@@ -25,12 +26,13 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import psutil
 import requests
 
-from link.infra.cors_proxy import CorsProxy
+from link.infra.serving_proxy import ServingProxy
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +46,20 @@ def get_swap_manager(
     host: str,
     bin_dir: Path,
     allowed_origins: list[str] | None = None,
+    on_telemetry: Callable[[dict], None] | None = None,
 ) -> "SwapManager":
-    """Return the SwapManager for (host, port); ``allowed_origins`` honoured on first creation only."""
+    """Return the SwapManager for (host, port). First-call args win."""
     key = (host, port)
     with _global_lock:
         sm = _instances.get(key)
         if sm is None:
-            sm = SwapManager(port, host, bin_dir, allowed_origins=allowed_origins)
+            sm = SwapManager(
+                port,
+                host,
+                bin_dir,
+                allowed_origins=allowed_origins,
+                on_telemetry=on_telemetry,
+            )
             _instances[key] = sm
         return sm
 
@@ -70,11 +79,13 @@ class SwapManager:
         host: str,
         bin_dir: Path,
         allowed_origins: list[str] | None = None,
+        on_telemetry: Callable[[dict], None] | None = None,
     ) -> None:
         self.port = port
         self._allowed_origins: list[str] = [o for o in (allowed_origins or []) if o]
-        self._cors_enabled = bool(self._allowed_origins)
-        self._listen_port = port + self._PROXY_OFFSET if self._cors_enabled else port
+        # ServingProxy is universal — listen_port is always the proxy
+        # back-end. CORS is just an optional feature of the proxy.
+        self._listen_port = port + self._PROXY_OFFSET
         self.host = host
         is_win = platform.system() == "Windows"
         self._swap_bin = bin_dir / ("llama-swap.exe" if is_win else "llama-swap")
@@ -84,7 +95,8 @@ class SwapManager:
         self._pid_path = Path("state") / f"swap_{port}.pid"
         self._models: dict[str, dict] = {}
         self._proc: subprocess.Popen | None = None
-        self._cors_proxy: CorsProxy | None = None
+        self._proxy: ServingProxy | None = None
+        self._on_telemetry = on_telemetry
         self._lock = threading.RLock()
 
     @property
@@ -93,7 +105,8 @@ class SwapManager:
 
     @property
     def cors_enabled(self) -> bool:
-        return self._cors_enabled
+        """True when ACAO headers will be emitted (allowlist non-empty)."""
+        return bool(self._allowed_origins)
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,13 +118,18 @@ class SwapManager:
         model_path: str,
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        aliases: list[str] | None = None,
     ) -> None:
-        """Register a model and reload (or start) llama-swap."""
+        """Register a model and reload (or start) llama-swap.
+
+        ``aliases`` are additional names that route to the same upstream.
+        """
         with self._lock:
             self._models[model_id] = {
                 "path": model_path,
                 "args": extra_args or [],
                 "env": env or {},
+                "aliases": [a for a in (aliases or []) if a and a != model_id],
             }
             self._write_config()
             if self._is_running():
@@ -150,7 +168,7 @@ class SwapManager:
         return f"http://{self.host}:{self.port}"
 
     def is_healthy(self) -> bool:
-        """Hit llama-swap's /health on the listen port (bypasses any proxy)."""
+        """Hit llama-swap's /health on the listen port (bypasses the proxy)."""
         if self._proc is not None and self._proc.poll() is not None:
             return False
         try:
@@ -160,20 +178,19 @@ class SwapManager:
             return False
 
     def ensure_proxy(self) -> None:
-        """Idempotent. No-op when CORS is disabled or llama-swap isn't running."""
+        """Idempotent. No-op when llama-swap isn't running."""
         with self._lock:
-            if not self._cors_enabled:
-                return
             if self._proc is None or self._proc.poll() is not None:
                 return  # swap not running — nothing to front
-            if self._cors_proxy is None:
-                self._cors_proxy = CorsProxy(
+            if self._proxy is None:
+                self._proxy = ServingProxy(
                     public_port=self.port,
                     upstream_port=self._listen_port,
                     allowed_origins=self._allowed_origins,
+                    on_telemetry=self._on_telemetry,
                     host=self.host,
                 )
-            self._cors_proxy.start()
+            self._proxy.start()
 
     # ------------------------------------------------------------------
     # Process lifecycle (all called under self._lock)
@@ -197,19 +214,15 @@ class SwapManager:
                 f"`netstat -ano | findstr {self._listen_port}` (Windows) and clear it before retrying."
             )
 
-        if self._cors_enabled:
-            logger.info(
-                f"Starting llama-swap on http://127.0.0.1:{self._listen_port} "
-                f"(public port {self.port} fronted by CorsProxy)"
-            )
-            swap_bind = f"127.0.0.1:{self._listen_port}"
-        else:
-            logger.info(f"Starting llama-swap on http://{self.host}:{self._listen_port}")
-            swap_bind = f"{self.host}:{self._listen_port}"
+        logger.info(
+            f"Starting llama-swap on http://127.0.0.1:{self._listen_port} "
+            f"(public port {self.port} fronted by ServingProxy)"
+        )
+        swap_bind = f"127.0.0.1:{self._listen_port}"
 
         self._log_path.parent.mkdir(exist_ok=True)
+        # Log file is kept for human troubleshooting; telemetry comes from ServingProxy.
         log_fh = open(self._log_path, "a")  # noqa: SIM115 — kept open for subprocess lifetime
-
         self._proc = subprocess.Popen(
             [
                 str(self._swap_bin),
@@ -257,9 +270,9 @@ class SwapManager:
         self._clear_pid()
 
     def _stop_proxy(self) -> None:
-        if self._cors_proxy is not None:
-            self._cors_proxy.stop()
-            self._cors_proxy = None
+        if self._proxy is not None:
+            self._proxy.stop()
+            self._proxy = None
 
     def _reload(self) -> None:
         """SIGHUP on Linux/macOS; stop+start on Windows (no SIGHUP equivalent)."""
@@ -364,6 +377,8 @@ class SwapManager:
             if m["env"]:
                 # llama-swap expects env as ["KEY=VAL", ...] not a map.
                 entry["env"] = [f"{k}={v}" for k, v in m["env"].items()]
+            if m.get("aliases"):
+                entry["aliases"] = list(m["aliases"])
             model_entries[model_id] = entry
 
         config = {

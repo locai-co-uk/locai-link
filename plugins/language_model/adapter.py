@@ -45,6 +45,7 @@ class LanguageModel:
         host="127.0.0.1",
         port=8100,
         alias="locai-model",
+        model_aliases: list[str] | None = None,
         cors_allowed_origins: list[str] | None = None,
         **kwargs,
     ):
@@ -56,6 +57,7 @@ class LanguageModel:
             raise FileNotFoundError(f"Model not found: {self.model_path}")
 
         self.model_id = alias or self.model_path.stem
+        self._model_aliases = [a for a in (model_aliases or []) if a and a != self.model_id]
         self.n_gpu_layers = int(n_gpu_layers or 35)
         self.n_ctx = int(n_ctx or 2048)
         self.host = host
@@ -67,15 +69,21 @@ class LanguageModel:
 
         if self.mode == "serve":
             if _is_swap_installed(LLAMA_SWAP_RELEASE):
-                # Non-empty cors_allowed_origins turns on the CORS proxy.
                 self._swap_manager = get_swap_manager(
                     self.port,
                     self.host,
                     BIN_LLAMA_DIR,
                     allowed_origins=self._cors_allowed_origins,
+                    on_telemetry=self._on_proxy_telemetry,
                 )
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
-                self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
+                self._swap_manager.add_model(
+                    self.model_id,
+                    str(self.model_path),
+                    extra_args,
+                    self._build_serve_env(),
+                    aliases=self._model_aliases,
+                )
             else:
                 logger.warning("llama-swap not installed — falling back to single-model direct serve")
                 self.server = ModelServer(
@@ -152,8 +160,36 @@ class LanguageModel:
             return self.server.wait_until_ready(timeout)
         return False
 
+    def _on_proxy_telemetry(self, record):
+        """Build a queue payload from one ServingProxy inference record (swap mode)."""
+        try:
+            payload = ModelServer.build_telemetry_payload(
+                model_id=self.model_id,
+                output_text="stats_only",
+                start_time=record["start_time"],
+                end_time=record["end_time"],
+                duration=record["duration_seconds"],
+                metadata={
+                    "tokens_generated": record.get("tokens_generated", 0),
+                    "tokens_prompt": record.get("tokens_prompt", 0),
+                    "stream": record.get("stream", False),
+                    "token_source": record.get("token_source"),
+                    "source": record.get("source", "serving_proxy"),
+                },
+            )
+            if self.queue.full():
+                logger.warning(
+                    "language_model queue is full — dropping inference telemetry (size=%d). "
+                    "Downstream pipeline isn't draining fast enough.",
+                    self.queue.maxsize,
+                )
+                return
+            self.queue.put(payload)
+        except Exception as exc:
+            logger.debug(f"_on_proxy_telemetry failed: {exc}")
+
     def _on_server_log(self, line):
-        """Parse `eval time = X ms / Y tokens` lines into telemetry (serve mode)."""
+        """Parse `eval time = X ms / Y tokens` lines into telemetry (ModelServer fallback)."""
         if "eval time =" in line and "prompt" not in line:
             try:
                 dur_match = re.search(r"=\s+(\d+\.\d+)\s+ms", line)
