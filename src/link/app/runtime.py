@@ -153,8 +153,16 @@ class AgentRuntime:
                         logger.error(msg)
                         self.status_logger.report_command(cmd.id, "failed", msg)
                         return
+                    # llama-swap routes by display_name (human-readable); backend
+                    # attribution is independent — it uses pipeline_id via the
+                    # Zenoh topic key set in this pipeline's sink config.
                     config.source.args.update(
-                        {"mode": "serve", "port": cmd.port, "host": cmd.host, "alias": cmd.model_display_name}
+                        {
+                            "mode": "serve",
+                            "port": cmd.port,
+                            "host": cmd.host,
+                            "alias": cmd.model_display_name,
+                        }
                     )
                     if self.state_manager:
                         self.state_manager.update_pipeline_config(config)

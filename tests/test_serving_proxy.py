@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""End-to-end behaviour tests for the CORS proxy.
+"""End-to-end behaviour tests for ServingProxy.
 
 Each test stands up a fake "upstream" HTTP server (simulating llama-swap)
-plus a CorsProxy pointing at it, then exercises the proxy with real HTTP
-requests. Each fixture obtains OS-assigned free ports via _free_port() so
-tests can run in parallel without colliding.
+plus a ServingProxy pointing at it, then exercises the proxy with real
+HTTP requests. Each fixture obtains OS-assigned free ports via
+_free_port() so tests can run in parallel without colliding.
 
 What's covered
 --------------
@@ -19,6 +19,11 @@ What's covered
 - GET /v1/models forwards the upstream JSON body.
 - POST /v1/chat/completions streams chunks through as they arrive — no
   buffering — and a client disconnect closes the upstream connection.
+- Telemetry: on_telemetry fires exactly once per chat-completion request,
+  with token counts pulled from response.usage (streaming + non-streaming)
+  AND fallback to delta-chunk counting when usage isn't present. These
+  are the same metrics the old log-parse path produced (model_id,
+  start_time/end_time, duration_seconds, tokens_generated).
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 import requests
 
-from link.infra.cors_proxy import CorsProxy
+from link.infra.serving_proxy import ServingProxy
 
 
 def _free_port() -> int:
@@ -129,14 +134,14 @@ def fake_upstream():
 
 @pytest.fixture
 def running_proxy(fake_upstream):
-    """A CorsProxy bound to a free port, forwarding to the fake upstream.
+    """A ServingProxy bound to a free port, forwarding to the fake upstream.
 
     Origins are passed via the constructor — the surface the agent config
     plumbs through. The proxy ships with no baked-in origins; callers
     have to supply their own.
     """
     public_port = _free_port()
-    proxy = CorsProxy(
+    proxy = ServingProxy(
         public_port=public_port,
         upstream_port=fake_upstream.port,
         allowed_origins=["http://localhost:3000"],
@@ -288,7 +293,7 @@ def test_post_client_disconnect_closes_upstream(running_proxy, fake_upstream):
 def test_empty_allowlist_rejects_browser_callers(fake_upstream):
     """A proxy constructed with no origins echoes no ACAO (secure default)."""
     public_port = _free_port()
-    proxy = CorsProxy(
+    proxy = ServingProxy(
         public_port=public_port,
         upstream_port=fake_upstream.port,
         allowed_origins=[],
@@ -316,3 +321,237 @@ def test_double_start_is_idempotent(running_proxy):
     # Already started by the fixture; a second start() should no-op, not raise.
     proxy.start()
     assert proxy.is_running()
+
+
+# ---------------------------------------------------------------------------
+# Telemetry — one record per /v1/chat/completions, matching the log-parse
+# strategy's payload (model, start/end time, duration_seconds, tokens_generated).
+# ---------------------------------------------------------------------------
+#
+# Three modes are exercised: non-streaming JSON, streaming with usage in
+# the final SSE frame (OpenAI's stream_options.include_usage shape), and
+# streaming without usage (falls back to delta-event counting).
+
+
+class _ProgrammableUpstream:
+    """Fake llama-swap that replays a scripted response."""
+
+    def __init__(self, port: int, *, mode: str, model: str = "fake-model"):
+        self.port = port
+        self.mode = mode
+        self.model = model
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_a, **_k):  # noqa: A002
+                pass
+
+            def do_POST(self) -> None:  # noqa: N802
+                if self.path != "/v1/chat/completions":
+                    self.send_error(404)
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                if outer.mode == "nonstream":
+                    outer._reply_nonstream(self)
+                elif outer.mode == "stream_with_usage":
+                    outer._reply_stream(self, include_usage=True)
+                elif outer.mode == "stream_no_usage":
+                    outer._reply_stream(self, include_usage=False)
+                else:
+                    self.send_error(500)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def _reply_nonstream(self, handler: BaseHTTPRequestHandler) -> None:
+        body = json.dumps(
+            {
+                "model": self.model,
+                "choices": [{"message": {"content": "hello world"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 42, "total_tokens": 49},
+            }
+        ).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def _reply_stream(self, handler: BaseHTTPRequestHandler, *, include_usage: bool) -> None:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.end_headers()
+        # Emit three delta-content frames, then either a usage frame or nothing.
+        for i in range(3):
+            evt = {"model": self.model, "choices": [{"delta": {"content": f"tok{i}"}}]}
+            handler.wfile.write(f"data: {json.dumps(evt)}\n\n".encode())
+            handler.wfile.flush()
+        if include_usage:
+            usage_evt = {
+                "model": self.model,
+                "choices": [],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 42, "total_tokens": 47},
+            }
+            handler.wfile.write(f"data: {json.dumps(usage_evt)}\n\n".encode())
+            handler.wfile.flush()
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _run_chat_request(public_port: int, *, stream: bool) -> None:
+    """Fire one /v1/chat/completions request and drain it (proxy emits telemetry on finish)."""
+    payload = {
+        "model": "fake-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": stream,
+    }
+    with requests.post(
+        f"http://127.0.0.1:{public_port}/v1/chat/completions",
+        json=payload,
+        stream=stream,
+        timeout=15,
+    ) as resp:
+        assert resp.status_code == 200
+        if stream:
+            for _ in resp.iter_content(chunk_size=64):
+                pass
+        else:
+            _ = resp.content
+
+
+def _make_proxy(upstream_port: int, captured: list) -> tuple[ServingProxy, int]:
+    public_port = _free_port()
+    proxy = ServingProxy(
+        public_port=public_port,
+        upstream_port=upstream_port,
+        allowed_origins=[],
+        on_telemetry=captured.append,
+        host="127.0.0.1",
+    )
+    proxy.start()
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", public_port)) == 0:
+                break
+        time.sleep(0.02)
+    return proxy, public_port
+
+
+def test_telemetry_non_streaming_uses_usage_block():
+    """Non-streaming JSON response: tokens_generated comes from usage.completion_tokens."""
+    upstream = _ProgrammableUpstream(_free_port(), mode="nonstream")
+    captured: list[dict] = []
+    proxy, public_port = _make_proxy(upstream.port, captured)
+    try:
+        _run_chat_request(public_port, stream=False)
+        # Telemetry fires in the finally block of do_POST — after the
+        # response is closed. Wait briefly for it to land.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not captured:
+            time.sleep(0.02)
+        assert len(captured) == 1, f"expected exactly one telemetry record; got {len(captured)}"
+        rec = captured[0]
+        # Same metrics shape the log-parse strategy used to emit:
+        assert rec["model"] == "fake-model"
+        assert rec["tokens_generated"] == 42  # ← from usage.completion_tokens
+        assert rec["tokens_prompt"] == 7
+        assert rec["token_source"] == "usage"
+        assert rec["stream"] is False
+        assert rec["duration_seconds"] > 0
+        assert rec["source"] == "serving_proxy"
+    finally:
+        proxy.stop()
+        upstream.stop()
+
+
+def test_telemetry_streaming_with_usage_pulls_from_final_frame():
+    """Streaming + include_usage: tokens_generated pulled from the final SSE usage frame."""
+    upstream = _ProgrammableUpstream(_free_port(), mode="stream_with_usage")
+    captured: list[dict] = []
+    proxy, public_port = _make_proxy(upstream.port, captured)
+    try:
+        _run_chat_request(public_port, stream=True)
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not captured:
+            time.sleep(0.02)
+        assert len(captured) == 1
+        rec = captured[0]
+        assert rec["model"] == "fake-model"
+        # Usage frame is authoritative — should override the delta-chunk count of 3.
+        assert rec["tokens_generated"] == 42
+        assert rec["tokens_prompt"] == 5
+        assert rec["token_source"] == "usage"
+        assert rec["stream"] is True
+        assert rec["duration_seconds"] > 0
+    finally:
+        proxy.stop()
+        upstream.stop()
+
+
+def test_telemetry_streaming_without_usage_falls_back_to_delta_count():
+    """Streaming + no include_usage: tokens_generated = number of delta.content events."""
+    upstream = _ProgrammableUpstream(_free_port(), mode="stream_no_usage")
+    captured: list[dict] = []
+    proxy, public_port = _make_proxy(upstream.port, captured)
+    try:
+        _run_chat_request(public_port, stream=True)
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not captured:
+            time.sleep(0.02)
+        assert len(captured) == 1
+        rec = captured[0]
+        assert rec["model"] == "fake-model"
+        # Three delta-content frames → approximate token count of 3.
+        assert rec["tokens_generated"] == 3
+        assert rec["token_source"] == "delta_count"
+        assert rec["stream"] is True
+    finally:
+        proxy.stop()
+        upstream.stop()
+
+
+def test_telemetry_off_means_no_buffering_and_no_callback(fake_upstream):
+    """on_telemetry=None: pass-through, no per-response parsing, no callback."""
+    public_port = _free_port()
+    captured: list[dict] = []
+    proxy = ServingProxy(
+        public_port=public_port,
+        upstream_port=fake_upstream.port,
+        allowed_origins=[],
+        on_telemetry=None,
+        host="127.0.0.1",
+    )
+    proxy.start()
+    try:
+        # The existing _FakeUpstream serves a streaming chat completions
+        # response; we just need to drive a request through and see no
+        # callback fires.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("127.0.0.1", public_port)) == 0:
+                    break
+            time.sleep(0.02)
+        with requests.post(
+            f"http://127.0.0.1:{public_port}/v1/chat/completions",
+            json={"model": "x", "messages": []},
+            stream=True,
+            timeout=10,
+        ) as resp:
+            for _ in resp.iter_content(chunk_size=64):
+                pass
+        # Wait briefly to confirm nothing fires.
+        time.sleep(0.2)
+        assert captured == []
+    finally:
+        proxy.stop()

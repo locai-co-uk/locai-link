@@ -67,12 +67,12 @@ class LanguageModel:
 
         if self.mode == "serve":
             if _is_swap_installed(LLAMA_SWAP_RELEASE):
-                # Non-empty cors_allowed_origins turns on the CORS proxy.
                 self._swap_manager = get_swap_manager(
                     self.port,
                     self.host,
                     BIN_LLAMA_DIR,
                     allowed_origins=self._cors_allowed_origins,
+                    on_telemetry=self._on_proxy_telemetry,
                 )
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
                 self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
@@ -152,8 +152,40 @@ class LanguageModel:
             return self.server.wait_until_ready(timeout)
         return False
 
+    def _on_proxy_telemetry(self, record):
+        """Build a queue payload from one ServingProxy inference record (swap mode)."""
+        # Multi-model safety: a shared SwapManager fans each record to every
+        # adapter's callback. Drop records that aren't ours.
+        if record.get("model") != self.model_id:
+            return
+        try:
+            payload = ModelServer.build_telemetry_payload(
+                model_id=self.model_id,
+                output_text="stats_only",
+                start_time=record["start_time"],
+                end_time=record["end_time"],
+                duration=record["duration_seconds"],
+                metadata={
+                    "tokens_generated": record.get("tokens_generated", 0),
+                    "tokens_prompt": record.get("tokens_prompt", 0),
+                    "stream": record.get("stream", False),
+                    "token_source": record.get("token_source"),
+                    "source": record.get("source", "serving_proxy"),
+                },
+            )
+            if self.queue.full():
+                logger.warning(
+                    "language_model queue is full — dropping inference telemetry (size=%d). "
+                    "Downstream pipeline isn't draining fast enough.",
+                    self.queue.maxsize,
+                )
+                return
+            self.queue.put(payload)
+        except Exception as exc:
+            logger.debug(f"_on_proxy_telemetry failed: {exc}")
+
     def _on_server_log(self, line):
-        """Parse `eval time = X ms / Y tokens` lines into telemetry (serve mode)."""
+        """Parse `eval time = X ms / Y tokens` lines into telemetry (ModelServer fallback)."""
         if "eval time =" in line and "prompt" not in line:
             try:
                 dur_match = re.search(r"=\s+(\d+\.\d+)\s+ms", line)
