@@ -4,20 +4,170 @@ All notable changes. Newest at top. The migration narrative from
 `locai-link-old` is preserved below the per-version entries as historical
 record.
 
-## [1.0.15] - 2026-06-15
+## [1.0.15] - 2026-06-18
 
-### Added
-- `UninstallModelCommand` and `UpdatePipelineCommand` to the typed command schema (`config/commands.py`).
-- `AgentRuntime._update_pipeline()` - applies an updated pipeline definition (`UPDATE_PIPELINE`), restarting it in place when the pipeline is already running.
+Cuts over inference observability to HTTP-response interception, lands the
+bundling subsystem (PyInstaller + macOS notarisation + drag-to-extract),
+hardens llama-swap orphan handling, and ships the typed command-wire
+contract. Coordinated release with backend `posthog-analytics-fixes` —
+the bridge handler in the monorepo now writes inference results through
+the `ModelResults` pydantic model so `created_at_timestamp` is set on
+every row (see `MERGE.md` at the repo root for the cross-repo plan).
+
+### Added — Inference observability
+
+- `src/link/infra/serving_proxy.py` — reverse proxy that always sits in
+  front of `llama-swap`. Two independent features gated on construction
+  args: ACAO/CORS headers (when `allowed_origins` is non-empty), and
+  per-inference telemetry capture (when `on_telemetry` is set). Captures
+  the OpenAI `usage` block from `/v1/chat/completions` responses
+  (streaming SSE and non-streaming JSON), falls back to counting
+  `delta.content` events when the client didn't request
+  `stream_options.include_usage`. One telemetry record per request,
+  fired on the callback.
+- `LanguageModel._on_proxy_telemetry()` — bridges a ServingProxy
+  inference record into the adapter's queue, sharing the same
+  `ModelServer.build_telemetry_payload` shape as the legacy log-parse
+  path. Filters records by `record["model"] == self.model_id` so two
+  adapters sharing one SwapManager on the same port don't mis-attribute
+  each other's inferences.
+- `SwapManager.add_telemetry_callback()` + internal `_fanout_telemetry`
+  — multi-adapter routing. Every `get_swap_manager()` call appends its
+  callback so each served model gets its own telemetry stream; each
+  adapter filters by model id internally.
+- `tests/test_serving_proxy.py` — end-to-end tests against a real HTTP
+  loopback: streaming + non-streaming token extraction, `usage` vs
+  `delta_count` fallback, telemetry-off pass-through, all the CORS
+  preflight / disconnect contracts the prior `cors_shim` test pinned.
+
+### Added — Bundling subsystem
+
+- `bundling/` directory with PyInstaller spec, manifest writer,
+  pre-fetch step for plugin binaries (`llama.cpp` + `whisper.cpp`),
+  macOS code-signing helper, entitlements, and a single CLI entry
+  `bundling/build.py`. Asset name is derived from `--plugins` (e.g.
+  `locai-link-llm-stt-darwin-arm64.dmg`); no curated profile files.
+- `.github/workflows/bundle.yml` — bundles on every PR that touches
+  bundling, plugin install scripts, or runtime code. Matrixed across
+  Ubuntu / Windows / macOS.
+- `.github/workflows/release.yml` — consolidated single-workflow
+  release: builds, signs, notarises (macOS), uploads artifacts to a
+  GitHub Release in one run. Previous two-workflow split
+  (`release.yml` + `release-assets.yml`) is gone, with it the
+  `RELEASE_TOKEN` PAT requirement.
+- macOS path: Developer ID Application signing of every binary in the
+  bundle, hardened-runtime entitlements, notarisation via `notarytool`,
+  drag-to-extract DMG packaging. Verified end-to-end on Apple Silicon.
+- Windows: prepared but unsigned (signtool wiring deferred — see
+  `TODO.md`).
+
+### Added — llama-swap orphan handling
+
+- `state/swap_<port>.pid` — every llama-swap process Link spawns writes
+  its PID to this file. On next start, `_reclaim_previous_instance()`
+  reads the pidfile, verifies via `psutil` cmdline that the PID is
+  actually llama-swap (refuses to touch foreign processes that may
+  have reused the PID), and terminates cleanly before binding the
+  port. If the port is held by a non-llama-swap process, Link raises a
+  diagnostic `RuntimeError` listing the platform-appropriate `lsof` /
+  `netstat` command — no longer kills random processes.
+
+### Added — Command contract
+
+- `UninstallModelCommand` and `UpdatePipelineCommand` to the typed
+  command schema (`src/link/config/commands.py`).
+- `AgentRuntime._update_pipeline()` — applies an updated `PipelineConfig`
+  in place, restarting the pipeline if running.
+- `tests/test_command_wire_contract.py` + `tests/fixtures/wire/*.json` —
+  golden-fixture round-trip tests for every command type. Mirrors the
+  backend's `to_wire` contract.
+
+### Added — Misc
+
+- `src/link/utils/version.py` — agent-version resolver moved out of the
+  logger module so it can be reused without pulling logging deps.
+- `plugins/language_model/README.md` — new "Testing a served model"
+  section spelling out the public port (8100, ServingProxy, telemetry
+  fires) vs the internal port (8150, llama-swap directly, bypasses
+  telemetry — useful only for triage).
+- Backend integration guide at `docs/backend/` (CORS allowlist wiring,
+  analytics architecture, OTA plan).
+- `TODO.md` — OTA update path + Windows code-signing wiring (deferred).
 
 ### Changed
-- `handle_command` now validates every command against the shared typed `Command` contract via `parse_command` (after resolving `${identity.*}` placeholders) and dispatches on the typed object. The wire format is the flat `{id, type, ...}` shape; the old `command`/`command_type`/`payload` envelope is no longer accepted. A command that fails validation is reported `failed` (when it carries an `id`) instead of being silently dropped.
-- `_deploy_model` stores the provided `config` (`PipelineConfig`) verbatim; the agent no longer derives a pipeline from `runtime_config`.
-- `AgentCommand` dedup now keys on the wire `id` field (was `command_id`).
+
+- The CORS shim has been renamed and broadened into `ServingProxy`. The
+  old name (`CorsProxy`, in `src/link/infra/cors_proxy.py`) is gone;
+  the new file is `src/link/infra/serving_proxy.py`. CORS is now one of
+  two optional features the proxy provides (the other being telemetry
+  capture); both are independently configurable.
+- `SwapManager` always fronts llama-swap with `ServingProxy`,
+  regardless of CORS state. llama-swap binds the loopback-only listen
+  port (`public_port + 50`); the proxy owns the public port.
+  Previously the proxy was only instantiated when CORS was on.
+- `handle_command` now validates every command against the typed
+  `Command` contract via `parse_command` (after resolving
+  `${identity.*}` placeholders) and dispatches on the typed object.
+  The wire format is the flat `{id, type, ...}` shape; the old
+  `command`/`command_type`/`payload` envelope is no longer accepted.
+  Commands that fail validation are reported `failed` (when carrying
+  an `id`) rather than silently dropped.
+- `_deploy_model` stores the provided `config` (`PipelineConfig`)
+  verbatim; the agent no longer derives a pipeline from
+  `runtime_config`. The backend ships ready-made `PipelineConfig`
+  definitions.
+- `AgentCommand` dedup keys on the wire `id` field (was `command_id`).
+- `runtime.py` START_SERVING handler: `alias = cmd.model_display_name`.
+  llama-swap routes by the human-readable display name; the canonical
+  pipeline_id (UUID) is used independently in the Zenoh sink topic
+  (`locai/devices/<device_id>/models/<pipeline_id>/results`) and so
+  carries through to Firestore + PostHog for backend attribution. The
+  two id spaces are deliberately separate.
+- The language_model adapter no longer log-parses llama-swap stdout
+  for inference timing; telemetry now flows through the ServingProxy's
+  response interception. `ModelServer`'s log-parse path is preserved
+  as the legacy fallback for the (rare) case where llama-swap isn't
+  installed.
+- `bundling/manifest.py` replaces the old `bundle_profile.py`
+  YAML-driven profile machinery. The build CLI takes a flat
+  `--plugins` list; the manifest is the authoritative record of
+  what's in a bundle.
+- Plugin install scripts are quieter when binaries are already
+  installed at the pinned tag — early-return without log noise.
 
 ### Removed
-- `AgentRuntime._normalise_command` and `_map_runtime_to_pipeline_config`. The control plane now sends a ready-made pipeline, so the agent does no parsing or mapping.
+
+- `src/link/infra/cors_proxy.py` (renamed to `serving_proxy.py`;
+  imports updated across the repo).
+- `bundling/bundle_profile.py` and the YAML profile artefacts. The
+  build CLI's `--plugins` flag is the canonical input.
+- `AgentRuntime._normalise_command` and `_map_runtime_to_pipeline_config`
+  — the backend now sends ready-made pipelines, the agent does no
+  derivation.
 - The legacy `REMOVE_MODEL` command alias. Use `UNINSTALL_MODEL`.
+- The `--profile` flag from `bundling/build.py` and any references to
+  partner-named bundles.
+- The `RELEASE_TOKEN` PAT requirement — the consolidated release
+  workflow uses the default `GITHUB_TOKEN`.
+
+### Fixed
+
+- llama-swap orphans surviving an unclean Link shutdown — `_start()`
+  now reliably reclaims its own previous instance via pidfile and
+  refuses to touch anything else.
+- Inference telemetry going dark when serving uses llama-swap (i.e.
+  production). The legacy log-parse hook in `LanguageModel` was wired
+  only to the `ModelServer` fallback path; in swap mode no telemetry
+  was ever emitted. ServingProxy + `_on_proxy_telemetry` close this
+  gap end to end.
+- Multi-model attribution: when two models served on the same port
+  shared one `SwapManager`, the second adapter's telemetry callback
+  was silently dropped and all chats attributed to the first model.
+  The fanout + per-adapter filter fixes this.
+- `_ChatTelemetry._absorb` no longer overwrites the captured model id
+  from the response body — the server echoes the gguf file stem,
+  which is not the canonical id the request used. Request body is the
+  authoritative source for attribution.
 
 ## [1.0.9] — 2026-05-08
 
