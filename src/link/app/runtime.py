@@ -153,20 +153,13 @@ class AgentRuntime:
                         logger.error(msg)
                         self.status_logger.report_command(cmd.id, "failed", msg)
                         return
-                    # Route by pipeline_id (canonical). Display name is registered
-                    # as an alias so old human-readable callers still resolve.
-                    extra_aliases = (
-                        [cmd.model_display_name]
-                        if cmd.model_display_name and cmd.model_display_name != cmd.pipeline_id
-                        else []
-                    )
+                    # Route by pipeline_id (the canonical id everything else uses).
                     config.source.args.update(
                         {
                             "mode": "serve",
                             "port": cmd.port,
                             "host": cmd.host,
                             "alias": cmd.pipeline_id,
-                            "model_aliases": extra_aliases,
                         }
                     )
                     if self.state_manager:

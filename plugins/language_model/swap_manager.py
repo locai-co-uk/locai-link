@@ -118,18 +118,13 @@ class SwapManager:
         model_path: str,
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
-        aliases: list[str] | None = None,
     ) -> None:
-        """Register a model and reload (or start) llama-swap.
-
-        ``aliases`` are additional names that route to the same upstream.
-        """
+        """Register a model and reload (or start) llama-swap."""
         with self._lock:
             self._models[model_id] = {
                 "path": model_path,
                 "args": extra_args or [],
                 "env": env or {},
-                "aliases": [a for a in (aliases or []) if a and a != model_id],
             }
             self._write_config()
             if self._is_running():
@@ -377,8 +372,6 @@ class SwapManager:
             if m["env"]:
                 # llama-swap expects env as ["KEY=VAL", ...] not a map.
                 entry["env"] = [f"{k}={v}" for k, v in m["env"].items()]
-            if m.get("aliases"):
-                entry["aliases"] = list(m["aliases"])
             model_entries[model_id] = entry
 
         config = {

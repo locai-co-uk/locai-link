@@ -45,7 +45,6 @@ class LanguageModel:
         host="127.0.0.1",
         port=8100,
         alias="locai-model",
-        model_aliases: list[str] | None = None,
         cors_allowed_origins: list[str] | None = None,
         **kwargs,
     ):
@@ -57,7 +56,6 @@ class LanguageModel:
             raise FileNotFoundError(f"Model not found: {self.model_path}")
 
         self.model_id = alias or self.model_path.stem
-        self._model_aliases = [a for a in (model_aliases or []) if a and a != self.model_id]
         self.n_gpu_layers = int(n_gpu_layers or 35)
         self.n_ctx = int(n_ctx or 2048)
         self.host = host
@@ -77,13 +75,7 @@ class LanguageModel:
                     on_telemetry=self._on_proxy_telemetry,
                 )
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
-                self._swap_manager.add_model(
-                    self.model_id,
-                    str(self.model_path),
-                    extra_args,
-                    self._build_serve_env(),
-                    aliases=self._model_aliases,
-                )
+                self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
             else:
                 logger.warning("llama-swap not installed — falling back to single-model direct serve")
                 self.server = ModelServer(

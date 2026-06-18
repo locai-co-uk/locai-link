@@ -396,34 +396,6 @@ def test_foreign_port_holder_raises_without_pidfile(tmp_path, monkeypatch):
 # proxy constructor unchanged.
 
 
-def test_add_model_with_aliases_writes_them_into_swap_config(tmp_path, monkeypatch):
-    """``aliases`` reach the llama-swap config so both names route to the same upstream."""
-    import json as _json
-
-    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
-    sm.add_model(
-        "d9499ff9-6351-40ac-93e0-dda3b023e65f",
-        "/models/m1.gguf",
-        aliases=["SmolLM-135M"],
-    )
-
-    cfg = _json.loads(sm._config_path.read_text())
-    entry = cfg["models"]["d9499ff9-6351-40ac-93e0-dda3b023e65f"]
-    assert entry["aliases"] == ["SmolLM-135M"]
-
-
-def test_add_model_dedupes_alias_matching_model_id(tmp_path, monkeypatch):
-    """An alias identical to the model_id is dropped — no point routing X→X."""
-    import json as _json
-
-    sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
-    sm.add_model("model-a", "/models/a.gguf", aliases=["model-a", "friendly-name"])
-
-    cfg = _json.loads(sm._config_path.read_text())
-    entry = cfg["models"]["model-a"]
-    assert entry["aliases"] == ["friendly-name"]
-
-
 def test_on_telemetry_callback_threaded_to_proxy(tmp_path, monkeypatch):
     """The proxy is constructed with the SwapManager's on_telemetry callback."""
 
