@@ -86,6 +86,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install Rust toolchain (for launcher)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            launcher/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('launcher/Cargo.toml', 'launcher/src/**', 'launcher/tests/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
       - name: Cache prefetched binaries
         uses: actions/cache@v4
         with:

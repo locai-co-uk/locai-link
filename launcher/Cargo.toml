@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
+[package]
+name = "locai-link-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Stable launcher: resolves current/ and execs the versioned locai-link-runtime."
+publish = false
+
+[[bin]]
+name = "locai-link"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

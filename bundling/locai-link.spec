@@ -140,7 +140,10 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="locai-link",
+    # Runtime binary lives inside versions/<v>/. The public-facing entry
+    # point is the Rust launcher at <install_root>/locai-link, which exec's
+    # this. Rename so the two don't collide when packaged into one install_root.
+    name="locai-link-runtime",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -159,5 +162,8 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
+    # COLLECT name = output directory under dist/. Kept as "locai-link" so
+    # PyInstaller writes to dist/locai-link/ and build.py's restructure step
+    # finds it where it expects.
     name="locai-link",
 )

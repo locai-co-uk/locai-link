@@ -79,15 +79,19 @@ under `dist/locai-link/`:
 
 ```
 dist/locai-link/                       ← the install_root (this is what gets tarballed)
+├── locai-link                         ← Rust launcher; stable public entry point
 ├── current → versions/<version>       ← symlink; CURRENT pointer file on hosts that can't symlink
-├── versions/
-│   └── <version>/                     ← the actual PyInstaller bundle
-│       ├── locai-link                 ← runtime binary
-│       ├── manifest.json
-│       ├── _internal/…
-│       └── configs/…
-└── (launcher binary lands here in Phase 2)
+└── versions/
+    └── <version>/                     ← the versioned PyInstaller bundle
+        ├── locai-link-runtime         ← runtime binary (what the launcher spawns)
+        ├── manifest.json
+        ├── _internal/…
+        └── configs/…
 ```
+
+The launcher source lives in `../launcher/` and is compiled with
+`cargo build --release` before the PyInstaller step. Both binaries end up
+inside the same `dist/locai-link/` install_root.
 
 Tarballing the whole `dist/locai-link/` directory and extracting it onto a
 target machine gives a valid Pattern-A first install — `current` already

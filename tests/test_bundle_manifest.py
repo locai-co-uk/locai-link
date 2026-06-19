@@ -109,7 +109,7 @@ def test_restructure_to_versioned_layout(tmp_path):
 
     bundle = tmp_path / "locai-link"
     bundle.mkdir()
-    (bundle / "locai-link").write_text("#!/fake/binary\n")
+    (bundle / "locai-link-runtime").write_text("#!/fake/binary\n")
     internal = bundle / "_internal"
     internal.mkdir()
     (internal / "payload.txt").write_text("payload\n")
@@ -117,7 +117,7 @@ def test_restructure_to_versioned_layout(tmp_path):
     target = restructure_to_versioned_layout(bundle, "1.0.15")
 
     assert target == bundle / "versions" / "1.0.15"
-    assert (target / "locai-link").read_text() == "#!/fake/binary\n"
+    assert (target / "locai-link-runtime").read_text() == "#!/fake/binary\n"
     assert (target / "_internal" / "payload.txt").read_text() == "payload\n"
 
     current = bundle / "current"
@@ -140,9 +140,27 @@ def test_restructure_to_versioned_layout_overwrites_stale_staging(tmp_path):
 
     bundle = tmp_path / "locai-link"
     bundle.mkdir()
-    (bundle / "locai-link").write_text("# fresh\n")
+    (bundle / "locai-link-runtime").write_text("# fresh\n")
 
     target = restructure_to_versioned_layout(bundle, "1.0.15")
 
-    assert (target / "locai-link").read_text() == "# fresh\n"
+    assert (target / "locai-link-runtime").read_text() == "# fresh\n"
     assert not (target / "from_previous_run.txt").exists()
+
+
+def test_install_launcher_drops_binary_into_install_root(tmp_path):
+    """install_launcher copies the prebuilt launcher into the install_root."""
+    from build import install_launcher
+
+    install_root = tmp_path / "locai-link"
+    install_root.mkdir()
+    fake_launcher = tmp_path / "fake-launcher"
+    fake_launcher.write_text("#!/fake/launcher\n")
+    fake_launcher.chmod(0o644)  # deliberately non-executable to confirm install_launcher fixes it
+
+    target = install_launcher(install_root, fake_launcher)
+
+    # On non-Windows the public name is `locai-link` regardless of source name.
+    assert target.name in ("locai-link", "locai-link.exe")
+    assert target.read_text() == "#!/fake/launcher\n"
+    assert target.stat().st_mode & 0o111, "launcher should be executable after install"

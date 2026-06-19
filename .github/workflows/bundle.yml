@@ -14,6 +14,7 @@ on:
     # Only run on PRs that touch bundling logic or things it depends on.
     paths:
       - "bundling/**"
+      - "launcher/**"
       - "plugins/*/install.py"
       - "plugins/*/pyproject.toml"
       - "src/link/**"
@@ -53,6 +54,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+
+      - name: Install Rust toolchain (for launcher)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            launcher/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('launcher/Cargo.toml', 'launcher/src/**', 'launcher/tests/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Test launcher
+        shell: bash
+        run: cargo test --manifest-path launcher/Cargo.toml --release
 
       # Cache the prefetched native binaries + cmake build outputs.
       # Key on every plugin's install.py because the pinned upstream tags
