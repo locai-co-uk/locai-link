@@ -9,10 +9,7 @@ record.
 Cuts over inference observability to HTTP-response interception, lands the
 bundling subsystem (PyInstaller + macOS notarisation + drag-to-extract),
 hardens llama-swap orphan handling, and ships the typed command-wire
-contract. Coordinated release with backend `posthog-analytics-fixes` —
-the bridge handler in the monorepo now writes inference results through
-the `ModelResults` pydantic model so `created_at_timestamp` is set on
-every row (see `MERGE.md` at the repo root for the cross-repo plan).
+contract.
 
 ### Added — Inference observability
 
