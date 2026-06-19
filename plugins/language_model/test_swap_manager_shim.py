@@ -315,11 +315,21 @@ def test_reclaim_kills_orphan_with_matching_cmdline(tmp_path, monkeypatch):
     sm._pid_path.parent.mkdir(parents=True, exist_ok=True)
     sm._pid_path.write_text("4242")
 
+    # Cmdline must include either THIS manager's resolved config path OR its
+    # listen address — that's what _looks_like_our_llama_swap matches against
+    # (a relative or unrelated config path is treated as a different instance,
+    # not as ours). Mirror what _start actually passes to Popen.
     orphan = _FakePsutilProcess(
         sm._events,
         pid=4242,
         name="llama-swap",
-        cmdline=["/usr/local/bin/llama-swap", "--config", "swap_config_8100.json"],
+        cmdline=[
+            "/usr/local/bin/llama-swap",
+            "--config",
+            str(sm._config_path.resolve()),
+            "--listen",
+            f"127.0.0.1:{sm._listen_port}",
+        ],
     )
     _install_fake_psutil(monkeypatch, sm._events, alive_processes={4242: orphan})
     # After reclaim_previous_instance terminates the orphan, the port is free.
