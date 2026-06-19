@@ -350,7 +350,9 @@ class SwapManager:
                 proc.kill()
                 proc.wait(timeout=2)
         except psutil.NoSuchProcess:
-            pass
+            # Race between inspect and terminate — process already gone.
+            # That's the desired end state, fall through to pidfile cleanup.
+            logger.debug(f"PID {prev_pid} exited during reclaim — already gone")
         except psutil.Error as exc:
             logger.error(f"Failed to terminate PID {prev_pid}: {exc}")
             # Leave the pidfile so the next attempt retries.

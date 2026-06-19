@@ -80,6 +80,8 @@ class _ChatTelemetry:
                 self._stream = bool(req.get("stream"))
                 self._model = req.get("model")
         except json.JSONDecodeError:
+            # Best-effort metadata only — a malformed request body is the
+            # upstream's problem to reject, not ours to crash on.
             pass
 
     # ------------------------------------------------------------------
@@ -204,6 +206,21 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         assert isinstance(self.server, _ProxyServer)
         return self.server
 
+    @staticmethod
+    def _sanitize_header_value(raw: str | None) -> str:
+        """Strip CR/LF + surrounding whitespace from a value before it touches a header.
+
+        Header injection (HTTP response splitting) defense: any value that
+        ultimately reaches ``send_header`` MUST be free of CR/LF. The
+        allowlist check below also prevents the attack — no legitimate
+        Origin contains CR/LF, so a tampered one can't match. Sanitizing
+        here is belt-and-braces and lets the static analyzer prove safety
+        from input to output.
+        """
+        if not raw:
+            return ""
+        return raw.replace("\r", "").replace("\n", "").strip()
+
     def _resolve_echo_origin(self) -> str | None:
         """Origin to echo back in ACAO, or None for non-browser/disallowed callers.
 
@@ -211,7 +228,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         clients) deliberately return None — they're not subject to CORS,
         so omitting the header is correct AND prevents header pollution.
         """
-        origin = self.headers.get("Origin", "").strip()
+        origin = self._sanitize_header_value(self.headers.get("Origin"))
         if not origin:
             return None
         if origin in self._proxy_server().allowed_origins:
@@ -220,12 +237,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         return None
 
     def _send_cors_response_headers(self, echo_origin: str | None) -> None:
-        """Standard ACAO + Vary pair sent on every non-preflight response."""
+        """Standard ACAO + Vary pair sent on every non-preflight response.
+
+        ``echo_origin`` is always pre-sanitized via ``_resolve_echo_origin``
+        + ``_sanitize_header_value`` so it's safe to pass straight to
+        ``send_header`` here.
+        """
         if echo_origin:
-            if "\r" in echo_origin or "\n" in echo_origin:
-                logger.warning("[serving_proxy] refused unsafe origin value for ACAO")
-            else:
-                self.send_header("Access-Control-Allow-Origin", echo_origin)
+            self.send_header("Access-Control-Allow-Origin", echo_origin)
         # Always Vary on Origin even when no ACAO is sent — tells caches
         # the response varies depending on the request Origin, so a CDN
         # or shared cache doesn't serve a stale cross-origin response.

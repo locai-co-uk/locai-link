@@ -39,6 +39,8 @@ def _resolve() -> str | None:
         if v:
             return v
     except (PackageNotFoundError, Exception):
+        # Metadata unavailable (editable installs, frozen bundles, broken
+        # site-packages). Fall through to the pyproject.toml walk-up.
         pass
 
     try:
@@ -58,6 +60,8 @@ def _resolve() -> str | None:
                 if project.get("name") == "locai-link" and "version" in project:
                     return project["version"]
     except Exception:
+        # Best-effort fallback. Filesystem / parse errors aren't worth
+        # crashing the agent over — version-reporting just returns None.
         pass
 
     return None
