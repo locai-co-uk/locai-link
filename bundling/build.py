@@ -3,22 +3,25 @@
 
 """End-to-end Link bundle build.
 
-The caller selects which plugins are part of the bundle.  Different partners
-need different inference shapes — Meetily wants `language_model` and
-`audio_transcriber`; another integration may want only the LLM.  Plugins not
-listed are not installed and their dist-info is not collected.
+A bundle is identified by the plugin set compiled into it. The artifact
+name is derived from that plugin set (see ``bundling/manifest.py`` for
+the codes and ordering). There is no separate "profile" concept — the
+plugin list IS the recipe.
+
+Bare (zero-plugin) bundles aren't a release shape; for that, use the
+source install path (``curl … | bash`` from the README).
+
+Examples::
+
+    uv run python bundling/build.py --plugins language_model
+    uv run python bundling/build.py --plugins language_model audio_transcriber
 
 Steps:
-    1. Pre-fetch native binaries needed by the selected plugins.
-    2. Editable-install each selected plugin into the active venv so its
-       dist-info is available to PyInstaller's copy_metadata().
-    3. Invoke PyInstaller against locai-link.spec, passing the plugin list
-       via the LOCAI_BUNDLE_PLUGINS env var.
-    4. Bundle lands under dist/locai-link/.
-
-Examples:
-    uv run python bundling/build.py --plugins language_model audio_transcriber
-    uv run python bundling/build.py --all-plugins
+    1. Validate plugin selection against the known + codable set.
+    2. Pre-fetch native binaries needed by the selected plugins.
+    3. Editable-install each plugin so its dist-info is visible to PyInstaller.
+    4. Run PyInstaller (with LOCAI_BUNDLE_PLUGINS in the env).
+    5. Write manifest.json into the bundle root.
 """
 
 import argparse
@@ -30,21 +33,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+from manifest import (  # type: ignore[import-not-found]
+    PLUGIN_CODES,
+    derive_asset_name,
+    write_manifest,
+)
 from prefetch import PREFETCHERS, _platform_tag  # type: ignore[import-not-found]
 
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
 
-# Plugins this bundler knows how to include.  A plugin appearing in
-# bundling.prefetch.PREFETCHERS has native binaries that must be staged before
-# PyInstaller runs; the rest are pure Python.
-KNOWN_PLUGINS: list[str] = [
-    "language_model",
-    "audio_transcriber",
-    "audio_classifier",
-    "image_classifier",
-]
+# Bundleable plugins — the keys of PLUGIN_CODES, in their canonical order.
+# Anything outside this set is a config error at parse time; bundling a
+# plugin without a code would produce an un-nameable artifact.
+KNOWN_PLUGINS: list[str] = list(PLUGIN_CODES.keys())
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -54,33 +57,32 @@ def _have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def _resolve_plugins(args: argparse.Namespace) -> list[str]:
-    if args.all_plugins:
-        return list(KNOWN_PLUGINS)
+def _resolve_plugins(args: argparse.Namespace) -> tuple[str, ...]:
     if not args.plugins:
         raise SystemExit(
-            "No plugins selected. Pass --plugins <name> [<name> ...] or --all-plugins.\n"
-            f"Known plugins: {', '.join(KNOWN_PLUGINS)}"
+            "No plugins selected. Pass --plugins <name> [<name> ...].\n"
+            f"Bundleable plugins: {', '.join(KNOWN_PLUGINS)}\n"
+            "Bare bundles aren't a release shape; use the curl source install instead."
         )
     unknown = [p for p in args.plugins if p not in KNOWN_PLUGINS]
     if unknown:
-        raise SystemExit(f"Unknown plugins: {', '.join(unknown)}\nKnown plugins: {', '.join(KNOWN_PLUGINS)}")
-    return list(args.plugins)
+        raise SystemExit(f"Unknown plugins: {', '.join(unknown)}\nBundleable plugins: {', '.join(KNOWN_PLUGINS)}")
+    # De-dupe + canonicalise via PLUGIN_CODES order
+    seen = set(args.plugins)
+    return tuple(p for p in KNOWN_PLUGINS if p in seen)
 
 
-def run_prefetch(plugins: list[str], tag: str) -> None:
-    """Stage native binaries for whichever selected plugins need them."""
+def run_prefetch(plugins: tuple[str, ...], tag: str) -> None:
     artifacts_root = SPEC_DIR / "_artifacts" / tag
     for name in plugins:
         prefetcher = PREFETCHERS.get(name)
         if prefetcher is None:
-            continue  # pure-Python plugin, nothing to stage
+            continue
         logger.info(f"Pre-fetching native binaries for {name}")
         prefetcher(artifacts_root)
 
 
-def ensure_plugins_installed(plugins: list[str]) -> None:
-    """Editable-install each selected plugin into the active venv."""
+def ensure_plugins_installed(plugins: tuple[str, ...]) -> None:
     if not _have("uv"):
         raise SystemExit("uv is required to install plugins. https://docs.astral.sh/uv/")
     for name in plugins:
@@ -94,7 +96,7 @@ def ensure_plugins_installed(plugins: list[str]) -> None:
         )
 
 
-def run_pyinstaller(plugins: list[str]) -> Path:
+def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
     if not _have("pyinstaller"):
         raise SystemExit("pyinstaller not found. Run `uv sync --extra dev` first.")
     dist_dir = REPO_ROOT / "dist"
@@ -119,28 +121,31 @@ def main() -> None:
     parser.add_argument(
         "--plugins",
         nargs="+",
+        required=True,
         metavar="NAME",
-        help=f"Plugins to include. Known: {', '.join(KNOWN_PLUGINS)}.",
-    )
-    parser.add_argument(
-        "--all-plugins",
-        action="store_true",
-        help="Include every known plugin. Prefer an explicit list for partner bundles.",
+        help=f"Plugins to compile into the bundle. Bundleable: {', '.join(KNOWN_PLUGINS)}.",
     )
     args = parser.parse_args()
 
     plugins = _resolve_plugins(args)
     tag = _platform_tag(_pf.system(), _pf.machine())
+    asset_name = derive_asset_name(plugins)
 
     logger.info(f"== Bundle target: {tag} ==")
     logger.info(f"== Plugins: {', '.join(plugins)} ==")
+    logger.info(f"== Asset name: {asset_name} ==")
 
     run_prefetch(plugins, tag)
     ensure_plugins_installed(plugins)
-    out = run_pyinstaller(plugins)
+    bundle_dir = run_pyinstaller(plugins)
+    manifest_path = write_manifest(bundle_dir, list(plugins), REPO_ROOT)
 
-    logger.info(f"Bundle ready: {out}")
-    logger.info(f"Test with: {out / 'locai-link'} --help")
+    logger.info(f"Manifest written: {manifest_path}")
+    logger.info(f"Bundle ready: {bundle_dir}")
+    logger.info(f"Test with: {bundle_dir / 'locai-link'} --help")
+    logger.info(
+        f"Package as: {asset_name}-{tag}-v<version>.tar.gz (.zip on Windows). CI reads asset_name from manifest.json."
+    )
 
 
 if __name__ == "__main__":

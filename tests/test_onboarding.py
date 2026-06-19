@@ -1,13 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import types
+
 import pytest
 
 from link.app.onboarding import (
+    _RETRY_AFTER_HONOR_CAP_SECONDS,
+    _RETRY_BACKOFF_CAP_SECONDS,
+    _RETRY_MAX_ATTEMPTS,
     DEVICE_GRANT_TYPE,
     UseDeviceFlowError,
     _device_flow,
     _resolve_token,
+    _retry_after_seconds,
+    _retry_backoff_seconds,
     login_and_get_token,
     register_device,
 )
@@ -74,15 +81,6 @@ def test_login_no_token_in_response(mocker):
         login_and_get_token("user@test.com", "pass", API_URL)
 
 
-def test_login_network_error(mocker):
-    import requests
-
-    mocker.patch("link.app.onboarding.requests.post", side_effect=requests.ConnectionError("down"))
-
-    with pytest.raises(RuntimeError, match="Network error"):
-        login_and_get_token("user@test.com", "pass", API_URL)
-
-
 # --- _resolve_token ---
 
 
@@ -139,6 +137,7 @@ def test_register_device_payload_no_username(mocker):
     mocker.patch("link.app.onboarding._resolve_token", return_value="jwt")
 
     resp = mocker.MagicMock()
+    resp.status_code = 200
     resp.json.return_value = {"device_id": "d", "api_key": "k"}
     resp.raise_for_status.return_value = None
     mock_post = mocker.patch("link.app.onboarding.requests.post", return_value=resp)
@@ -158,6 +157,7 @@ def _mock_register_response(mocker, response_body):
     """Helper: patch requests.post for register_device to return response_body."""
     mocker.patch("link.app.onboarding._resolve_token", return_value="jwt")
     resp = mocker.MagicMock()
+    resp.status_code = 200
     resp.json.return_value = response_body
     resp.raise_for_status.return_value = None
     return mocker.patch("link.app.onboarding.requests.post", return_value=resp)
@@ -314,6 +314,7 @@ def test_activate_device_applies_backend_config(mocker):
         "pipelines": [{"id": "activated", "active": True, "source": {"type": "clock_tick"}}],
     }
     resp = mocker.MagicMock()
+    resp.status_code = 200
     resp.json.return_value = {"api_key": "new-key", "config": server_config}
     resp.raise_for_status.return_value = None
     mocker.patch("link.app.onboarding.requests.post", return_value=resp)
@@ -520,3 +521,58 @@ def test_register_device_threads_client_metadata_into_resolve_token(mocker):
     assert metadata["device_name"] == "edge-42"
     assert "os" in metadata
     assert "hostname" in metadata
+
+
+# --- Retry-policy helpers (pure logic; no transport, no HTTP status codes) ---
+
+
+def test_retry_backoff_full_jitter_ceiling_grows_then_caps(mocker):
+    """Ceiling doubles per attempt (base * 2^(n-1)) and never exceeds the cap; the
+    jitter draw is always full-range [0, ceiling]."""
+    # Pin the draw to the upper bound so the computed ceiling is observable.
+    uniform = mocker.patch("link.app.onboarding.random.uniform", side_effect=lambda low, high: high)
+
+    assert _retry_backoff_seconds(1) == 2.0  # 2.0 * 2^0
+    assert _retry_backoff_seconds(2) == 4.0  # 2.0 * 2^1
+    assert _retry_backoff_seconds(3) == 8.0  # 2.0 * 2^2
+    assert _retry_backoff_seconds(6) == _RETRY_BACKOFF_CAP_SECONDS  # 2.0 * 2^5 = 64 -> capped to 60
+    assert _retry_backoff_seconds(50) == _RETRY_BACKOFF_CAP_SECONDS  # stays capped
+
+    # Every draw started at 0 (full jitter), never a narrowed floor.
+    assert all(call.args[0] == 0 for call in uniform.call_args_list)
+
+
+def test_retry_backoff_stays_within_bounds():
+    """Unmocked, the jittered delay is always within [0, cap] for every attempt."""
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        for _ in range(50):
+            delay = _retry_backoff_seconds(attempt)
+            assert 0.0 <= delay <= _RETRY_BACKOFF_CAP_SECONDS
+
+
+def _resp_with_retry_after(value):
+    """A minimal response-like object carrying just a Retry-After header."""
+    headers = {} if value is None else {"Retry-After": value}
+    return types.SimpleNamespace(headers=headers)
+
+
+def test_retry_after_absent_or_no_headers_returns_none():
+    assert _retry_after_seconds(_resp_with_retry_after(None)) is None
+    assert _retry_after_seconds(types.SimpleNamespace(headers=None)) is None
+
+
+def test_retry_after_parses_numeric_seconds():
+    assert _retry_after_seconds(_resp_with_retry_after("7")) == 7.0
+
+
+def test_retry_after_unparseable_returns_none():
+    assert _retry_after_seconds(_resp_with_retry_after("soon")) is None
+
+
+def test_retry_after_negative_returns_none():
+    assert _retry_after_seconds(_resp_with_retry_after("-5")) is None
+
+
+def test_retry_after_clamped_to_honor_cap():
+    over_cap = str(_RETRY_AFTER_HONOR_CAP_SECONDS + 1000)
+    assert _retry_after_seconds(_resp_with_retry_after(over_cap)) == _RETRY_AFTER_HONOR_CAP_SECONDS

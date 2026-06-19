@@ -33,8 +33,9 @@ def test_handle_start_command(empty_agent, capfd):
     """START_MODEL dynamically spawns a new pipeline thread."""
     cmd = {
         "id": "1",
-        "command": "START_MODEL",
-        "payload": {
+        "type": "START_MODEL",
+        "pipeline_id": "dynamic",
+        "config": {
             "id": "dynamic",
             "source": {"type": "clock_tick", "args": {}},
             "sink": {"type": "console", "args": {}},
@@ -63,7 +64,7 @@ def test_update_agent_command_sets_flag_and_shuts_down(empty_agent):
     """UPDATE_AGENT sets the update_requested flag and triggers shutdown."""
     assert empty_agent.update_requested is False
 
-    empty_agent.handle_command({"id": "cmd-1", "command": "UPDATE_AGENT", "payload": {}})
+    empty_agent.handle_command({"id": "cmd-1", "type": "UPDATE_AGENT"})
 
     assert empty_agent.update_requested is True
     assert empty_agent.running is False
@@ -72,7 +73,7 @@ def test_update_agent_command_sets_flag_and_shuts_down(empty_agent):
 
 def test_update_agent_flag_default_false(empty_agent):
     """update_requested defaults to False when no update command is issued."""
-    empty_agent.handle_command({"id": "cmd-1", "command": "STATUS", "payload": {}})
+    empty_agent.handle_command({"id": "cmd-1", "type": "STATUS"})
     assert empty_agent.update_requested is False
 
 
@@ -98,7 +99,7 @@ def test_uninstall_model_deletes_artifact_and_completes(mocker, mock_zenoh_sessi
     agent = _make_agent(_config_with_artifact("d", "m1", artifact), mock_state_manager, mock_zenoh_session)
     mocker.patch.object(agent, "status_logger")
 
-    agent.handle_command({"command_type": "uninstall_model", "id": "c1", "payload": {"model_id": "m1"}})
+    agent.handle_command({"id": "c1", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
 
     assert not artifact.exists()
     assert "m1" not in agent.pipeline_configs
@@ -113,8 +114,9 @@ def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker
     empty_agent.handle_command(
         {
             "id": "start",
-            "command": "START_MODEL",
-            "payload": {
+            "type": "START_MODEL",
+            "pipeline_id": "live",
+            "config": {
                 "id": "live",
                 "source": {"type": "clock_tick", "args": {}},
                 "sink": {"type": "console", "args": {}},
@@ -124,7 +126,7 @@ def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker
     assert "live" in empty_agent.pipelines
     mocker.patch.object(empty_agent, "status_logger")
 
-    empty_agent.handle_command({"command_type": "uninstall_model", "id": "c2", "payload": {"model_id": "live"}})
+    empty_agent.handle_command({"id": "c2", "type": "UNINSTALL_MODEL", "pipeline_id": "live"})
 
     assert "live" in empty_agent.pipelines  # still running — refused
     assert empty_agent.status_logger.report_command.call_args.args[1] == "failed"
@@ -137,8 +139,9 @@ def test_uninstall_running_pipeline_with_force_stop_succeeds(empty_agent, mocker
     empty_agent.handle_command(
         {
             "id": "start",
-            "command": "START_MODEL",
-            "payload": {
+            "type": "START_MODEL",
+            "pipeline_id": "live",
+            "config": {
                 "id": "live",
                 "source": {"type": "clock_tick", "args": {}},
                 "sink": {"type": "console", "args": {}},
@@ -148,9 +151,7 @@ def test_uninstall_running_pipeline_with_force_stop_succeeds(empty_agent, mocker
     assert "live" in empty_agent.pipelines
     mocker.patch.object(empty_agent, "status_logger")
 
-    empty_agent.handle_command(
-        {"command_type": "uninstall_model", "id": "c3", "payload": {"model_id": "live", "force_stop": True}}
-    )
+    empty_agent.handle_command({"id": "c3", "type": "UNINSTALL_MODEL", "pipeline_id": "live", "force_stop": True})
 
     assert "live" not in empty_agent.pipelines
     assert "live" not in empty_agent.pipeline_configs
@@ -169,9 +170,11 @@ def test_uninstall_orphaned_file_fallback(mocker, empty_agent, tmp_path, monkeyp
 
     empty_agent.handle_command(
         {
-            "command_type": "uninstall_model",
             "id": "c4",
-            "payload": {"model_id": "ghost", "filename_on_server": "ghost", "file_extension": "onnx"},
+            "type": "UNINSTALL_MODEL",
+            "pipeline_id": "ghost",
+            "filename_on_server": "ghost",
+            "file_extension": "onnx",
         }
     )
 
@@ -179,8 +182,13 @@ def test_uninstall_orphaned_file_fallback(mocker, empty_agent, tmp_path, monkeyp
     assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
 
 
-def test_remove_model_alias_still_handled(mocker, mock_zenoh_session, mock_state_manager, tmp_path):
-    """The legacy REMOVE_MODEL command name remains supported."""
+def test_legacy_command_shape_is_rejected(mocker, mock_zenoh_session, mock_state_manager, tmp_path):
+    """A retired loose-shape command (command/payload) fails validation and reports failed.
+
+    The flat typed contract replaced the old envelope, and the REMOVE_MODEL
+    alias was dropped. Such a command no longer validates, so it is reported
+    failed (it carries an id) and nothing is acted on.
+    """
     artifact = tmp_path / "legacy.tflite"
     artifact.write_bytes(b"w")
     agent = _make_agent(_config_with_artifact("d", "legacy", artifact), mock_state_manager, mock_zenoh_session)
@@ -188,5 +196,94 @@ def test_remove_model_alias_still_handled(mocker, mock_zenoh_session, mock_state
 
     agent.handle_command({"command": "REMOVE_MODEL", "id": "c5", "payload": {"id": "legacy"}})
 
-    assert not artifact.exists()
-    assert agent.status_logger.report_command.call_args.args[1] == "completed"
+    assert artifact.exists()  # rejected - nothing removed
+    assert "legacy" in agent.pipeline_configs
+    assert agent.status_logger.report_command.call_args.args[1] == "failed"
+
+
+def test_deploy_model_stores_backend_pipeline(empty_agent, mocker, tmp_path, monkeypatch):
+    """DEPLOY_MODEL stores the backend-provided config verbatim (no mapping)."""
+    monkeypatch.chdir(tmp_path)
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "m.gguf").write_bytes(b"weights")  # pre-existing → download skipped
+    mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command(
+        {
+            "id": "d1",
+            "type": "DEPLOY_MODEL",
+            "pipeline_id": "m1",
+            "model_name": "m.gguf",
+            "config": {
+                "id": "m1",
+                "active": False,
+                "source": {"type": "clock_tick", "args": {"model_path": "models/m.gguf"}},
+                "sink": {"type": "console", "args": {}},
+            },
+        }
+    )
+
+    stored = empty_agent.pipeline_configs["m1"]
+    assert stored.source.type == "clock_tick"
+    assert stored.source.args["model_path"] == "models/m.gguf"
+    assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
+
+
+def test_update_pipeline_stores_config_when_not_running(empty_agent, mocker):
+    """UPDATE_PIPELINE on a stopped pipeline stores the new config without starting it."""
+    mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command(
+        {
+            "id": "u1",
+            "type": "UPDATE_PIPELINE",
+            "pipeline_id": "m1",
+            "config": {
+                "id": "m1",
+                "source": {"type": "clock_tick", "args": {"interval": 0.5}},
+                "sink": {"type": "console", "args": {}},
+            },
+        }
+    )
+
+    assert empty_agent.pipeline_configs["m1"].source.args["interval"] == 0.5
+    assert "m1" not in empty_agent.pipelines  # stored only, not started
+    assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
+
+
+def test_update_pipeline_restarts_running_pipeline(empty_agent, mocker, capfd):
+    """UPDATE_PIPELINE on a running pipeline restarts it with the new config."""
+    empty_agent.handle_command(
+        {
+            "id": "start",
+            "type": "START_MODEL",
+            "pipeline_id": "live",
+            "config": {
+                "id": "live",
+                "source": {"type": "clock_tick", "args": {}},
+                "sink": {"type": "console", "args": {}},
+            },
+        }
+    )
+    assert "live" in empty_agent.pipelines
+    mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command(
+        {
+            "id": "u2",
+            "type": "UPDATE_PIPELINE",
+            "pipeline_id": "live",
+            "config": {
+                "id": "live",
+                "source": {"type": "clock_tick", "args": {"interval": 2.0}},
+                "sink": {"type": "console", "args": {}},
+            },
+        }
+    )
+
+    assert "live" in empty_agent.pipelines  # restarted, still running
+    assert empty_agent.pipeline_configs["live"].source.args["interval"] == 2.0
+    assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
+    empty_agent._shutdown()
+    capfd.readouterr()

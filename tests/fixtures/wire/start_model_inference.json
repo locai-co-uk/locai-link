@@ -1,0 +1,5 @@
+{
+  "id": "cmd_startinf_0001",
+  "type": "START_MODEL_INFERENCE",
+  "pipeline_id": "yamnet"
+}

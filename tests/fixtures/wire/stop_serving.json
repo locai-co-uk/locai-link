@@ -1,0 +1,5 @@
+{
+  "id": "cmd_stopserve_0001",
+  "type": "STOP_SERVING",
+  "pipeline_id": "llama-3-8b"
+}

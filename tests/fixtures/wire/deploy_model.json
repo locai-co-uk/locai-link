@@ -1,0 +1,29 @@
+{
+  "id": "cmd_deploy_0001",
+  "type": "DEPLOY_MODEL",
+  "pipeline_id": "llama-3-8b",
+  "model_name": "llama-3-8b.Q4_K_M.gguf",
+  "config": {
+    "id": "llama-3-8b",
+    "active": false,
+    "source": {
+      "type": "language_model",
+      "args": {
+        "mode": "serve",
+        "alias": "Llama 3 8B",
+        "host": "0.0.0.0",
+        "port": 8100,
+        "n_ctx": 4096,
+        "n_gpu_layers": 35,
+        "model_path": "models/llama-3-8b.Q4_K_M.gguf",
+        "cors_allowed_origins": ["https://app.safechat.com"]
+      }
+    },
+    "sink": {
+      "type": "zenoh_pub",
+      "args": {
+        "topic": "locai/devices/${identity.device_id}/models/llama-3-8b/results"
+      }
+    }
+  }
+}

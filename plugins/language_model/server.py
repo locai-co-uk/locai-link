@@ -28,18 +28,15 @@ class ModelServer:
         self.ready = False
         self._stop_event = threading.Event()
 
-        # Callback for log-based telemetry (used in 'serve' mode)
-        self.on_telemetry = on_telemetry
+        self.on_telemetry = on_telemetry  # log-based telemetry callback (serve mode)
 
         self.alias = kwargs.get("alias")
         self.n_gpu_layers = int(kwargs.get("n_gpu_layers") or 0)
         self.n_ctx = int(kwargs.get("n_ctx") or 2048)
         self.chat_format = kwargs.get("chat_format")
 
-        # Defer to install.py for binary directory — it already handles FROZEN
-        # (PyInstaller bundles), venv, and standalone layouts.  Importing keeps
-        # server.py and the install checks in adapter.py looking at the same
-        # path; previously they could disagree inside a frozen bundle.
+        # install.py already handles FROZEN / venv / standalone layouts —
+        # share its BIN_LLAMA_DIR so frozen bundles don't disagree with it.
         try:
             from .install import BIN_LLAMA_DIR
         except ImportError:
@@ -48,17 +45,7 @@ class ModelServer:
 
     @staticmethod
     def build_telemetry_payload(model_id, output_text, start_time, end_time, duration, metadata):
-        """
-        Standardizes the telemetry payload structure for both Client and Server modes.
-
-        Args:
-            model_id (str): The model identifier.
-            output_text (str): The generated text or "stats_only".
-            start_time (datetime): Start timestamp.
-            end_time (datetime): End timestamp.
-            duration (float): Duration in seconds.
-            metadata (dict): Additional stats (tokens, temperature, source).
-        """
+        """Shared telemetry payload shape for client + server modes."""
         return {
             "model_id": model_id,
             "model_type": "generation",
@@ -90,7 +77,6 @@ class ModelServer:
         return None
 
     def start(self):
-        """Starts the server process."""
         if self.running:
             return
 
@@ -103,9 +89,7 @@ class ModelServer:
             logger.error(f"Inference binary not found in {self.bin_dir}. Run install.py")
             return
 
-        # Show a clickable URL in the log. Wildcard binds (0.0.0.0 / ::) aren't
-        # valid connect targets — swap them for `localhost` so the line opens on
-        # Windows terminals and browsers too.
+        # Wildcard binds aren't clickable; show localhost in the log line.
         display_host = "localhost" if self.host in ("0.0.0.0", "::", "") else self.host
         logger.info(f"Starting Model Server on http://{display_host}:{self.port}...")
 
@@ -113,12 +97,10 @@ class ModelServer:
         logs_dir.mkdir(exist_ok=True)
         self.log_path = logs_dir / f"server_{self.port}.log"
 
-        # Prepare Environment
         env = os.environ.copy()
         if platform.system() == "Linux":
             bin_dir = server_bin.parent
             lib_paths = {str(bin_dir)}
-            # Walk subdirectories to find ggml*.so files (CUDA shared libs)
             for root, _, files in os.walk(bin_dir):
                 for file in files:
                     if "ggml" in file and file.endswith(".so"):
@@ -142,35 +124,29 @@ class ModelServer:
             str(self.n_gpu_layers),
             "--ctx-size",
             str(self.n_ctx),
-            # "--verbose",  # Force verbose logging for telemetry capture
         ]
-
-        # Only pass --chat-template if explicitly configured; otherwise let
-        # llama.cpp auto-detect the template from the model's metadata.
+        # Without --chat-template, llama.cpp auto-detects from model metadata.
         if self.chat_format:
             cmd.extend(["--chat-template", str(self.chat_format)])
 
         try:
-            # We use PIPE for stdout so we can intercept logs in real-time
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                stderr=subprocess.STDOUT,
                 env=env,
                 text=True,
-                bufsize=1,  # Line buffered
+                bufsize=1,
             )
             self.running = True
             self.ready = False
             self._stop_event.clear()
 
-            # Start background thread to read logs
             self.monitor_thread = threading.Thread(target=self._log_monitor_loop, daemon=True)
             self.monitor_thread.start()
-
-            # Health check runs in the background so start() can return immediately —
-            # otherwise slow-loading models (e.g. cold-cache Windows Defender scan)
-            # would block the caller's thread for up to `timeout` seconds.
+            # Health watcher runs in the background so start() returns immediately —
+            # slow-loading models (Windows Defender scan, cold cache) would otherwise
+            # block the caller's thread for up to the timeout.
             self.health_thread = threading.Thread(target=self._health_watcher, daemon=True)
             self.health_thread.start()
 
@@ -181,20 +157,17 @@ class ModelServer:
             self.stop()
 
     def _health_watcher(self):
-        """Polls /health until the server responds or times out. Runs on a worker thread."""
+        """Background poll of /health; on failure (not stop()), dump the log tail."""
         if self._wait_for_health(timeout=120):
             self.ready = True
             logger.info("Server is ready.")
         elif not self._stop_event.is_set():
-            # Genuine health failure — not a stop()-triggered cancellation.
-            # Surface the server's own log so operators can see WHY it didn't
-            # come up (missing DLL, CUDA runtime mismatch, OOM, etc.).
             logger.error("Server failed to respond to health check.", extra={"category": "health"})
             self._log_tail()
             self.stop()
 
     def _log_tail(self, lines: int = 20):
-        """Emit the last N lines of the server's stdout/stderr log to the agent's logger."""
+        """Emit the last N lines of the server's log to the agent's logger."""
         try:
             if not getattr(self, "log_path", None) or not self.log_path.exists():
                 return
@@ -208,12 +181,7 @@ class ModelServer:
             logger.debug(f"Could not read server log {self.log_path}: {e}")
 
     def wait_until_ready(self, timeout: float) -> bool:
-        """Blocks until the server is healthy, has died, or `timeout` elapses.
-
-        Use when a caller genuinely needs the server up before proceeding — e.g.
-        an integration test or a one-shot transcribe/inference call. The pipeline
-        loop doesn't need this; it tolerates `ready=False` by emitting nothing.
-        """
+        """Block until the server is healthy, has died, or ``timeout`` elapses."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.ready:
@@ -224,23 +192,17 @@ class ModelServer:
         return False
 
     def _log_monitor_loop(self):
-        """Reads server output, writes to file, and triggers telemetry callback."""
-        # --- LINT FIX: Guard clause for NoneType ---
+        """Persist server stdout to file and fan each line out to on_telemetry."""
         if self.process is None or self.process.stdout is None:
             return
 
         try:
             with open(self.log_path, "w", encoding="utf-8") as f:
-                # Iterate line by line from the process stdout
                 for line in iter(self.process.stdout.readline, ""):
                     if not line:
                         break
-
-                    # 1. Persist log
                     f.write(line)
                     f.flush()
-
-                    # 2. Trigger Telemetry (if callback configured)
                     if self.on_telemetry:
                         self.on_telemetry(line)
         except Exception as e:

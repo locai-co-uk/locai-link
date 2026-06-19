@@ -20,12 +20,11 @@ from pathlib import Path
 import requests
 from colorama import Fore, Style
 
-# --- LOCAL IMPORTS ---
 try:
     from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from .server import ModelServer
     from .swap_manager import SwapManager, get_swap_manager
-except ImportError:
+except ImportError:  # flat layout fallback
     from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
     from server import ModelServer
     from swap_manager import SwapManager, get_swap_manager
@@ -46,6 +45,7 @@ class LanguageModel:
         host="127.0.0.1",
         port=8100,
         alias="locai-model",
+        cors_allowed_origins: list[str] | None = None,
         **kwargs,
     ):
         self.mode = mode
@@ -60,13 +60,20 @@ class LanguageModel:
         self.n_ctx = int(n_ctx or 2048)
         self.host = host
         self.port = int(port)
+        self._cors_allowed_origins = list(cors_allowed_origins or [])
 
         self.server: ModelServer | None = None
         self._swap_manager: SwapManager | None = None
 
         if self.mode == "serve":
             if _is_swap_installed(LLAMA_SWAP_RELEASE):
-                self._swap_manager = get_swap_manager(self.port, self.host, BIN_LLAMA_DIR)
+                self._swap_manager = get_swap_manager(
+                    self.port,
+                    self.host,
+                    BIN_LLAMA_DIR,
+                    allowed_origins=self._cors_allowed_origins,
+                    on_telemetry=self._on_proxy_telemetry,
+                )
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
                 self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
             else:
@@ -84,7 +91,6 @@ class LanguageModel:
             self.thread = threading.Thread(target=self._server_heartbeat_loop, daemon=True)
             self.thread.start()
         else:
-            # Chat mode: spawn a local llama-server and open an interactive loop.
             self.server = ModelServer(
                 model_path=self.model_path,
                 host=self.host,
@@ -123,6 +129,9 @@ class LanguageModel:
     def stop(self):
         self.running = False
         if self._swap_manager:
+            # Unregister BEFORE removing the model so no stray telemetry
+            # records get fanned out to a half-torn-down adapter.
+            self._swap_manager.remove_telemetry_callback(self._on_proxy_telemetry)
             self._swap_manager.remove_model(self.model_id)
         if self.server:
             self.server.stop()
@@ -134,11 +143,7 @@ class LanguageModel:
                 pass
 
     def wait_until_ready(self, timeout: float) -> bool:
-        """Block until the serving endpoint is healthy or timeout elapses.
-
-        Dispatches to the SwapManager health poll (swap mode) or to the
-        ModelServer's own health watcher (direct mode).
-        """
+        """Block until the serving endpoint is healthy or ``timeout`` elapses."""
         if self._swap_manager:
             deadline = time.time() + timeout
             while time.time() < deadline:
@@ -150,26 +155,56 @@ class LanguageModel:
             return self.server.wait_until_ready(timeout)
         return False
 
+    def _on_proxy_telemetry(self, record):
+        """Build a queue payload from one ServingProxy inference record (swap mode)."""
+        # Multi-model safety: a shared SwapManager fans each record to every
+        # adapter's callback. Drop records that aren't ours.
+        if record.get("model") != self.model_id:
+            return
+        try:
+            payload = ModelServer.build_telemetry_payload(
+                model_id=self.model_id,
+                output_text="stats_only",
+                start_time=record["start_time"],
+                end_time=record["end_time"],
+                duration=record["duration_seconds"],
+                metadata={
+                    "tokens_generated": record.get("tokens_generated", 0),
+                    "tokens_prompt": record.get("tokens_prompt", 0),
+                    "stream": record.get("stream", False),
+                    "token_source": record.get("token_source"),
+                    "source": record.get("source", "serving_proxy"),
+                },
+            )
+            # put_nowait + Full is race-free; full() then put() leaves a
+            # window where another producer can fill the queue and we'd
+            # block the ServingProxy's handler thread on insertion.
+            try:
+                self.queue.put_nowait(payload)
+            except queue.Full:
+                logger.warning(
+                    "language_model queue is full — dropping inference telemetry (size=%d). "
+                    "Downstream pipeline isn't draining fast enough.",
+                    self.queue.maxsize,
+                )
+        except Exception as exc:
+            logger.debug(f"_on_proxy_telemetry failed: {exc}")
+
     def _on_server_log(self, line):
-        """Parses server logs to extract telemetry (Serve Mode Only)."""
-        # Example: "eval time = 123.45 ms / 50 tokens"
+        """Parse `eval time = X ms / Y tokens` lines into telemetry (ModelServer fallback)."""
         if "eval time =" in line and "prompt" not in line:
             try:
-                # Parse Duration
                 dur_match = re.search(r"=\s+(\d+\.\d+)\s+ms", line)
                 duration_ms = float(dur_match.group(1)) if dur_match else 0.0
-
-                # Parse Tokens
                 token_match = re.search(r"/\s+(\d+)\s+tokens", line)
                 tokens = int(token_match.group(1)) if token_match else 0
 
                 now = datetime.now()
                 start_time = now - timedelta(milliseconds=duration_ms)
 
-                # Use Shared Builder
                 payload = ModelServer.build_telemetry_payload(
                     model_id=self.model_id,
-                    output_text="stats_only",  # Text unavailable in logs
+                    output_text="stats_only",
                     start_time=start_time,
                     end_time=now,
                     duration=duration_ms / 1000.0,
@@ -184,7 +219,9 @@ class LanguageModel:
     def _server_heartbeat_loop(self):
         while self.running:
             if self._swap_manager:
-                if not self._swap_manager.is_healthy():
+                if self._swap_manager.is_healthy():
+                    self._swap_manager.ensure_proxy()
+                else:
                     logger.warning("llama-swap health check failed", extra={"category": "health"})
             elif self.server and not self.server.running:
                 logger.error("Server process died!", extra={"category": "health"})
@@ -288,11 +325,9 @@ class LanguageModel:
         output_func("")
         self.messages.append({"role": "assistant", "content": response_text})
 
-        # --- TELEMETRY (Client Mode) ---
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
-        # Use Shared Builder
         telemetry_payload = ModelServer.build_telemetry_payload(
             model_id=self.model_id,
             output_text=response_text,
@@ -310,12 +345,7 @@ class LanguageModel:
             self.queue.put(telemetry_payload)
 
     def _build_serve_env(self) -> dict[str, str]:
-        """Return env vars to inject into the llama-server launched by llama-swap.
-
-        On Linux, LD_LIBRARY_PATH must include bin-llama so the CUDA/Vulkan
-        shared libraries (.so) bundled alongside llama-server are found at
-        runtime.  Other platforms don't need this.
-        """
+        """Linux only: LD_LIBRARY_PATH so llama-server finds bundled CUDA/Vulkan .so files."""
         if platform.system() != "Linux":
             return {}
         bin_dir = BIN_LLAMA_DIR

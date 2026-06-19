@@ -17,11 +17,11 @@ class AgentCommand(Sink):
     """
     Routes pipeline data directly to the Agent Runtime's command handler.
 
-    Bounded `command_id` dedup deque rejects duplicates silently. The same
-    command can reach this sink twice when the runtime drains a Firestore
-    backlog over HTTP and a live Zenoh inbox sample for the same id arrives in
-    parallel — the dedup window lets `mark_seen()` pre-populate from the HTTP
-    response so the live sample is recognised and dropped.
+    Bounded `id` dedup deque rejects duplicates silently. The same command can
+    reach this sink twice when the runtime drains a Firestore backlog over HTTP
+    and a live Zenoh inbox sample for the same id arrives in parallel - the
+    dedup window lets `mark_seen()` pre-populate from the HTTP response so the
+    live sample is recognised and dropped.
     """
 
     def __init__(self, callback, dedup_window: int = 2000):
@@ -29,7 +29,7 @@ class AgentCommand(Sink):
 
         Args:
             callback (Callable): The function to call with command data.
-            dedup_window (int): Maximum recent command_ids to remember.
+            dedup_window (int): Maximum recent command ids to remember.
         """
         self.callback = callback
         self._seen: deque[str] = collections.deque(maxlen=dedup_window)
@@ -42,17 +42,18 @@ class AgentCommand(Sink):
         return all(self._dispatch(cmd) for cmd in cmds)
 
     def _dispatch(self, cmd: dict) -> bool:
-        cmd_id = cmd.get("command_id")
+        cmd_id = cmd.get("id")
         if cmd_id is not None and cmd_id in self._seen:
             return True  # duplicate, silently ack
-        if cmd_id is not None:
-            self._seen.append(cmd_id)
         try:
             self.callback(cmd)
-            return True
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
+            # Don't record cmd_id in _seen — a retry should be allowed to try again.
             return False
+        if cmd_id is not None:
+            self._seen.append(cmd_id)
+        return True
 
     def mark_seen(self, cmd_id: str) -> None:
         """Pre-populate dedup before the consumer starts (used by runtime reconcile)."""

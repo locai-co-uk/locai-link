@@ -10,12 +10,28 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
+from pydantic import ValidationError
 
 import link.components  # noqa: F401
 from link.app.state import StateManager
 from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
+from link.config.commands import (
+    DeployModelCommand,
+    StartModelCommand,
+    StartModelInferenceCommand,
+    StartServingCommand,
+    StatusCommand,
+    StopModelInferenceCommand,
+    StopServingCommand,
+    UninstallModelCommand,
+    UpdateAgentCommand,
+    UpdateAgentConfigCommand,
+    UpdatePipelineCommand,
+    parse_command,
+)
 from link.config.models import AgentConfig, GenericConfig, PipelineConfig
+from link.config.templating import resolve_templates
 from link.utils.logger import LinkReporter
 
 if TYPE_CHECKING:
@@ -63,172 +79,169 @@ class AgentRuntime:
                 logger.debug("Signal handlers skipped (not main thread).")
 
     def handle_command(self, data: dict):
-        """Handles incoming commands from the platform.
+        """Validate an incoming command against the shared contract and dispatch it.
 
-        Args:
-            data (dict): The command data dictionary.
+        Commands arrive clean and flat, so there is nothing to parse: resolve our
+        identity placeholders, validate against the `Command` schema, then act on
+        the typed object. A command that fails validation is reported `failed`
+        (when it carries an id) so it stops being retried.
         """
         if not isinstance(data, dict):
             logger.warning(f"Invalid command format: expected dict, got {type(data)}")
             return
 
-        # 1. Normalise Command
-        cmd_type, cmd_id, pipeline_id, payload = self._normalise_command(data)
-
-        if not cmd_type or not cmd_id:
-            logger.warning(f"Command rejected: Missing command type or id. Keys: {list(data.keys())}")
-            return
-
-        logger.info(f"Processing command: {cmd_type} (Target: {pipeline_id})")
+        # Resolve ${identity.*} placeholders (e.g. a sink topic) before validating.
+        ident = self.agent_config.identity
+        context = {
+            "identity": {
+                "device_id": ident.device_id,
+                "device_name": ident.device_name,
+                "api_key": ident.api_key,
+                "api_url": ident.api_url,
+            },
+            "api_url": ident.api_url,
+        }
+        resolved = resolve_templates(data, context)
 
         try:
-            if cmd_type == "DEPLOY_MODEL":
-                if not cmd_id:
-                    logger.warning("DEPLOY command rejected: Missing 'id'")
-                    return
-                self._deploy_model(cmd_id, payload)
+            cmd = parse_command(resolved)
+        except ValidationError as e:
+            cmd_id = data.get("id")
+            # Keep the full validation detail in local logs; tell the backend
+            # only that the command was malformed. Pydantic ValidationError
+            # repr can include payload field values, which we don't want
+            # echoing back through the command-status telemetry channel.
+            logger.warning(f"Command rejected (schema validation failed): {e}")
+            if isinstance(cmd_id, str) and cmd_id:
+                self.status_logger.report_command(cmd_id, "failed", "Invalid command payload")
+            return
 
-            elif cmd_type == "START_MODEL":
-                config = payload.get("config") or data.get("config")
-                if not config and "source" in payload:
-                    config = payload
+        logger.info(f"Processing command: {cmd.type}")
 
-                if not pipeline_id:
-                    msg = "START command rejected: Missing pipeline ID"
-                    logger.warning(msg)
-                    self.status_logger.report_command(cmd_id, "failed", msg)
-                    return
+        try:
+            if isinstance(cmd, DeployModelCommand):
+                self._deploy_model(cmd)
 
-                success = self._start_pipeline(pipeline_id, config)
+            elif isinstance(cmd, StartModelCommand):
+                success = self._start_pipeline(cmd.pipeline_id, cmd.config.model_dump())
                 if success:
-                    self.status_logger.report_command(cmd_id, "completed", f"Pipeline {pipeline_id} started")
+                    self.status_logger.report_command(cmd.id, "completed", f"Pipeline {cmd.pipeline_id} started")
                 else:
-                    self.status_logger.report_command(cmd_id, "failed", f"Failed to start {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "failed", f"Failed to start {cmd.pipeline_id}")
 
-            elif cmd_type == "START_MODEL_INFERENCE":
-                if not pipeline_id:
-                    msg = "START command rejected: Could not identify target pipeline."
-                    logger.warning(msg)
-                    self.status_logger.report_command(cmd_id, "failed", msg)
-                    return
-
-                success = self._start_pipeline(pipeline_id)
+            elif isinstance(cmd, StartModelInferenceCommand):
+                success = self._start_pipeline(cmd.pipeline_id)
                 if success:
-                    self.status_logger.report_command(cmd_id, "completed", f"Inference started for {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "completed", f"Inference started for {cmd.pipeline_id}")
                     self.status_logger.report_model(
-                        pipeline_id, running=True, pid=1, serving=False, serving_pid=0, serving_port=0
+                        cmd.pipeline_id, running=True, pid=1, serving=False, serving_pid=0, serving_port=0
                     )
                 else:
-                    self.status_logger.report_command(cmd_id, "failed", f"Failed to start {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "failed", f"Failed to start {cmd.pipeline_id}")
 
-            elif cmd_type == "STOP_MODEL_INFERENCE":
-                if not pipeline_id:
-                    msg = "STOP command rejected: Could not identify target pipeline."
-                    logger.warning(msg)
-                    self.status_logger.report_command(cmd_id, "failed", msg)
-                    return
-
-                success = self._stop_pipeline(pipeline_id)
+            elif isinstance(cmd, StopModelInferenceCommand):
+                success = self._stop_pipeline(cmd.pipeline_id)
                 if success:
-                    self.status_logger.report_command(cmd_id, "completed", f"Inference stopped for {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "completed", f"Inference stopped for {cmd.pipeline_id}")
                     self.status_logger.report_model(
-                        pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
+                        cmd.pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
                     )
                 else:
-                    self.status_logger.report_command(cmd_id, "failed", f"Failed to stop {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "failed", f"Failed to stop {cmd.pipeline_id}")
 
-            elif cmd_type == "START_SERVING":
-                if not pipeline_id:
-                    msg = "START_SERVING command rejected: Could not identify target pipeline."
-                    logger.warning(msg)
-                    self.status_logger.report_command(cmd_id, "failed", msg)
-                    return
-
+            elif isinstance(cmd, StartServingCommand):
                 with self.lock:
-                    config = self.pipeline_configs.get(pipeline_id)
-                    if config:
-                        port = payload.get("port", 8100)
-                        host = payload.get("host", "127.0.0.1")
-                        alias = payload.get("model_display_name", "locai-model")
-
-                        config.source.args.update({"mode": "serve", "port": port, "host": host, "alias": alias})
-
-                        if self.state_manager:
-                            self.state_manager.update_pipeline_config(config)
-                    else:
-                        msg = f"Cannot serve '{pipeline_id}': Pipeline not found/deployed."
+                    config = self.pipeline_configs.get(cmd.pipeline_id)
+                    if not config:
+                        msg = f"Cannot serve '{cmd.pipeline_id}': Pipeline not found/deployed."
                         logger.error(msg)
-                        self.status_logger.report_command(cmd_id, "failed", msg)
+                        self.status_logger.report_command(cmd.id, "failed", msg)
                         return
+                    # llama-swap routes by display_name (human-readable); backend
+                    # attribution is independent — it uses pipeline_id via the
+                    # Zenoh topic key set in this pipeline's sink config.
+                    config.source.args.update(
+                        {
+                            "mode": "serve",
+                            "port": cmd.port,
+                            "host": cmd.host,
+                            "alias": cmd.model_display_name,
+                        }
+                    )
+                    if self.state_manager:
+                        self.state_manager.update_pipeline_config(config)
 
-                success = self._start_pipeline(pipeline_id)
+                success = self._start_pipeline(cmd.pipeline_id)
                 if success:
                     self.status_logger.report_command(
-                        cmd_id, "completed", f"Serving started for {pipeline_id} on {host}:{port}"
+                        cmd.id, "completed", f"Serving started for {cmd.pipeline_id} on {cmd.host}:{cmd.port}"
                     )
                     self.status_logger.report_model(
-                        pipeline_id, running=False, pid=0, serving=True, serving_pid=1, serving_port=port
+                        cmd.pipeline_id, running=False, pid=0, serving=True, serving_pid=1, serving_port=cmd.port
                     )
                 else:
-                    self.status_logger.report_command(cmd_id, "failed", f"Failed to start serving {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "failed", f"Failed to start serving {cmd.pipeline_id}")
 
-            elif cmd_type == "STOP_SERVING":
-                if not pipeline_id:
-                    msg = "STOP command rejected: Could not identify target pipeline."
-                    logger.warning(msg)
-                    self.status_logger.report_command(cmd_id, "failed", msg)
-                    return
-
-                success = self._stop_pipeline(pipeline_id)
+            elif isinstance(cmd, StopServingCommand):
+                success = self._stop_pipeline(cmd.pipeline_id)
                 if success:
-                    self.status_logger.report_command(cmd_id, "completed", f"Serving stopped for {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "completed", f"Serving stopped for {cmd.pipeline_id}")
                     self.status_logger.report_model(
-                        pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
+                        cmd.pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
                     )
                 else:
-                    self.status_logger.report_command(cmd_id, "failed", f"Failed to stop {pipeline_id}")
+                    self.status_logger.report_command(cmd.id, "failed", f"Failed to stop {cmd.pipeline_id}")
 
-            elif cmd_type in ("UNINSTALL_MODEL", "REMOVE_MODEL"):
-                if not pipeline_id:
-                    msg = "UNINSTALL command rejected: Could not identify target pipeline."
-                    logger.warning(msg)
-                    self.status_logger.report_command(cmd_id, "failed", msg)
-                    return
+            elif isinstance(cmd, UninstallModelCommand):
+                # filename_on_server / file_extension flow into a filesystem
+                # delete below — reject anything that isn't a plain basename
+                # before _uninstall_model gets a chance to compose a path.
+                safe_payload: dict[str, str] = {}
+                if cmd.filename_on_server:
+                    if not _is_safe_basename(cmd.filename_on_server):
+                        msg = f"Refusing uninstall: filename_on_server is unsafe ({cmd.filename_on_server!r})"
+                        logger.error(msg)
+                        self.status_logger.report_command(cmd.id, "failed", "Invalid filename_on_server")
+                        return
+                    safe_payload["filename_on_server"] = cmd.filename_on_server
+                if cmd.file_extension:
+                    if not _is_safe_extension(cmd.file_extension):
+                        msg = f"Refusing uninstall: file_extension is unsafe ({cmd.file_extension!r})"
+                        logger.error(msg)
+                        self.status_logger.report_command(cmd.id, "failed", "Invalid file_extension")
+                        return
+                    safe_payload["file_extension"] = cmd.file_extension
                 self._uninstall_model(
-                    cmd_id,
-                    pipeline_id,
-                    force_stop=bool(payload.get("force_stop", False)),
-                    payload=payload,
+                    cmd.id,
+                    cmd.pipeline_id,
+                    force_stop=cmd.force_stop,
+                    payload=safe_payload,
                 )
 
-            elif cmd_type == "STATUS":
+            elif isinstance(cmd, UpdatePipelineCommand):
+                self._update_pipeline(cmd)
+
+            elif isinstance(cmd, StatusCommand):
                 self._log_status()
 
-            elif cmd_type == "UPDATE_AGENT":
+            elif isinstance(cmd, UpdateAgentCommand):
                 logger.info("OTA update command received. Preparing to update...", extra={"category": "deployment"})
-                self.status_logger.report_command(cmd_id, "completed", "Update accepted — restarting.")
+                self.status_logger.report_command(cmd.id, "completed", "Update accepted - restarting.")
                 # Signal main.py to pull updates and re-exec after shutdown completes
                 self.update_requested = True
                 self.running = False
                 self.shutdown_event.set()
 
-            elif cmd_type == "UPDATE_AGENT_CONFIG":
+            elif isinstance(cmd, UpdateAgentConfigCommand):
                 from link.app.reconfigure import apply_agent_config
 
-                new_cfg_raw = payload.get("agent_config")
-                if not isinstance(new_cfg_raw, dict):
-                    self.status_logger.report_command(cmd_id, "failed", "Missing or malformed agent_config in payload")
-                    return
-                result = apply_agent_config(self, new_cfg_raw)
+                result = apply_agent_config(self, cmd.agent_config.model_dump())
                 status = "completed" if (result.ok or result.scheduled_restart) else "failed"
-                self.status_logger.report_command(cmd_id, status, result.message)
-
-            else:
-                logger.warning(f"Unknown command: {cmd_type}")
+                self.status_logger.report_command(cmd.id, status, result.message)
 
         except Exception as e:
             logger.error(f"Command handling failed: {e}", exc_info=True)
-            self.status_logger.report_command(cmd_id, "failed", str(e))
+            self.status_logger.report_command(cmd.id, "failed", str(e))
 
     def run(self):
         """Main Lifecycle Loop.
@@ -359,26 +372,33 @@ class AgentRuntime:
                 logger.warning(f"Cannot stop '{pipeline_id}': Not running.")
                 return True
 
-    def _deploy_model(self, command_id: str, payload: dict):
-        """Downloads a model, maps its config, and reports status back to the platform.
+    def _deploy_model(self, cmd: DeployModelCommand):
+        """Download the model artifact and register the provided pipeline.
 
-        Args:
-            command_id (str): The unique ID of the command.
-            payload (dict): The command payload containing model details.
+        The pipeline definition arrives ready-made; the agent stores `cmd.config`
+        verbatim, with no mapping.
         """
+        command_id = cmd.id
+        pipeline_id = cmd.pipeline_id
+        model_name = cmd.model_name
+
+        # pipeline_id and config.id are independently set on the wire; if they
+        # diverge, the bundle was malformed by the producer and we'd silently
+        # persist under one key while restarts/lookups use the other.
+        if cmd.config.id != pipeline_id:
+            msg = f"Refusing deploy: pipeline_id {pipeline_id!r} != config.id {cmd.config.id!r}"
+            logger.error(msg)
+            self.status_logger.report_command(command_id, "failed", "Pipeline id mismatch")
+            return
+        if model_name and not _is_safe_basename(model_name):
+            msg = f"Refusing deploy: model_name is unsafe ({model_name!r})"
+            logger.error(msg)
+            self.status_logger.report_command(command_id, "failed", "Invalid model_name")
+            return
+
         logger.info(f"Initiating deployment for command '{command_id}'...")
         models_dir = Path.cwd().joinpath("models")
         models_dir.mkdir(parents=True, exist_ok=True)
-
-        pipeline_id = payload.get("model_id")
-        model_name = payload.get("model_name")
-        runtime_config = payload.get("runtime_config", {})
-
-        if not pipeline_id or not model_name:
-            msg = "Deploy failed: Missing model_id or model_name."
-            logger.error(msg)
-            self.status_logger.report_command(command_id, "failed", msg)
-            return
 
         download_url = (
             f"{self.agent_config.identity.api_url}/models/{pipeline_id}/download/"
@@ -421,25 +441,53 @@ class AgentRuntime:
 
         self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
 
-        try:
-            new_pipeline_config = self._map_runtime_to_pipeline_config(pipeline_id, target_path, runtime_config)
-        except Exception as e:
-            msg = f"Failed to map runtime config: {e}"
-            logger.error(msg)
-            self.status_logger.report_command(command_id, "failed", msg)
-            return
-
         with self.lock:
-            self.pipeline_configs[pipeline_id] = new_pipeline_config
+            self.pipeline_configs[pipeline_id] = cmd.config
             if self.state_manager:
                 try:
-                    self.state_manager.update_pipeline_config(new_pipeline_config)
+                    self.state_manager.update_pipeline_config(cmd.config)
                 except Exception as e:
                     logger.warning(f"Failed to persist state: {e}")
 
         logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
         self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
+
+    def _update_pipeline(self, cmd: UpdatePipelineCommand):
+        """Updates a deployed pipeline's configuration, preserving its running state.
+
+        If the pipeline is running, it restarts with the new configuration.
+        Otherwise, the configuration is saved for the next start.
+        """
+
+        pipeline_id = cmd.pipeline_id
+
+        if cmd.config.id != pipeline_id:
+            msg = f"Refusing update: pipeline_id {pipeline_id!r} != config.id {cmd.config.id!r}"
+            logger.error(msg)
+            self.status_logger.report_command(cmd.id, "failed", "Pipeline id mismatch")
+            return
+
+        with self.lock:
+            is_running = pipeline_id in self.pipelines
+
+        if is_running:
+            # _start_pipeline stops, re-creates, and persists in one step.
+            success = self._start_pipeline(pipeline_id, cmd.config.model_dump())
+        else:
+            with self.lock:
+                self.pipeline_configs[pipeline_id] = cmd.config
+                if self.state_manager:
+                    try:
+                        self.state_manager.update_pipeline_config(cmd.config)
+                    except Exception as e:
+                        logger.warning(f"Failed to persist state: {e}")
+            success = True
+
+        if success:
+            self.status_logger.report_command(cmd.id, "completed", f"Pipeline '{pipeline_id}' updated")
+        else:
+            self.status_logger.report_command(cmd.id, "failed", f"Failed to update pipeline '{pipeline_id}'")
 
     def _uninstall_model(
         self,
@@ -448,24 +496,19 @@ class AgentRuntime:
         force_stop: bool = False,
         payload: dict | None = None,
     ):
-        """Drops a pipeline's config and deletes its on-disk artifacts.
+        """Uninstalls a pipeline by removing its configuration and on-disk artifacts.
 
-        Refuses (and logs a warning) when the pipeline is currently running and
-        ``force_stop`` is False, or when another configured pipeline references
-        the same artifact path. When ``force_stop`` is True, a running pipeline
-        is stopped first (true one-click uninstall) before removal.
-
-        Removal is idempotent: a missing config or already-deleted file still
-        reports ``completed``. When no local config exists but the command
-        payload carried ``filename_on_server`` / ``file_extension``, the
-        on-disk artifact is located via the ``models/`` directory as a fallback
-        so disk is freed even after local state has drifted.
+        Behavior:
+        - If running, it refuses removal unless `force_stop` is True (which stops it first).
+        - Refuses removal if another pipeline references the same artifact path.
+        - Idempotent: missing configs or already-deleted files report as successful.
+        - Uses the command payload as a fallback to locate and free files if local state has drifted.
 
         Args:
-            command_id (str): The command ID.
-            pipeline_id (str): The pipeline / model ID to remove.
-            force_stop (bool): When True, stop a running pipeline before removal.
-            payload (dict | None): Original command payload (orphaned-file fallback).
+            command_id: The command ID.
+            pipeline_id: The pipeline / model ID to remove.
+            force_stop: Whether to stop the pipeline before removal if it is running.
+            payload: Optional payload containing filename fallbacks for orphaned files.
         """
         logger.info(f"Uninstalling pipeline '{pipeline_id}' (force_stop={force_stop})...")
 
@@ -618,123 +661,30 @@ class AgentRuntime:
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
 
-    # --- will be removed ---
-    def _normalise_command(self, data: dict) -> tuple[str, str | None, str | None, dict]:
-        """Normalises the command data structure.
 
-        Args:
-            data (dict): The raw command data.
+# ---------------------------------------------------------------------------
+# Wire input validators — first line of defense against malicious/malformed
+# filenames flowing into filesystem operations. Wire-level pydantic catches
+# missing fields and type errors, but it doesn't see "../etc/passwd" as
+# semantically unsafe — that's our job here.
+# ---------------------------------------------------------------------------
 
-        Returns:
-            tuple[str, str | None, str | None, dict]: A tuple containing (cmd_type, cmd_id, pipeline_id, payload).
-        """
-        # 1. Check for 'data' wrapper (old format or nested format)
-        inner = data.get("data")
-        if isinstance(inner, dict) and "command_type" in inner:
-            cmd_type = inner.get("command_type", "").upper()
-            cmd_id = data.get("id") or inner.get("id")
-            payload = inner.get("payload", {})
-            pipeline_id = payload.get("model_id") or payload.get("model_name")
-            return cmd_type, cmd_id, pipeline_id, payload
 
-        # 2. Check for flat format with 'command' or 'command_type'
-        cmd_type = (data.get("command") or data.get("command_type") or "").upper()
-        cmd_id = data.get("id") or data.get("command_id")
-        payload = data.get("payload", {})
+def _is_safe_basename(name: str) -> bool:
+    """True if `name` is a single filename component with no path separators."""
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    # Path(name).name strips any directory parts — if it differs from the
+    # input, the input had directory structure we don't want.
+    return Path(name).name == name
 
-        # 3. Identify pipeline ID
-        pipeline_id = payload.get("id") or payload.get("model_id") or payload.get("model_name")
-        if not pipeline_id and isinstance(cmd_id, str):
-            pipeline_id = cmd_id
 
-        return cmd_type, cmd_id, pipeline_id, payload
-
-    def _map_runtime_to_pipeline_config(
-        self, pipeline_id: str, model_path: Path, runtime_config: dict
-    ) -> PipelineConfig:
-        """Maps runtime configuration to pipeline configuration.
-
-        Args:
-            pipeline_id (str): The pipeline ID.
-            model_path (Path): Path to the model file.
-            runtime_config (dict): The runtime configuration dictionary.
-
-        Returns:
-            PipelineConfig: The generated pipeline configuration.
-        """
-        process_conf = runtime_config.get("process", {})
-        impl_conf = process_conf.get("impl", {})
-        runner = impl_conf.get("runner", "")
-
-        source_args = process_conf.get("parameters", {}).copy()
-        source_args["model_path"] = str(model_path)
-
-        source_type = "unknown"
-        semantic_type = "unknown"
-        outputs = runtime_config.get("outputs", [])
-
-        if outputs:
-            semantic_type = outputs[0].get("semantic_type", "")
-
-        if runner == "gguf_language_model" or semantic_type == "text_generation":
-            source_type = "language_model"
-            inputs = runtime_config.get("inputs", [])
-            source_args["new_terminal"] = True
-        elif "image_detection" in runner or semantic_type == "object_detection":
-            source_type = "image_classifier"
-            inputs = runtime_config.get("inputs", [])
-            for inp in inputs:
-                if inp.get("type") == "camera":
-                    source_args["camera_index"] = inp.get("index", 0)
-                    if inp.get("resolution"):
-                        source_args["width"] = inp["resolution"][0]
-                        source_args["height"] = inp["resolution"][1]
-            if "show_window" not in source_args:
-                source_args["show_window"] = False
-        elif runner == "whisper_audio_transcription" or semantic_type == "audio_transcription":
-            source_type = "audio_transcriber"
-            serving = runtime_config.get("serving") or {}
-            if serving.get("default_port") is not None:
-                source_args.setdefault("port", serving["default_port"])
-            if serving.get("default_host") is not None:
-                source_args.setdefault("host", serving["default_host"])
-        elif "audio_classification" in runner or semantic_type == "audio_classification":
-            source_type = "audio_classifier"
-            inputs = runtime_config.get("inputs", [])
-            for inp in inputs:
-                if inp.get("type") == "microphone":
-                    if inp.get("sample_rate"):
-                        source_args["sample_rate"] = inp["sample_rate"]
-                    if inp.get("channels"):
-                        source_args["channels"] = inp["channels"]
-        else:
-            raise ValueError(
-                f"Cannot deploy pipeline '{pipeline_id}': runtime_config has no recognized "
-                f"runner or semantic_type (runner={runner!r}, semantic_type={semantic_type!r}). "
-                f"Expected runner in {{gguf_language_model, *image_detection*, "
-                f"whisper_audio_transcription, *audio_classification*}} or semantic_type in "
-                f"{{text_generation, object_detection, audio_transcription, audio_classification}}. "
-                f"Most likely the control plane did not synthesize a default runtime_config for "
-                f"this model — check that the model's runtime_configs/<model_id>__model__default "
-                f"document exists with process.impl.runner populated."
-            )
-
-        sink_conf = GenericConfig(type="console", args={})
-
-        if outputs:
-            out_def = outputs[0]
-            route = out_def.get("route", "console")
-
-            if route == "agent":
-                identity = self.agent_config.identity
-                topic = f"locai/devices/{identity.device_id}/models/{pipeline_id}/results"
-                sink_conf = GenericConfig(
-                    type="zenoh_pub",
-                    args={"topic": topic},
-                )
-
-        return PipelineConfig(
-            id=pipeline_id,
-            source=GenericConfig(type=source_type, args=source_args),
-            sink=sink_conf,
-        )
+def _is_safe_extension(ext: str) -> bool:
+    """True if `ext` is a plain extension token (no separators)."""
+    if not ext:
+        return False
+    if "/" in ext or "\\" in ext or "\x00" in ext or ext in (".", ".."):
+        return False
+    return True

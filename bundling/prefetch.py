@@ -40,11 +40,14 @@ logger = logging.getLogger(__name__)
 # _is_shared_library() and preserved unconditionally because llama-server /
 # whisper-server dynamically link against them.
 LLAMA_RUNTIME_EXECUTABLES: set[str] = {
-    "llama-server", "llama-server.exe",
-    "llama-swap", "llama-swap.exe",
+    "llama-server",
+    "llama-server.exe",
+    "llama-swap",
+    "llama-swap.exe",
 }
 WHISPER_RUNTIME_EXECUTABLES: set[str] = {
-    "whisper-server", "whisper-server.exe",
+    "whisper-server",
+    "whisper-server.exe",
 }
 
 
@@ -67,9 +70,12 @@ def _is_shared_library(path: Path) -> bool:
 # Mach-O / ELF / PE magic numbers. Used to confirm a candidate-for-deletion
 # is actually an executable rather than a data file with a weird name.
 _EXECUTABLE_MAGIC_PREFIXES = (
-    b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit LE / BE
-    b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",  # Mach-O 32-bit LE / BE
-    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",  # Universal "fat" binary
+    b"\xcf\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit LE / BE
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xce",  # Mach-O 32-bit LE / BE
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",  # Universal "fat" binary
 )
 
 

@@ -132,3 +132,31 @@ def test_windows_sc_command(mock_windows_env, tmp_path, mocker):
 
     # Check for SC START
     assert any("sc start locai-link" in c for c in calls)
+
+
+def test_windows_service_env_written_to_registry(mock_windows_env, tmp_path, mocker):
+    """env_vars reach the service via the registry Environment value.
+
+    `sc create` cannot set environment variables, so the backend writes the
+    REG_MULTI_SZ `Environment` value under the service's registry key. winreg
+    is faked through sys.modules so the test runs on any OS.
+    """
+    import sys
+
+    fake_winreg = mocker.MagicMock()
+    mocker.patch.dict(sys.modules, {"winreg": fake_winreg})
+
+    manager = ServiceManager(
+        service_name="locai-link",
+        command="python.exe main.py",
+        description="Loc.ai Agent",
+        working_dir=str(tmp_path),
+        env_vars={"PYTHONUNBUFFERED": "1"},
+    )
+    manager.install(start_now=False)
+
+    fake_winreg.OpenKey.assert_called_once()
+    set_args = fake_winreg.SetValueEx.call_args.args
+    assert set_args[1] == "Environment"
+    assert set_args[3] == fake_winreg.REG_MULTI_SZ
+    assert set_args[4] == ["PYTHONUNBUFFERED=1"]
