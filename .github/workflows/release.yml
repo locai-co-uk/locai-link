@@ -109,7 +109,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ASSET_BASE=$(python -c "import json; print(json.load(open('dist/locai-link/manifest.json'))['asset_name'])")
+          ASSET_BASE=$(python - <<'PY'
+          import json, pathlib
+          root = pathlib.Path("dist/locai-link")
+          manifest = root / "current" / "manifest.json"
+          if not manifest.exists():
+              manifest = next(root.glob("versions/*/manifest.json"))
+          print(json.load(manifest.open())["asset_name"])
+          PY
+          )
           echo "asset_base=$ASSET_BASE" >> "$GITHUB_OUTPUT"
           echo "Asset basename: $ASSET_BASE"
 

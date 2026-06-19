@@ -31,6 +31,7 @@ import platform as _pf
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from manifest import (  # type: ignore[import-not-found]
@@ -116,6 +117,66 @@ def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
     return dist_dir / "locai-link"
 
 
+def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
+    """Reshape PyInstaller's flat output into the install_root + versions/<v>/ layout.
+
+    PyInstaller writes everything to ``<dist>/locai-link/``. We move that into
+    ``<dist>/locai-link/versions/<version>/`` and add a ``current`` pointer at
+    ``<dist>/locai-link/current`` so the tarball extracts onto a target machine
+    as a valid Pattern-A first install (see ../OTA-BUNDLE.md §4.1).
+
+    Returns the new versioned bundle directory.
+    """
+    if not bundle_dir.is_dir():
+        raise SystemExit(f"Expected PyInstaller output at {bundle_dir}, but it isn't a directory.")
+
+    install_root = bundle_dir
+    dist_root = install_root.parent
+    staging = dist_root / f"_staged_{version}"
+
+    if staging.exists():
+        shutil.rmtree(staging)
+    install_root.rename(staging)
+
+    versions_dir = install_root / "versions"
+    versions_dir.mkdir(parents=True)
+    target_dir = versions_dir / version
+    staging.rename(target_dir)
+
+    _write_current_pointer(install_root, version)
+    return target_dir
+
+
+def _write_current_pointer(install_root: Path, version: str) -> None:
+    """Write the ``current`` pointer the launcher follows on start.
+
+    POSIX: relative symlink ``current -> versions/<version>``. Windows hosts
+    without Developer Mode / admin can't create symlinks; fall back to a
+    plain text ``CURRENT`` file containing the version string. Phase 2's
+    launcher must accept both shapes.
+    """
+    rel_target = Path("versions") / version
+    link = install_root / "current"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    try:
+        link.symlink_to(rel_target, target_is_directory=True)
+        logger.info(f"  current -> {rel_target} (symlink)")
+        return
+    except (OSError, NotImplementedError) as exc:
+        logger.warning(f"Symlink creation failed ({exc}); writing CURRENT pointer file instead.")
+    pointer = install_root / "CURRENT"
+    pointer.write_text(version + "\n", encoding="utf-8")
+    logger.info(f"  CURRENT pointer file -> {version}")
+
+
+def _read_root_version() -> str:
+    pp = REPO_ROOT / "pyproject.toml"
+    with pp.open("rb") as f:
+        data = tomllib.load(f)
+    return str(data["project"]["version"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -138,13 +199,21 @@ def main() -> None:
     run_prefetch(plugins, tag)
     ensure_plugins_installed(plugins)
     bundle_dir = run_pyinstaller(plugins)
-    manifest_path = write_manifest(bundle_dir, list(plugins), REPO_ROOT)
 
+    version = _read_root_version()
+    logger.info(f"== Version: {version} ==")
+    versioned_dir = restructure_to_versioned_layout(bundle_dir, version)
+    manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT)
+
+    install_root = bundle_dir
     logger.info(f"Manifest written: {manifest_path}")
-    logger.info(f"Bundle ready: {bundle_dir}")
-    logger.info(f"Test with: {bundle_dir / 'locai-link'} --help")
+    logger.info(f"Install root: {install_root}")
+    logger.info(f"  Versioned bundle: {versioned_dir}")
+    logger.info(f"Test with: {install_root / 'current' / 'locai-link'} --help")
     logger.info(
-        f"Package as: {asset_name}-{tag}-v<version>.tar.gz (.zip on Windows). CI reads asset_name from manifest.json."
+        f"Package the WHOLE install_root as: "
+        f"{asset_name}-{tag}-v{version}.tar.gz (.zip on Windows). "
+        "Extraction gives a valid Pattern-A first install."
     )
 
 

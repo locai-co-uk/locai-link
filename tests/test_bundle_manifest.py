@@ -96,3 +96,53 @@ def test_write_manifest_rejects_empty(tmp_path):
 def test_write_manifest_rejects_unknown_plugin(tmp_path):
     with pytest.raises(SystemExit):
         write_manifest(tmp_path, ["language_model", "image_classifier"], REPO_ROOT)
+
+
+# ---------------------------------------------------------------------------
+# restructure_to_versioned_layout
+# ---------------------------------------------------------------------------
+
+
+def test_restructure_to_versioned_layout(tmp_path):
+    """Flat PyInstaller output gets reshaped into install_root/versions/<v>/."""
+    from build import restructure_to_versioned_layout
+
+    bundle = tmp_path / "locai-link"
+    bundle.mkdir()
+    (bundle / "locai-link").write_text("#!/fake/binary\n")
+    internal = bundle / "_internal"
+    internal.mkdir()
+    (internal / "payload.txt").write_text("payload\n")
+
+    target = restructure_to_versioned_layout(bundle, "1.0.15")
+
+    assert target == bundle / "versions" / "1.0.15"
+    assert (target / "locai-link").read_text() == "#!/fake/binary\n"
+    assert (target / "_internal" / "payload.txt").read_text() == "payload\n"
+
+    current = bundle / "current"
+    pointer = bundle / "CURRENT"
+    assert current.is_symlink() or pointer.exists(), "neither current symlink nor CURRENT pointer was created"
+    if current.is_symlink():
+        # Relative symlink resolves against the install_root.
+        assert (bundle / current.readlink()).resolve() == target.resolve()
+    else:
+        assert pointer.read_text().strip() == "1.0.15"
+
+
+def test_restructure_to_versioned_layout_overwrites_stale_staging(tmp_path):
+    """A stale `_staged_<version>/` from a previous failed run is wiped, not merged."""
+    from build import restructure_to_versioned_layout
+
+    stale = tmp_path / "_staged_1.0.15"
+    stale.mkdir()
+    (stale / "from_previous_run.txt").write_text("should be gone after rebuild\n")
+
+    bundle = tmp_path / "locai-link"
+    bundle.mkdir()
+    (bundle / "locai-link").write_text("# fresh\n")
+
+    target = restructure_to_versioned_layout(bundle, "1.0.15")
+
+    assert (target / "locai-link").read_text() == "# fresh\n"
+    assert not (target / "from_previous_run.txt").exists()
