@@ -39,7 +39,7 @@ from link.config.commands import (
 from link.config.templating import resolve_templates
 
 # Fingerprint of the frozen fixture set (see test_contract_fingerprint_matches).
-CONTRACT_SHA256 = "f5b5dcb1673e16535158631f1c0c263108b3f2499928674577b8b414923aa168"
+CONTRACT_SHA256 = "fa487d4b0ec8be07fce9524ca0982326f24bd1455de961f442b8b7c67150b76f"
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "wire"
 _FIXTURES = sorted(FIXTURES_DIR.glob("*.json"))

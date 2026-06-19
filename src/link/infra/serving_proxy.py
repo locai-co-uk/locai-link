@@ -92,15 +92,23 @@ class _ChatTelemetry:
         if not chunk:
             return
         self._sse_buf.extend(chunk)
-        # SSE events are separated by a blank line — `\n\n`. Drain every
-        # complete event; whatever's left is a partial event waiting for
-        # the next chunk's bytes.
+        # SSE events are separated by a blank line. The spec allows either
+        # `\n\n` (LF, what llama-server emits) or `\r\n\r\n` (CRLF, used by
+        # other OpenAI-compatible servers and some proxies). Drain every
+        # complete event whichever delimiter the upstream picked; whatever's
+        # left is a partial event waiting for the next chunk's bytes.
         while True:
-            sep = self._sse_buf.find(b"\n\n")
-            if sep < 0:
+            lf = self._sse_buf.find(b"\n\n")
+            crlf = self._sse_buf.find(b"\r\n\r\n")
+            # Pick the earliest delimiter that's present.
+            if lf < 0 and crlf < 0:
                 return
+            if crlf < 0 or (lf >= 0 and lf < crlf):
+                sep, sep_len = lf, 2
+            else:
+                sep, sep_len = crlf, 4
             event = bytes(self._sse_buf[:sep])
-            del self._sse_buf[: sep + 2]
+            del self._sse_buf[: sep + sep_len]
             self._consume_event(event)
 
     def _consume_event(self, event: bytes) -> None:
@@ -483,12 +491,15 @@ class ServingProxy:
             if self._server is not None:
                 return  # already started
             if self._port_in_use():
-                logger.warning(
-                    "[serving_proxy] port %d already in use; refusing to start. "
-                    "Stop the existing listener and retry if you need a clean restart.",
-                    self.public_port,
+                # Fail loudly: callers like SwapManager.ensure_proxy() can't
+                # detect a silent return, and readiness probes against the
+                # internal upstream port pass independently — so swallowing
+                # this would let serving look healthy with no public proxy
+                # actually listening.
+                raise RuntimeError(
+                    f"[serving_proxy] cannot start: port {self.public_port} already in use. "
+                    "Stop the existing listener and retry."
                 )
-                return
 
             upstream = f"http://127.0.0.1:{self.upstream_port}"
             self._server = _ProxyServer(

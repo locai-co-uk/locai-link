@@ -75,13 +75,18 @@ def write_manifest(
     and integrity checks.
     """
     asset_name = derive_asset_name(plugins)
+    # Same canonical ordering as derive_asset_name so two CI runs with the
+    # plugins passed in different orders produce byte-identical manifest.json.
+    canonical = [p for p in PLUGIN_ORDER if p in set(plugins)]
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "asset_name": asset_name,
         "version": _read_root_version(repo_root),
         "git_sha": _git_sha(repo_root),
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "plugins": [{"name": name, "version": _read_plugin_version(repo_root / "plugins" / name)} for name in plugins],
+        "plugins": [
+            {"name": name, "version": _read_plugin_version(repo_root / "plugins" / name)} for name in canonical
+        ],
     }
     target = bundle_dir / "manifest.json"
     target.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

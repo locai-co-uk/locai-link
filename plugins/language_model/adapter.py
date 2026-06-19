@@ -129,6 +129,9 @@ class LanguageModel:
     def stop(self):
         self.running = False
         if self._swap_manager:
+            # Unregister BEFORE removing the model so no stray telemetry
+            # records get fanned out to a half-torn-down adapter.
+            self._swap_manager.remove_telemetry_callback(self._on_proxy_telemetry)
             self._swap_manager.remove_model(self.model_id)
         if self.server:
             self.server.stop()
@@ -173,14 +176,17 @@ class LanguageModel:
                     "source": record.get("source", "serving_proxy"),
                 },
             )
-            if self.queue.full():
+            # put_nowait + Full is race-free; full() then put() leaves a
+            # window where another producer can fill the queue and we'd
+            # block the ServingProxy's handler thread on insertion.
+            try:
+                self.queue.put_nowait(payload)
+            except queue.Full:
                 logger.warning(
                     "language_model queue is full — dropping inference telemetry (size=%d). "
                     "Downstream pipeline isn't draining fast enough.",
                     self.queue.maxsize,
                 )
-                return
-            self.queue.put(payload)
         except Exception as exc:
             logger.debug(f"_on_proxy_telemetry failed: {exc}")
 

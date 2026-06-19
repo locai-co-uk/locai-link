@@ -104,6 +104,21 @@ class SwapManager:
             if cb not in self._on_telemetry_callbacks:
                 self._on_telemetry_callbacks.append(cb)
 
+    def remove_telemetry_callback(self, cb: Callable[[dict], None]) -> None:
+        """Unregister a previously-added telemetry sink.
+
+        Adapters MUST call this on stop. Otherwise the SwapManager (a
+        process-global registry entry, see ``get_swap_manager``) keeps a
+        reference to the stopped adapter's bound method and keeps fanning
+        out records to it long after its queue stopped draining.
+        """
+        with self._lock:
+            try:
+                self._on_telemetry_callbacks.remove(cb)
+            except ValueError:
+                # Already removed (or never added) — idempotent.
+                pass
+
     def _fanout_telemetry(self, record: dict) -> None:
         """ServingProxy hands each inference record here; we fan out to every
         registered adapter. Adapters filter by record["model"] internally."""
@@ -180,7 +195,11 @@ class SwapManager:
 
     def is_healthy(self) -> bool:
         """Hit llama-swap's /health on the listen port (bypasses the proxy)."""
-        if self._proc is not None and self._proc.poll() is not None:
+        # If we don't own a process, refuse to call this healthy — otherwise
+        # an unrelated process binding the same loopback port could trick this
+        # SwapManager into reporting OK after its own llama-swap has stopped.
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
             return False
         try:
             resp = requests.get(f"http://127.0.0.1:{self._listen_port}/health", timeout=2)
@@ -335,8 +354,11 @@ class SwapManager:
             self._clear_pid()
             return
 
-        if not self._looks_like_llama_swap(proc):
-            logger.warning(f"Pidfile PID {prev_pid} isn't llama-swap (likely PID reuse); cleaning up")
+        if not self._looks_like_our_llama_swap(proc):
+            logger.warning(
+                f"Pidfile PID {prev_pid} isn't this manager's llama-swap "
+                "(PID reuse, or another instance on a different port); cleaning up"
+            )
             self._clear_pid()
             return
 
@@ -360,15 +382,25 @@ class SwapManager:
 
         self._clear_pid()
 
-    @staticmethod
-    def _looks_like_llama_swap(proc: psutil.Process) -> bool:
-        """Process name OR cmdline contains 'llama-swap'."""
+    def _looks_like_our_llama_swap(self, proc: psutil.Process) -> bool:
+        """Process is llama-swap AND was launched with this manager's config or listen address.
+
+        Just checking the binary name is too loose — a stale pidfile whose PID
+        was reused by a *different* llama-swap instance (different port,
+        different config) would otherwise be killed. Match against the
+        cmdline args we passed at start (see ``_start``).
+        """
         try:
-            if "llama-swap" in proc.name().lower():
-                return True
-            return any("llama-swap" in arg.lower() for arg in proc.cmdline())
+            name = proc.name().lower()
+            cmdline = [arg.lower() for arg in proc.cmdline()]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
+        is_swap = "llama-swap" in name or any("llama-swap" in arg for arg in cmdline)
+        if not is_swap:
+            return False
+        expected_cfg = str(self._config_path.resolve()).lower()
+        expected_listen = f"127.0.0.1:{self._listen_port}"
+        return expected_cfg in cmdline or any(expected_listen in arg for arg in cmdline)
 
     # ------------------------------------------------------------------
     # Config generation

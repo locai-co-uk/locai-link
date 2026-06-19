@@ -15,13 +15,17 @@ on:
     paths:
       - "pyproject.toml"
 
+# Default to read-only. Only the jobs that actually mutate the release
+# (`release` creates the tag, `attach` uploads built assets) get write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Create release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.tag.outputs.name }}
     steps:
@@ -215,6 +219,8 @@ jobs:
     name: Attach assets to release
     needs: [release, bundle]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all platform assets
         uses: actions/download-artifact@v4

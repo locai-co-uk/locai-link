@@ -101,16 +101,23 @@ def _read_raw_id() -> str:
     system = platform.system()
     try:
         if system == "Linux":
-            return _read_linux()
+            raw = _read_linux()
         elif system == "Windows":
-            return _read_windows()
+            raw = _read_windows()
         elif system == "Darwin":
-            return _read_macos()
+            raw = _read_macos()
         else:
             logger.warning(
                 "Link could not identify the OS ('%s'); falling back to a persistent UUID identifier.",
                 system,
             )
+            return _fallback_id()
+        raw = raw.strip()
+        if not raw:
+            # An empty /etc/machine-id would hash to the same digest on every
+            # such host, breaking enrolment dedup. Treat as a read failure.
+            raise RuntimeError(f"native machine-id reader for {system} returned an empty string")
+        return raw
     except Exception as exc:
         logger.warning(
             "Link failed to read the native machine-id on %s (%s); falling back to a persistent UUID identifier.",

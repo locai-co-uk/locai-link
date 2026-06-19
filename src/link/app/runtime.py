@@ -107,9 +107,13 @@ class AgentRuntime:
             cmd = parse_command(resolved)
         except ValidationError as e:
             cmd_id = data.get("id")
+            # Keep the full validation detail in local logs; tell the backend
+            # only that the command was malformed. Pydantic ValidationError
+            # repr can include payload field values, which we don't want
+            # echoing back through the command-status telemetry channel.
             logger.warning(f"Command rejected (schema validation failed): {e}")
             if isinstance(cmd_id, str) and cmd_id:
-                self.status_logger.report_command(cmd_id, "failed", f"Invalid command: {e}")
+                self.status_logger.report_command(cmd_id, "failed", "Invalid command payload")
             return
 
         logger.info(f"Processing command: {cmd.type}")
@@ -189,14 +193,29 @@ class AgentRuntime:
                     self.status_logger.report_command(cmd.id, "failed", f"Failed to stop {cmd.pipeline_id}")
 
             elif isinstance(cmd, UninstallModelCommand):
+                # filename_on_server / file_extension flow into a filesystem
+                # delete below — reject anything that isn't a plain basename
+                # before _uninstall_model gets a chance to compose a path.
+                safe_payload: dict[str, str] = {}
+                if cmd.filename_on_server:
+                    if not _is_safe_basename(cmd.filename_on_server):
+                        msg = f"Refusing uninstall: filename_on_server is unsafe ({cmd.filename_on_server!r})"
+                        logger.error(msg)
+                        self.status_logger.report_command(cmd.id, "failed", "Invalid filename_on_server")
+                        return
+                    safe_payload["filename_on_server"] = cmd.filename_on_server
+                if cmd.file_extension:
+                    if not _is_safe_extension(cmd.file_extension):
+                        msg = f"Refusing uninstall: file_extension is unsafe ({cmd.file_extension!r})"
+                        logger.error(msg)
+                        self.status_logger.report_command(cmd.id, "failed", "Invalid file_extension")
+                        return
+                    safe_payload["file_extension"] = cmd.file_extension
                 self._uninstall_model(
                     cmd.id,
                     cmd.pipeline_id,
                     force_stop=cmd.force_stop,
-                    payload={
-                        "filename_on_server": cmd.filename_on_server,
-                        "file_extension": cmd.file_extension,
-                    },
+                    payload=safe_payload,
                 )
 
             elif isinstance(cmd, UpdatePipelineCommand):
@@ -363,6 +382,20 @@ class AgentRuntime:
         pipeline_id = cmd.pipeline_id
         model_name = cmd.model_name
 
+        # pipeline_id and config.id are independently set on the wire; if they
+        # diverge, the bundle was malformed by the producer and we'd silently
+        # persist under one key while restarts/lookups use the other.
+        if cmd.config.id != pipeline_id:
+            msg = f"Refusing deploy: pipeline_id {pipeline_id!r} != config.id {cmd.config.id!r}"
+            logger.error(msg)
+            self.status_logger.report_command(command_id, "failed", "Pipeline id mismatch")
+            return
+        if model_name and not _is_safe_basename(model_name):
+            msg = f"Refusing deploy: model_name is unsafe ({model_name!r})"
+            logger.error(msg)
+            self.status_logger.report_command(command_id, "failed", "Invalid model_name")
+            return
+
         logger.info(f"Initiating deployment for command '{command_id}'...")
         models_dir = Path.cwd().joinpath("models")
         models_dir.mkdir(parents=True, exist_ok=True)
@@ -428,6 +461,12 @@ class AgentRuntime:
         """
 
         pipeline_id = cmd.pipeline_id
+
+        if cmd.config.id != pipeline_id:
+            msg = f"Refusing update: pipeline_id {pipeline_id!r} != config.id {cmd.config.id!r}"
+            logger.error(msg)
+            self.status_logger.report_command(cmd.id, "failed", "Pipeline id mismatch")
+            return
 
         with self.lock:
             is_running = pipeline_id in self.pipelines
@@ -621,3 +660,31 @@ class AgentRuntime:
                 if pipe.is_alive():
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
+
+
+# ---------------------------------------------------------------------------
+# Wire input validators — first line of defense against malicious/malformed
+# filenames flowing into filesystem operations. Wire-level pydantic catches
+# missing fields and type errors, but it doesn't see "../etc/passwd" as
+# semantically unsafe — that's our job here.
+# ---------------------------------------------------------------------------
+
+
+def _is_safe_basename(name: str) -> bool:
+    """True if `name` is a single filename component with no path separators."""
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    # Path(name).name strips any directory parts — if it differs from the
+    # input, the input had directory structure we don't want.
+    return Path(name).name == name
+
+
+def _is_safe_extension(ext: str) -> bool:
+    """True if `ext` is a plain extension token (no separators)."""
+    if not ext:
+        return False
+    if "/" in ext or "\\" in ext or "\x00" in ext or ext in (".", ".."):
+        return False
+    return True

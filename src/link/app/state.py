@@ -65,12 +65,16 @@ class StateManager:
         try:
             data = json.loads(target_path.read_text(encoding="utf-8"))
 
+            # Tighten before the schema check — files with incompatible versions
+            # may still contain secrets (api_key, password) we don't want world-
+            # readable while the user resolves the schema drift manually.
+            self._tighten_permissions(target_path)
+
             # Basic schema check: Version Compatibility
             # We strictly require version 2.1, but pipelines are optional.
             if data.get("version") == 2.1:
                 self._cache = data
                 self.current_session_path = target_path
-                self._tighten_permissions(target_path)
                 return data
             else:
                 # Malformed or incompatible version

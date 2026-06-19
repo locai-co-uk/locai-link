@@ -21,7 +21,7 @@ When the model is serving, two ports are listening:
 
 | Port | What | Use this for |
 |---|---|---|
-| `8100` (public, all interfaces) | ServingProxy → llama-swap | All real chat traffic. **Telemetry fires here.** |
+| `8100` (configured host; default `127.0.0.1`) | ServingProxy → llama-swap | All real chat traffic. **Telemetry fires here.** |
 | `8150` (loopback only) | llama-swap directly | Internal — proxy's upstream. **Bypasses telemetry.** |
 
 llama-swap ships a built-in chat UI at `http://127.0.0.1:8150/ui/`. It's handy for triage but it talks to itself on `:8150`, so **chats from that UI never reach the ServingProxy** — no `model_inference_result_received` event, no row on the control UI's Inference Results page. If you're verifying observability, drive the model through `:8100`:

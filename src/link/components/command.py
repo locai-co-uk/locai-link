@@ -45,14 +45,15 @@ class AgentCommand(Sink):
         cmd_id = cmd.get("id")
         if cmd_id is not None and cmd_id in self._seen:
             return True  # duplicate, silently ack
-        if cmd_id is not None:
-            self._seen.append(cmd_id)
         try:
             self.callback(cmd)
-            return True
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
+            # Don't record cmd_id in _seen — a retry should be allowed to try again.
             return False
+        if cmd_id is not None:
+            self._seen.append(cmd_id)
+        return True
 
     def mark_seen(self, cmd_id: str) -> None:
         """Pre-populate dedup before the consumer starts (used by runtime reconcile)."""

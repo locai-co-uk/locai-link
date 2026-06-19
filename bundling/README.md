@@ -42,13 +42,13 @@ source via the curl one-liner in the top-level README.
 locai-link-<plugin-codes>-<os>-<arch>-v<version>.<ext>
 ```
 
-Examples:
+Examples (`<version>` is the current root `pyproject.toml` version):
 
 ```
-locai-link-llm-linux-x86_64-v1.0.14.tar.gz
-locai-link-llm-stt-linux-x86_64-v1.0.14.tar.gz
-locai-link-llm-stt-macos-arm64-v1.0.14.tar.gz
-locai-link-llm-windows-x86_64-v1.0.14.zip
+locai-link-llm-linux-x86_64-v<version>.tar.gz
+locai-link-llm-stt-linux-x86_64-v<version>.tar.gz
+locai-link-llm-stt-macos-arm64-v<version>.tar.gz
+locai-link-llm-windows-x86_64-v<version>.zip
 ```
 
 Plugin codes (canonical, in `bundling/manifest.py::PLUGIN_CODES`):

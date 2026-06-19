@@ -3,6 +3,6 @@
   "type": "UNINSTALL_MODEL",
   "pipeline_id": "llama-3-8b",
   "force_stop": true,
-  "filename_on_server": "llama-3-8b.Q4_K_M.gguf",
+  "filename_on_server": "llama-3-8b.Q4_K_M",
   "file_extension": "gguf"
 }
