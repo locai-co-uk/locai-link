@@ -127,9 +127,7 @@ def build_launcher() -> Path:
     ``current`` points at. See ../OTA-BUNDLE.md §6.5.
     """
     if not _have("cargo"):
-        raise SystemExit(
-            "cargo is required to build the launcher. Install Rust via https://rustup.rs/"
-        )
+        raise SystemExit("cargo is required to build the launcher. Install Rust via https://rustup.rs/")
     if not LAUNCHER_DIR.is_dir():
         raise SystemExit(f"Launcher source missing at {LAUNCHER_DIR}")
     logger.info("Building launcher (cargo build --release)")

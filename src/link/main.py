@@ -309,6 +309,60 @@ def run(args: argparse.Namespace):
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+def self_check(args: argparse.Namespace) -> int:
+    """Boot the runtime to the point of config + transport + plugins, then exit cleanly.
+
+    Sole consumer: ``bundle_updater.health_check()``. Run on a freshly extracted
+    bundle before flipping ``current`` — proves the new binary can import, parse
+    the active session, open its transport, and enumerate plugin entry points.
+    No pipelines start, no inference runs.
+
+    Exit 0 = healthy, nonzero = failure (caller rolls back the flip).
+    """
+    state_manager = StateManager()
+    saved_state = state_manager.load_state()
+    if saved_state is None:
+        # No session means there's nothing meaningful to check against. The
+        # bootstrap path (Pattern B) hits this — that's fine, it has its own
+        # verification at fetch time. OTA path always has a session.
+        logger.info("self-check: no session found — binary boot only.")
+        from link.components.registry import ComponentRegistry
+
+        ComponentRegistry._refresh_entry_points()
+        return 0
+
+    try:
+        agent_config = AgentConfig(**saved_state)
+    except Exception as e:
+        logger.error(f"self-check: session present but unparseable: {e}")
+        return 1
+
+    zenoh_session = None
+    if agent_config.transport and agent_config.transport.type == "zenoh":
+        try:
+            zenoh_session = get_or_create_zenoh_session(agent_config.transport)
+        except Exception as e:
+            logger.error(f"self-check: Zenoh open failed: {e}")
+            return 1
+
+    try:
+        from link.components.registry import ComponentRegistry
+
+        ComponentRegistry._refresh_entry_points()
+    except Exception as e:
+        logger.error(f"self-check: plugin enumeration failed: {e}")
+        return 1
+    finally:
+        if zenoh_session is not None:
+            try:
+                zenoh_session.close()
+            except Exception:
+                pass
+
+    logger.info(f"self-check: ok (device={agent_config.identity.device_id})")
+    return 0
+
+
 def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
     """Applies an OTA update and re-execs the current Python process.
 
@@ -488,6 +542,12 @@ def main():
     subparsers.add_parser("stop", help="Stops all running services.")
     subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
 
+    # Self-check — minimal boot used by the OTA health check in bundle_updater.
+    subparsers.add_parser(
+        "self-check",
+        help="Boot to config+transport+plugins and exit 0 if healthy. Used by OTA rollback.",
+    )
+
     subparsers.add_parser("tui", help="Runs the TUI.")
     subparsers.add_parser("install-plugin", help="Installs a plugin.").add_argument("name")
 
@@ -514,6 +574,8 @@ def main():
         from link.components.registry import ComponentRegistry
 
         ComponentRegistry.install_plugin(args.name)
+    elif args.command == "self-check":
+        sys.exit(self_check(args))
     else:
         parser.print_help()
 
