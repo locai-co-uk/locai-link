@@ -12,7 +12,13 @@ from pathlib import Path
 from link.app.onboarding import FLEET_MARKER_PATH, activate_device, enroll_device, register_device
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
-from link.app.updater import pull_and_update, reinstall_plugin_binaries
+from link.app.updater import (
+    BundleUpdateError,
+    pull_and_update,
+    reinstall_plugin_binaries,
+    running_frozen_bundle,
+    swap_bundle,
+)
 from link.config.loader import load_config
 from link.config.models import AgentConfig
 from link.infra.service import ServiceManager
@@ -364,13 +370,39 @@ def self_check(args: argparse.Namespace) -> int:
 
 
 def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
-    """Applies an OTA update and re-execs the current Python process.
+    """Applies an OTA update via the right path for the install shape.
+
+    Source install (cloned repo, ``sys.frozen`` False): git pull + plugin
+    refresh + ``os.execv``. Same PID, same FDs, same env — service managers
+    see a continuously running process.
+
+    Bundled install (PyInstaller artifact): ``swap_bundle`` downloads the new
+    release, verifies, extracts, health-checks, and atomically flips the
+    ``current`` pointer. The process then exits with code 42, which the Rust
+    launcher (or any compatible supervisor) recognises as "respawn me from
+    whatever ``current`` now points at". We never ``execv`` in the bundle
+    path because ``sys.executable`` for a frozen binary points at the *old*
+    version's runtime, which the new ``current`` is replacing.
 
     Args:
-        repo_dir (Path): The project root (git repository).
-        config (AgentConfig): The active config — used to pick which plugins refresh.
+        repo_dir (Path): The project root (git repository) — used only on the source path.
+        config (AgentConfig): The active config — used to pick which plugins refresh on the source path.
     """
     logger.info("Applying OTA update...")
+
+    if running_frozen_bundle():
+        try:
+            swap_bundle()
+        except BundleUpdateError as e:
+            logger.critical(f"Bundle update failed: {e}")
+            sys.exit(1)
+        # Always exit 42 — whether we flipped or were already at latest, the
+        # launcher should respawn from `current`. Returning 0 would tell the
+        # launcher to stay stopped, which is the wrong outcome when the user
+        # explicitly requested an update check.
+        logger.info("Exiting (code 42) for launcher to respawn from current.")
+        sys.exit(42)
+
     try:
         pull_and_update(repo_dir)
         reinstall_plugin_binaries(repo_dir, config)

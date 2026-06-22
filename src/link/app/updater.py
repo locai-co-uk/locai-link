@@ -955,3 +955,57 @@ def clear_staging(root: Path) -> None:
     p = root / STAGING_DIR
     if p.exists():
         shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration
+# ---------------------------------------------------------------------------
+
+
+def running_frozen_bundle() -> bool:
+    """True when this process is a PyInstaller-frozen bundle (vs a source install)."""
+    return bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+
+
+def swap_bundle(install_root: Path | None = None) -> bool:
+    """Run the full bundle OTA chain end-to-end. Returns True if current was flipped.
+
+    Discovers ``install_root`` if not given, identifies the live version from
+    its manifest, asks GitHub for the latest matching release. Returns
+    ``False`` without I/O when already at latest. Otherwise: download,
+    SHA256 verify against the sibling sidecar, extract, codesign on macOS,
+    health-check the new runtime, atomic flip, GC.
+
+    Failures along the way raise the matching ``BundleUpdateError`` subclass
+    so the caller can log and exit. On health-check failure the staged
+    version directory is removed before the exception propagates.
+    """
+    if install_root is None:
+        install_root = discover_install_root()
+    manifest = read_manifest(install_root)
+    release = latest_release_for(manifest.asset_name)
+
+    if release.version == manifest.version:
+        logger.info(f"swap_bundle: already at latest ({manifest.version})")
+        return False
+
+    logger.info(f"swap_bundle: {manifest.version} -> {release.version}")
+    staging = staging_path(install_root)
+    archive = download(release.download_url, staging / release.asset_name)
+    verify(archive, expected_sha256_url=release.sha256_url, platform=sys.platform)
+
+    target = install_root / VERSIONS_DIR / release.version
+    extract(archive, target)
+    verify_extracted_macos(target)  # no-op on non-macOS
+
+    if not health_check(target / RUNTIME_BINARY):
+        shutil.rmtree(target, ignore_errors=True)
+        raise HealthCheckFailed(
+            f"self-check failed for staged version {release.version}; rolled back"
+        )
+
+    flip_current(install_root, release.version)
+    gc_old_versions(install_root)
+    clear_staging(install_root)
+    logger.info(f"swap_bundle: flipped current -> {release.version}")
+    return True

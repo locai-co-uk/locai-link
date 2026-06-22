@@ -739,3 +739,131 @@ def test_health_check_fails_on_exit_nonzero(tmp_path):
 
 def test_health_check_fails_on_missing_binary(tmp_path):
     assert updater.health_check(tmp_path / "does_not_exist") is False
+
+
+# --- running_frozen_bundle / swap_bundle ---
+
+
+def test_running_frozen_bundle_true(mocker):
+    mocker.patch.object(updater.sys, "frozen", True, create=True)
+    mocker.patch.object(updater.sys, "_MEIPASS", "/tmp/_MEI123", create=True)
+    assert updater.running_frozen_bundle() is True
+
+
+def test_running_frozen_bundle_false_in_source_install(mocker):
+    mocker.patch.object(updater.sys, "frozen", False, create=True)
+    assert updater.running_frozen_bundle() is False
+
+
+def _install_root_with_runtime_stub(tmp_path: Path, version: str) -> Path:
+    """An install_root whose locai-link-runtime stub exits 0 on `self-check`."""
+    root = _setup_install_root(tmp_path, version=version)
+    runtime = root / updater.VERSIONS_DIR / version / updater.RUNTIME_BINARY
+    runtime.write_text(
+        '#!/usr/bin/env bash\n[ "$1" = "self-check" ] && exit 0 || exit 1\n'
+    )
+    runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return root
+
+
+def test_swap_bundle_short_circuits_when_already_at_latest(tmp_path, mocker):
+    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
+    mocker.patch.object(
+        updater,
+        "latest_release_for",
+        return_value=ReleaseInfo(
+            version="1.0.15",
+            tag="v1.0.15",
+            asset_name="locai-link-llm-linux-x86_64-v1.0.15.tar.gz",
+            download_url="https://example/x.tar.gz",
+            sha256_url="https://example/x.tar.gz.sha256",
+        ),
+    )
+    download_spy = mocker.patch.object(updater, "download")
+    flip_spy = mocker.patch.object(updater, "flip_current")
+
+    assert updater.swap_bundle(install_root=root) is False
+    download_spy.assert_not_called()
+    flip_spy.assert_not_called()
+
+
+def test_swap_bundle_happy_path(tmp_path, mocker):
+    """End-to-end mock: newer release available -> chain runs, current flipped."""
+    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
+    new_version = "1.0.16"
+    asset_name = f"locai-link-llm-linux-x86_64-v{new_version}.tar.gz"
+
+    mocker.patch.object(
+        updater,
+        "latest_release_for",
+        return_value=ReleaseInfo(
+            version=new_version,
+            tag=f"v{new_version}",
+            asset_name=asset_name,
+            download_url="https://example/" + asset_name,
+            sha256_url="https://example/" + asset_name + ".sha256",
+        ),
+    )
+    # Stub download + verify so we don't need a network. extract gets a real
+    # tarball so the on-disk flip / health-check exercise real code paths.
+    def fake_download(url, dest, **kw):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"placeholder")
+        return dest
+
+    mocker.patch.object(updater, "download", side_effect=fake_download)
+    mocker.patch.object(updater, "verify")
+
+    def fake_extract(archive, target):
+        # Lay down a manifest + a runnable runtime stub at the target dir.
+        target.mkdir(parents=True, exist_ok=True)
+        (target / updater.MANIFEST_NAME).write_text("{}")
+        runtime = target / updater.RUNTIME_BINARY
+        runtime.write_text("#!/usr/bin/env bash\nexit 0\n")
+        runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    mocker.patch.object(updater, "extract", side_effect=fake_extract)
+
+    assert updater.swap_bundle(install_root=root) is True
+    assert (root / updater.CURRENT_LINK).resolve().name == new_version
+    assert (root / updater.PREVIOUS_LINK).resolve().name == "1.0.15"
+
+
+def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
+    """A failing self-check should remove the staged version and raise."""
+    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
+    new_version = "1.0.16"
+    asset_name = f"locai-link-llm-linux-x86_64-v{new_version}.tar.gz"
+
+    mocker.patch.object(
+        updater,
+        "latest_release_for",
+        return_value=ReleaseInfo(
+            version=new_version,
+            tag=f"v{new_version}",
+            asset_name=asset_name,
+            download_url="https://example/" + asset_name,
+            sha256_url="https://example/" + asset_name + ".sha256",
+        ),
+    )
+    mocker.patch.object(updater, "download", side_effect=lambda url, dest, **_: dest)
+    mocker.patch.object(updater, "verify")
+
+    def fake_extract(archive, target):
+        # A runtime that exits nonzero so health_check fails.
+        target.mkdir(parents=True, exist_ok=True)
+        runtime = target / updater.RUNTIME_BINARY
+        runtime.write_text("#!/usr/bin/env bash\nexit 17\n")
+        runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    mocker.patch.object(updater, "extract", side_effect=fake_extract)
+    flip_spy = mocker.patch.object(updater, "flip_current")
+
+    with pytest.raises(updater.HealthCheckFailed):
+        updater.swap_bundle(install_root=root)
+
+    # The staged version dir should be cleaned up on failure.
+    assert not (root / updater.VERSIONS_DIR / new_version).exists()
+    # And no flip should have happened.
+    flip_spy.assert_not_called()
+    assert (root / updater.CURRENT_LINK).resolve().name == "1.0.15"
