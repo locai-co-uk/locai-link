@@ -25,7 +25,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -73,7 +73,7 @@ jobs:
             platform_tag: macos-arm64
             archive_ext: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release.outputs.tag }}
 
