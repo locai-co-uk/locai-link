@@ -4,6 +4,140 @@ All notable changes. Newest at top. The migration narrative from
 `locai-link-old` is preserved below the per-version entries as historical
 record.
 
+## [Unreleased]
+
+Lays down the over-the-air update path for bundled installs. Until now,
+updating a frozen Link install meant re-running the host app's installer
+or swapping the binary by hand. From this release on, a running bundled
+agent can fetch a newer Link off GitHub, swap to it, restart, and — if
+the new version doesn't come up cleanly — roll itself back to the
+previous one without anyone watching. Developer (source) installs still
+update by `git pull` as before.
+
+### Why a separate launcher?
+
+Updating a running program while it's still running is the classic
+"changing the wheels on a moving car" problem. On every supported
+platform, a frozen Python process keeps its own executable and bundled
+libraries open for as long as it's alive — you can't safely overwrite
+those files in place, and the process can't replace itself. So the
+agent fundamentally can't update itself on its own.
+
+The launcher solves this by sitting one level up. It's a tiny stable
+binary whose job is to pick which version of the agent to run, exec it,
+and watch its exit code. When the agent wants to update, it just exits
+with a known code (42) and the launcher re-resolves `current` — which
+the update may have flipped to a new version — and starts that one
+instead. The launcher itself is intentionally never auto-updated, which
+makes it the **unchanging entry point** the host app (Meetily, SafeChat,
+systemd, launchd, Windows SCM) talks to. Agent versions can come and go
+behind a fixed `locai-link` binary name and a fixed argv contract,
+without any host integration noticing.
+
+The separation also makes **automatic rollback possible**. The same
+outside-the-bundle process that started the new version can watch it
+crash, decide the crash happened too soon after an update, and respawn
+the previous version instead. The agent can't roll itself back — by
+the time it's the one failing, it's no longer a credible judge of
+itself.
+
+And it's what makes **Pattern B first-launch** work at all. A host that
+ships only the launcher + `boot.json` has nothing else to run on first
+launch; the launcher has to be able to fetch and lay down the first
+bundle itself before anything inside the bundle exists.
+
+### What changes for users and operators
+
+- **Bundled installs update themselves.** When the backend sends the
+  existing `UpdateAgentCommand`, the agent now notices it's running as a
+  frozen bundle and fetches the latest matching release from GitHub
+  instead of trying (and failing) to `git pull`. Download is verified by
+  SHA256 against a sidecar file published alongside the tarball before
+  anything is extracted to disk.
+- **Two versions are kept on disk at any time.** The current one and the
+  one before it. After a successful update the older-still version is
+  garbage-collected on the next round, so disk usage stays bounded at
+  ~2× a bundle.
+- **Automatic rollback if a new version crashes.** A small launcher
+  binary sits in front of the runtime and watches its exit code. If a
+  freshly-installed version exits non-zero within 2 minutes of the
+  swap, the launcher points "current" back at the previous version and
+  respawns. Past that window, crashes are treated as ordinary crashes.
+- **Pre-swap health check.** Before the new version is made live, the
+  runtime is started once with `--self-check` — it boots config + Zenoh
+  + plugins and exits clean. If self-check fails the new version is
+  discarded; the running one keeps serving.
+- **No change for source installs.** If you're running Link from a git
+  checkout, nothing in this release affects you. The frozen-vs-source
+  dispatch picks the old path automatically.
+- **First launch fetches its own bundle.** Partner hosts (Meetily,
+  SafeChat) can ship just the launcher + a tiny `boot.json` describing
+  what to download. On first run, the launcher reads `boot.json`,
+  fetches the latest matching release off GitHub, verifies it the same
+  way OTA does, and starts the agent. No bundle baked into the host
+  installer required — and users always get the *latest* version on
+  first run regardless of how long ago the host shipped. Hosts that
+  prefer to pre-seed an offline-capable bundle can still do that; the
+  launcher branches automatically based on whether a `current` already
+  exists.
+
+### Under the hood
+
+- **A/B install layout.** Bundled installs now live at
+  `<install_root>/versions/<v>/` with a `current` symlink (or `CURRENT`
+  pointer file on hosts where symlinks aren't permitted) selecting the
+  active version. `previous` keeps the immediately prior version for
+  rollback.
+- **Rust launcher binary (`locai-link`).** ~250 lines, ships in every
+  release tarball. Resolves `current`, execs the runtime, restarts on
+  exit code 42 (the runtime's "I updated myself, please respawn"
+  signal), and performs the post-update rollback described above. The
+  launcher itself is intentionally never auto-updated.
+- **`updater.py` covers both paths.** `pull_and_update` /
+  `reinstall_plugin_binaries` for source installs is unchanged.
+  `swap_bundle()` is new: identify-self via `manifest.json`, query the
+  GitHub Releases API for the matching asset, download with retries,
+  verify, extract to a staging path, health-check, atomic-rename
+  `current`, drop a `.update-pending` stamp the launcher reads on next
+  boot, GC the previous-previous version. `running_frozen_bundle()`
+  routes `_apply_update_and_reexec` to the right one.
+- **`.update-pending` stamp.** Two-line plain-text file
+  (`<unix_ts>\n<previous_version>\n`) written immediately after a
+  successful flip. The launcher reads it on every non-zero child exit
+  and, within the 120s health window, rolls back. Stale stamps are
+  cleared on next non-zero exit so they don't linger.
+- **Self-check entry point.** `python -m link self-check` /
+  `locai-link-runtime --self-check` boots config + transport + plugins
+  and exits 0 on success. No telemetry, no side effects — explicitly
+  designed to be safe to run on an unproven version.
+- **Dry-run harness.** `bundling/_dryrun_ota.py` reproduces a v1.0.15
+  → v1.0.16 swap end-to-end against a fake release on local disk:
+  builds a "current" install, simulates the OTA, asserts the flip, the
+  stamp, the GC, and the post-flip layout. `--target /some/path` keeps
+  the workspace around so you can inspect it.
+- **Integration tests.** 52 Python tests across the source and bundle
+  paths; 11 Rust integration tests in the launcher covering exec
+  dispatch, exit 42 respawn, and all five rollback conditions
+  (within-window, past-window, exit 0, previous-version missing,
+  pointer-file shape).
+
+### Not in this release
+
+- **Pattern B first-install.** The host installer still needs to drop a
+  pre-extracted bundle (Pattern A) or trigger one out of band; the
+  launcher's "no `current` → fetch from `boot.json`" path lands next.
+- **Health-window heartbeat from the runtime.** Today the launcher
+  decides rollback eligibility purely by wall-clock age of the stamp
+  (≤ 120s). Hooking the runtime to clear the stamp itself, once it
+  passes its first healthy ping, lands when the runtime grows a
+  periodic backend ping.
+- **Windows.** Code path is in place but unsigned bundles are blocked
+  by Windows SmartScreen — code-signing procurement gates Windows GA.
+  macOS + Linux are not blocked.
+- **Bundled update telemetry to backend.** `bootstrap_*` and `update_*`
+  events are specified in the design doc but not yet emitted; they
+  ride the existing event publisher when wired up.
+
 ## [1.0.15] - 2026-06-18
 
 Cuts over inference observability to HTTP-response interception, lands the

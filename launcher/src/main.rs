@@ -18,6 +18,10 @@
 //! ceiling on how long a "still proving itself" flip is rollback-eligible —
 //! after that, normal crash behaviour applies and the stamp is cleared.
 
+mod boot;
+mod bootstrap;
+mod status;
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,14 +64,35 @@ fn run() -> Result<u8, String> {
     let args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
 
     loop {
-        let version = resolve_current_version(&install_root).ok_or_else(|| {
-            format!(
-                "no installed version found. \n\
-                 Expected a `{CURRENT_SYMLINK}` symlink or `{CURRENT_POINTER_FILE}` pointer file in {}.\n\
-                 The host installer is responsible for seeding at least one version.",
-                install_root.display()
-            )
-        })?;
+        let version = match resolve_current_version(&install_root) {
+            Some(v) => v,
+            None => {
+                // No `current` yet — Pattern B first launch. Try to
+                // bootstrap from boot.json. The host installer is
+                // responsible for dropping that file alongside this
+                // launcher. If it's also missing, that's a clear
+                // installer bug and we surface it as exit 2.
+                if !install_root.join("boot.json").is_file() {
+                    return Err(format!(
+                        "no installed version and no boot.json in {}. \n\
+                         Either the host installer didn't drop a `boot.json` (Pattern B) \
+                         nor pre-seed a `versions/<v>/` + `current` (Pattern A).",
+                        install_root.display()
+                    ));
+                }
+                match bootstrap::bootstrap_from_boot(&install_root) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        status::emit(&status::Status::BootstrapFailed {
+                            stage: e.stage(),
+                            error: e.message(),
+                        });
+                        eprintln!("locai-link launcher: bootstrap failed: {}", e.message());
+                        return Ok(e.exit_code());
+                    }
+                }
+            }
+        };
 
         let runtime = install_root
             .join(VERSIONS_DIR)

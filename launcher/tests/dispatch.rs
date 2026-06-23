@@ -137,13 +137,15 @@ exit 42
 fn errors_when_no_current_pointer_exists() {
     let tmp = tempdir();
     let launcher = install_launcher(tmp.path());
-    // No `current` symlink, no `CURRENT` file, no versions.
+    // No `current` symlink, no `CURRENT` file, no versions, no boot.json.
+    // Pattern A (pre-seeded) and Pattern B (boot.json) both missing →
+    // genuine installer bug. Launcher should bail with a diagnostic.
     let out = run_launcher(&mut Command::new(&launcher));
     assert!(!out.status.success(), "expected failure, got success: {out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no installed version found"),
-        "unexpected stderr: {stderr}"
+        stderr.contains("boot.json"),
+        "stderr should mention boot.json (Pattern-B installer hint); got: {stderr}"
     );
 }
 

@@ -12,6 +12,29 @@ publish = false
 name = "locai-link"
 path = "src/main.rs"
 
+[dependencies]
+# Sync HTTP client with rustls — no openssl, no async runtime. Keeps the
+# launcher single-threaded and the binary small. Used for the bootstrap
+# branch (GitHub Releases API + tarball download) and nothing else.
+ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
+# JSON for boot.json, GitHub Releases responses, and the LOCAI_STATUS
+# records the launcher emits on stderr for the host-app UI.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# SHA256 verification of the downloaded tarball against the sibling
+# .sha256 sidecar published next to each release asset.
+sha2 = "0.10"
+# Tarball extraction. flate2 with miniz_oxide is the pure-Rust gzip
+# backend — no system zlib dependency, keeps cross-compile simple.
+tar = "0.4"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+tempfile = "3.10"
+# Local HTTP stub for bootstrap integration tests (download / verify /
+# extract end-to-end against a fake release on loopback).
+mockito = "1.4"
+
 [profile.release]
 opt-level = "z"
 lto = true
