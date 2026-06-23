@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import zipfile
 from pathlib import Path
@@ -1005,7 +1006,27 @@ def swap_bundle(install_root: Path | None = None) -> bool:
         )
 
     flip_current(install_root, release.version)
+    # Stamp the install for the launcher's post-update health window. If
+    # the runtime spawned from the new version exits nonzero within the
+    # window, the launcher rolls current back to the version recorded here.
+    _write_update_pending(install_root, previous_version=manifest.version)
     gc_old_versions(install_root)
     clear_staging(install_root)
     logger.info(f"swap_bundle: flipped current -> {release.version}")
     return True
+
+
+def _write_update_pending(install_root: Path, *, previous_version: str) -> None:
+    """Drop the ``.update-pending`` stamp the launcher reads on child exit.
+
+    Two-line plain-text format so the Rust launcher can parse it without
+    pulling in a JSON dep::
+
+        <unix_timestamp_seconds>
+        <previous_version>
+    """
+    stamp = install_root / UPDATE_PENDING_STAMP
+    body = f"{int(time.time())}\n{previous_version}\n"
+    tmp = stamp.with_name(stamp.name + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, stamp)

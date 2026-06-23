@@ -277,6 +277,17 @@ def main(argv: list[str] | None = None) -> int:
             assert (install_root / updater.PREVIOUS_LINK).resolve().name == old_version
             say("flip_current", detail=f"{old_version} -> {new_version}, previous preserved")
 
+            # ---- 11b) update-pending stamp (Phase 4 launcher rollback) ----
+            updater._write_update_pending(install_root, previous_version=old_version)
+            stamp = install_root / updater.UPDATE_PENDING_STAMP
+            assert stamp.is_file(), "update-pending stamp should exist"
+            lines = stamp.read_text().splitlines()
+            assert lines[1] == old_version, f"stamp must record previous version, got {lines}"
+            say(
+                "update-pending stamp written",
+                detail=f"ts={lines[0]} previous={lines[1]} (launcher reads this on child exit)",
+            )
+
             # ---- 12) gc_old_versions (keep current + previous only) ----
             # Drop in a third older version so gc has something to delete.
             old2 = "1.0.10"

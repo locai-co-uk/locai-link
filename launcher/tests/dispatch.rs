@@ -172,6 +172,163 @@ fn propagates_runtime_nonzero_exit_code() {
 }
 
 // ---------------------------------------------------------------------------
+// Post-update rollback (Phase 4)
+// ---------------------------------------------------------------------------
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn make_update_pending(root: &Path, previous_version: &str, age_secs: u64) {
+    let ts = now_unix().saturating_sub(age_secs);
+    fs::write(
+        root.join(".update-pending"),
+        format!("{ts}\n{previous_version}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn rolls_back_when_new_version_crashes_within_window() {
+    let tmp = tempdir();
+    let launcher = install_launcher(tmp.path());
+    // Previous version: works, prints a marker, exits 0.
+    seed_version(tmp.path(), "1.0.15", r#"echo "previous-version-ran"; exit 0"#);
+    // New version: crashes immediately with exit 99.
+    seed_version(tmp.path(), "1.0.16", r#"exit 99"#);
+    make_current_symlink(tmp.path(), "1.0.16");
+    // The OTA flip was 5 seconds ago — well within the window.
+    make_update_pending(tmp.path(), "1.0.15", 5);
+
+    let out = run_launcher(&mut Command::new(&launcher));
+
+    // After rollback, the launcher respawned from 1.0.15 (which exits 0).
+    assert!(out.status.success(), "launcher should exit 0 after rollback ran: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("previous-version-ran"),
+        "rollback didn't respawn previous version. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("rolling back to 1.0.15"),
+        "no rollback log line. stderr={stderr}"
+    );
+    // Stamp must be cleared.
+    assert!(
+        !tmp.path().join(".update-pending").exists(),
+        "stamp file should be removed after rollback"
+    );
+    // current now points at 1.0.15.
+    let current_target = fs::read_link(tmp.path().join("current")).unwrap();
+    assert!(current_target.ends_with("1.0.15"), "current points at {current_target:?}");
+    // previous pointer is gone.
+    assert!(
+        fs::read_link(tmp.path().join("previous")).is_err()
+            && !tmp.path().join("PREVIOUS").exists(),
+        "previous pointer should be cleared after rollback"
+    );
+}
+
+#[test]
+fn does_not_roll_back_when_stamp_is_older_than_window() {
+    let tmp = tempdir();
+    let launcher = install_launcher(tmp.path());
+    seed_version(tmp.path(), "1.0.15", r#"exit 0"#);
+    seed_version(tmp.path(), "1.0.16", r#"exit 99"#);
+    make_current_symlink(tmp.path(), "1.0.16");
+    // 200 seconds ago — well past the 120s window.
+    make_update_pending(tmp.path(), "1.0.15", 200);
+
+    let out = run_launcher(&mut Command::new(&launcher));
+
+    // No rollback: nonzero crash propagates.
+    assert_eq!(out.status.code(), Some(99), "{out:?}");
+    let current_target = fs::read_link(tmp.path().join("current")).unwrap();
+    assert!(
+        current_target.ends_with("1.0.16"),
+        "current should still point at the crashing version: {current_target:?}"
+    );
+    // Stamp is cleared as a one-shot cleanup.
+    assert!(
+        !tmp.path().join(".update-pending").exists(),
+        "stale stamp should be removed"
+    );
+}
+
+#[test]
+fn does_not_roll_back_on_exit_zero() {
+    let tmp = tempdir();
+    let launcher = install_launcher(tmp.path());
+    seed_version(tmp.path(), "1.0.15", r#"exit 0"#);
+    // New version exits 0 (clean shutdown — user-requested quit).
+    seed_version(tmp.path(), "1.0.16", r#"echo new-version-clean-exit; exit 0"#);
+    make_current_symlink(tmp.path(), "1.0.16");
+    make_update_pending(tmp.path(), "1.0.15", 5);
+
+    let out = run_launcher(&mut Command::new(&launcher));
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("new-version-clean-exit"), "stdout={stdout}");
+    // Exit 0 means clean — current stays on 1.0.16, stamp stays (caller didn't
+    // ask for a check). The next nonzero crash within the window would still
+    // be rollback-eligible.
+    let current_target = fs::read_link(tmp.path().join("current")).unwrap();
+    assert!(current_target.ends_with("1.0.16"), "{current_target:?}");
+}
+
+#[test]
+fn does_not_roll_back_when_previous_version_is_missing() {
+    let tmp = tempdir();
+    let launcher = install_launcher(tmp.path());
+    // Only the (crashing) new version exists; no previous dir on disk.
+    seed_version(tmp.path(), "1.0.16", r#"exit 99"#);
+    make_current_symlink(tmp.path(), "1.0.16");
+    // Stamp references a version that's been GC'd or never existed.
+    make_update_pending(tmp.path(), "1.0.15", 5);
+
+    let out = run_launcher(&mut Command::new(&launcher));
+
+    assert_eq!(out.status.code(), Some(99), "should surface the crash: {out:?}");
+    let current_target = fs::read_link(tmp.path().join("current")).unwrap();
+    assert!(current_target.ends_with("1.0.16"));
+    // Stamp cleared so we don't keep chasing a non-existent previous.
+    assert!(!tmp.path().join(".update-pending").exists());
+}
+
+#[test]
+fn rollback_preserves_pointer_file_shape() {
+    // Windows-without-Developer-Mode shape: CURRENT text file, no symlink.
+    let tmp = tempdir();
+    let launcher = install_launcher(tmp.path());
+    seed_version(tmp.path(), "1.0.15", r#"echo previous-pointer-ran; exit 0"#);
+    seed_version(tmp.path(), "1.0.16", r#"exit 99"#);
+    make_current_pointer(tmp.path(), "1.0.16");
+    make_update_pending(tmp.path(), "1.0.15", 5);
+
+    let out = run_launcher(&mut Command::new(&launcher));
+
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("previous-pointer-ran"), "stdout={stdout}");
+    // After rollback CURRENT should still be a file (not a symlink) and
+    // contain 1.0.15.
+    assert!(
+        fs::symlink_metadata(tmp.path().join("current"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+            == false,
+        "rollback should not have created a symlink under pointer-file shape"
+    );
+    let body = fs::read_to_string(tmp.path().join("CURRENT")).unwrap();
+    assert_eq!(body.trim(), "1.0.15");
+}
+
+// ---------------------------------------------------------------------------
 // Minimal tempdir helper — avoids pulling in `tempfile` as a dev-dep for one use.
 // ---------------------------------------------------------------------------
 

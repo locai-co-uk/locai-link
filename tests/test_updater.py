@@ -828,6 +828,14 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
     assert (root / updater.CURRENT_LINK).resolve().name == new_version
     assert (root / updater.PREVIOUS_LINK).resolve().name == "1.0.15"
 
+    # Phase 4: the launcher's post-update health window is gated on this stamp.
+    stamp = root / updater.UPDATE_PENDING_STAMP
+    assert stamp.is_file(), "swap_bundle must write .update-pending after flip"
+    lines = stamp.read_text(encoding="utf-8").splitlines()
+    assert len(lines) >= 2
+    assert int(lines[0]) > 0, "stamp first line must be a unix timestamp"
+    assert lines[1] == "1.0.15", "stamp second line must record the previous version"
+
 
 def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     """A failing self-check should remove the staged version and raise."""
