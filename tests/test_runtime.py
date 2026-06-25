@@ -287,3 +287,75 @@ def test_update_pipeline_restarts_running_pipeline(empty_agent, mocker, capfd):
     assert empty_agent.status_logger.report_command.call_args.args[1] == "completed"
     empty_agent._shutdown()
     capfd.readouterr()
+
+
+def _serve_pipeline(pid, port, mode="serve"):
+    args = {"interval": 0.1}
+    if mode is not None:
+        args["mode"] = mode
+        args["port"] = port
+        args["host"] = "127.0.0.1"
+        args["alias"] = "alias"
+    return {
+        "id": pid,
+        "active": True,
+        "source": {"type": "clock_tick", "args": args},
+        "sink": {"type": "console", "args": {}},
+    }
+
+
+def test_resume_emits_serving_status_for_serve_pipelines(mocker, mock_zenoh_session, mock_state_manager):
+    """Auto-resume of a serve-mode pipeline re-announces serving=True to Control.
+
+    Without this, Control keeps showing the model as not-serving after a Link
+    restart, because the StartServingCommand handler (which normally emits the
+    report) is bypassed when pipelines are recovered from the session file.
+    """
+    mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("served", 8081)]}
+    config = AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "d"}, "pipelines": []})
+    agent = AgentRuntime(config, mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    # Isolate the resume-loop behaviour from real pipeline construction —
+    # clock_tick (used for test fixtures) rejects the serve-mode args.
+    mocker.patch.object(agent, "_start_pipeline", return_value=True)
+    agent.shutdown_event.set()  # exit the wait loop immediately after recovery
+
+    agent.run()
+
+    serving_calls = [c for c in agent.status_logger.report_model.call_args_list if c.kwargs.get("serving") is True]
+    assert len(serving_calls) == 1
+    assert serving_calls[0].args[0] == "served"
+    assert serving_calls[0].kwargs["serving_port"] == 8081
+    agent._shutdown()
+
+
+def test_resume_does_not_emit_serving_for_non_serve_pipelines(mocker, mock_zenoh_session, mock_state_manager):
+    """Auto-resume of a non-serve pipeline (e.g. command poller) must not claim it is serving."""
+    mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("ticker", 0, mode=None)]}
+    config = AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "d"}, "pipelines": []})
+    agent = AgentRuntime(config, mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    mocker.patch.object(agent, "_start_pipeline", return_value=True)
+    agent.shutdown_event.set()
+
+    agent.run()
+
+    serving_calls = [c for c in agent.status_logger.report_model.call_args_list if c.kwargs.get("serving") is True]
+    assert serving_calls == []
+    agent._shutdown()
+
+
+def test_resume_skips_report_when_start_fails(mocker, mock_zenoh_session, mock_state_manager):
+    """A failed resume must not emit serving=True — Control would then show a phantom serve."""
+    mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("broken", 9000)]}
+    config = AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "d"}, "pipelines": []})
+    agent = AgentRuntime(config, mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    mocker.patch.object(agent, "_start_pipeline", return_value=False)
+    agent.shutdown_event.set()
+
+    agent.run()
+
+    serving_calls = [c for c in agent.status_logger.report_model.call_args_list if c.kwargs.get("serving") is True]
+    assert serving_calls == []
+    agent._shutdown()

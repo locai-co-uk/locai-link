@@ -274,8 +274,21 @@ class AgentRuntime:
                         is_active = p_data.get("active", False)
 
                         if is_active and pid in self.pipeline_configs:
-                            self._start_pipeline(pid)
+                            started = self._start_pipeline(pid)
                             recovered_any = True
+                            # Re-announce serving state to Control.
+                            if started:
+                                p_conf = self.pipeline_configs[pid]
+                                src_args = p_conf.source.args if p_conf.source else {}
+                                if src_args.get("mode") == "serve":
+                                    self.status_logger.report_model(
+                                        pid,
+                                        running=False,
+                                        pid=0,
+                                        serving=True,
+                                        serving_pid=1,
+                                        serving_port=src_args.get("port", 0),
+                                    )
 
         # 2. Fresh Start Fallback
         if not recovered_any:
