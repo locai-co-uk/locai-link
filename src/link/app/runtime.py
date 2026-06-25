@@ -289,6 +289,19 @@ class AgentRuntime:
                                         serving_pid=1,
                                         serving_port=src_args.get("port", 0),
                                     )
+                                elif src_args.get("model_path"):
+                                    # Inference-mode model pipeline — mirror
+                                    # the report the StartModelInferenceCommand
+                                    # handler emits, gated on model_path so
+                                    # telemetry/poller pipelines stay silent.
+                                    self.status_logger.report_model(
+                                        pid,
+                                        running=True,
+                                        pid=1,
+                                        serving=False,
+                                        serving_pid=0,
+                                        serving_port=0,
+                                    )
 
         # 2. Fresh Start Fallback
         if not recovered_any:
