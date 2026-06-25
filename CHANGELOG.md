@@ -100,10 +100,9 @@ input validation and the request-path security perimeter, hardens
 
 ## [1.0.15] - 2026-06-18
 
-Cuts over inference observability to HTTP-response interception, lands the
-bundling subsystem (PyInstaller + macOS notarisation + drag-to-extract),
-hardens llama-swap orphan handling, and ships the typed command-wire
-contract.
+Cuts over inference observability to HTTP-response interception, ships the
+typed command-wire contract, and refines the bundling + llama-swap
+machinery introduced over 1.0.12–1.0.14.
 
 ### Added — Inference observability
 
@@ -131,38 +130,6 @@ contract.
   `delta_count` fallback, telemetry-off pass-through, all the CORS
   preflight / disconnect contracts the prior `cors_shim` test pinned.
 
-### Added — Bundling subsystem
-
-- `bundling/` directory with PyInstaller spec, manifest writer,
-  pre-fetch step for plugin binaries (`llama.cpp` + `whisper.cpp`),
-  macOS code-signing helper, entitlements, and a single CLI entry
-  `bundling/build.py`. Asset name is derived from `--plugins` (e.g.
-  `locai-link-llm-stt-darwin-arm64.dmg`); no curated profile files.
-- `.github/workflows/bundle.yml` — bundles on every PR that touches
-  bundling, plugin install scripts, or runtime code. Matrixed across
-  Ubuntu / Windows / macOS.
-- `.github/workflows/release.yml` — consolidated single-workflow
-  release: builds, signs, notarises (macOS), uploads artifacts to a
-  GitHub Release in one run. Previous two-workflow split
-  (`release.yml` + `release-assets.yml`) is gone, with it the
-  `RELEASE_TOKEN` PAT requirement.
-- macOS path: Developer ID Application signing of every binary in the
-  bundle, hardened-runtime entitlements, notarisation via `notarytool`,
-  drag-to-extract DMG packaging. Verified end-to-end on Apple Silicon.
-- Windows: prepared but unsigned (signtool wiring deferred — see
-  `TODO.md`).
-
-### Added — llama-swap orphan handling
-
-- `state/swap_<port>.pid` — every llama-swap process Link spawns writes
-  its PID to this file. On next start, `_reclaim_previous_instance()`
-  reads the pidfile, verifies via `psutil` cmdline that the PID is
-  actually llama-swap (refuses to touch foreign processes that may
-  have reused the PID), and terminates cleanly before binding the
-  port. If the port is held by a non-llama-swap process, Link raises a
-  diagnostic `RuntimeError` listing the platform-appropriate `lsof` /
-  `netstat` command — no longer kills random processes.
-
 ### Added — Command contract
 
 - `UninstallModelCommand` and `UpdatePipelineCommand` to the typed
@@ -172,6 +139,17 @@ contract.
 - `tests/test_command_wire_contract.py` + `tests/fixtures/wire/*.json` —
   golden-fixture round-trip tests for every command type. Mirrors the
   backend's `to_wire` contract.
+
+### Added — llama-swap orphan handling
+
+- `state/swap_<port>.pid` — every llama-swap process Link spawns writes
+  its PID to this file. On next start, `_reclaim_previous_instance()`
+  reads the pidfile, verifies via `psutil` cmdline that the PID is
+  actually llama-swap (refuses to touch foreign processes that may have
+  reused the PID), and terminates cleanly before binding the port. If
+  the port is held by a non-llama-swap process, Link raises a
+  diagnostic `RuntimeError` listing the platform-appropriate `lsof` /
+  `netstat` command — no longer kills random processes.
 
 ### Added — Misc
 
@@ -185,7 +163,7 @@ contract.
   analytics architecture, OTA plan).
 - `TODO.md` — OTA update path + Windows code-signing wiring (deferred).
 
-### Changed
+### Changed — Serving proxy
 
 - The CORS shim has been renamed and broadened into `ServingProxy`. The
   old name (`CorsProxy`, in `src/link/infra/cors_proxy.py`) is gone;
@@ -196,6 +174,9 @@ contract.
   regardless of CORS state. llama-swap binds the loopback-only listen
   port (`public_port + 50`); the proxy owns the public port.
   Previously the proxy was only instantiated when CORS was on.
+
+### Changed — Command contract
+
 - `handle_command` now validates every command against the typed
   `Command` contract via `parse_command` (after resolving
   `${identity.*}` placeholders) and dispatches on the typed object.
@@ -208,44 +189,65 @@ contract.
   `runtime_config`. The backend ships ready-made `PipelineConfig`
   definitions.
 - `AgentCommand` dedup keys on the wire `id` field (was `command_id`).
-- `runtime.py` START_SERVING handler: `alias = cmd.model_display_name`.
+- `runtime.py` `START_SERVING` handler: `alias = cmd.model_display_name`.
   llama-swap routes by the human-readable display name; the canonical
-  pipeline_id (UUID) is used independently in the Zenoh sink topic
+  `pipeline_id` (UUID) is used independently in the Zenoh sink topic
   (`locai/devices/<device_id>/models/<pipeline_id>/results`) and so
   carries through to Firestore + PostHog for backend attribution. The
   two id spaces are deliberately separate.
+
+### Changed — Telemetry
+
 - The language_model adapter no longer log-parses llama-swap stdout
   for inference timing; telemetry now flows through the ServingProxy's
   response interception. `ModelServer`'s log-parse path is preserved
   as the legacy fallback for the (rare) case where llama-swap isn't
   installed.
+
+### Changed — Bundling
+
 - `bundling/manifest.py` replaces the old `bundle_profile.py`
   YAML-driven profile machinery. The build CLI takes a flat
   `--plugins` list; the manifest is the authoritative record of
   what's in a bundle.
+
+### Changed — Plugin install
+
 - Plugin install scripts are quieter when binaries are already
   installed at the pinned tag — early-return without log noise.
 
-### Removed
+### Removed — Serving proxy
 
 - `src/link/infra/cors_proxy.py` (renamed to `serving_proxy.py`;
   imports updated across the repo).
+
+### Removed — Bundling
+
 - `bundling/bundle_profile.py` and the YAML profile artefacts. The
   build CLI's `--plugins` flag is the canonical input.
+- The `--profile` flag from `bundling/build.py` and any references to
+  partner-named bundles.
+
+### Removed — Command contract
+
 - `AgentRuntime._normalise_command` and `_map_runtime_to_pipeline_config`
   — the backend now sends ready-made pipelines, the agent does no
   derivation.
 - The legacy `REMOVE_MODEL` command alias. Use `UNINSTALL_MODEL`.
-- The `--profile` flag from `bundling/build.py` and any references to
-  partner-named bundles.
+
+### Removed — Release plumbing
+
 - The `RELEASE_TOKEN` PAT requirement — the consolidated release
   workflow uses the default `GITHUB_TOKEN`.
 
-### Fixed
+### Fixed — llama-swap
 
-- llama-swap orphans surviving an unclean Link shutdown — `_start()`
-  now reliably reclaims its own previous instance via pidfile and
-  refuses to touch anything else.
+- Orphans surviving an unclean Link shutdown — `_start()` now reliably
+  reclaims its own previous instance via pidfile and refuses to touch
+  anything else.
+
+### Fixed — Telemetry
+
 - Inference telemetry going dark when serving uses llama-swap (i.e.
   production). The legacy log-parse hook in `LanguageModel` was wired
   only to the `ModelServer` fallback path; in swap mode no telemetry
@@ -260,33 +262,238 @@ contract.
   which is not the canonical id the request used. Request body is the
   authoritative source for attribution.
 
-## [1.0.9] — 2026-05-08
+## [1.0.14] - 2026-06-04
 
-### Added
-- `LinkReporter.report_deployment_progress()` — incremental model deployment events (`downloading`, `configuring`, `completed`) with byte counts; throttled to 5% steps.
-- `AgentCommand._seen` deque + `mark_seen()` — bounded `command_id` dedup to support online-reconcile flows where Firestore HTTP backlog and live Zenoh inbox samples overlap.
-- Zenoh client: `tls_root_ca`, `username`, `password` args in `transport.args`. `tls_root_ca: "auto"` resolves to the `certifi` bundle at runtime — no PEM file needs to live on disk.
-- One-liner installers (`install.sh`, `install.cmd`) honor `--branch` and `--repo-url` CLI args, matching `install.ps1`. Env vars (`LOCAI_BRANCH`, `LOCAI_REPO_URL`) still respected; CLI overrides them.
-- Windows temperature: non-admin path via `Win32_PerfFormattedData_Counters_ThermalZoneInformation` (perf counter, no elevation), with admin-only `MSAcpi_ThermalZoneTemperature` fallback for service-mode deploys.
-- macOS temperature: optional `osx-cpu-temp` brew binary (opt-in; falls back to 0.0 silently when not installed).
-- `certifi>=2024.2.2` as explicit dependency.
-- Pipeline reference page in mkdocs nav.
-- End-to-end installer tests (`tests/test_installers.py`) — bash on POSIX, pwsh + cmd.exe on Windows CI.
+Finalises the macOS bundle to a signed, notarised, drag-to-extract DMG;
+adds the `UNINSTALL_MODEL` command handler; ships the Windows one-liner
+installer.
 
-### Changed
-- `ZenohClient._build_config` gates TLS injection on `tls/` endpoint scheme rather than mode, so peer-of-router setups verify outbound TLS too.
-- `get_or_create_zenoh_session` no longer provisions a local `zenohd` binary in pure client mode — install only runs for `mode in ("router", "peer")`.
-- Plugin install scripts (`language_model`, `audio_transcriber`) early-return silently when the binary is already at the pinned tag, eliminating banner-log noise on every agent start.
-- Component registry: `Running custom install script for {name}…` demoted INFO → DEBUG; plugin's own logs are the sole signal when work happens.
-- `install.ps1` translates PowerShell-idiomatic params (`-DeviceName`, `-Email`, `-RegistrationKey`) into argparse kebab-case before invoking `main.py install`. Propagates `$LASTEXITCODE` so installer crashes no longer return 0 silently.
-- Router config generator (`infra/zenoh.py`) injects `timestamping.enabled.router: true` into `generated_router.json5` so rocksdb storage receives the `data_info` column-family records it needs.
-- pyproject `dependencies` cleaned: dropped stale entries; verified against the wire deps now in use.
-- `NOTICE.md` rewritten to reflect the actual direct dependency set with optional/dev sections.
-- `THIRDPARTYLICENSES` and `THIRDPARTYNOTICES` regenerated from the current venv via `pip-licenses` — stale entries (`opencv-python`, `pillow`, `tensorflow_cpu`, `sounddevice`, `python-dotenv`) removed.
+### Added — Bundling polish
 
-### Removed
-- `update_applied_agent_config` POST from `main.py` JIT-onboarding path and from `runtime.py:_deploy_model`. Backend learns applied config via Zenoh status events instead.
-- `wmi` Windows-only dependency. The Python lib's `pywin32` postinstall is fragile under uv (dist-info lands, module doesn't) and creates COM objects whose destructors spammed `Win32 exception releasing IUnknown` lines at process teardown. Replaced with PowerShell shell-out.
+- Drag-to-extract DMG packaging for macOS, replacing the earlier zipped
+  layout. Verified end-to-end on Apple Silicon.
+- Developer ID Application signing of every binary in the bundle, with
+  hardened-runtime entitlements and Apple-notary submission via
+  `notarytool`. `spctl` now validates the main executable, not just the
+  app shell.
+- `.github/workflows/release-assets.yml` and `bundling/sign_macos.py`
+  write signing diagnostics to stderr so notary failures don't get
+  hidden in stdout-only logs.
 
-### Fixed
-- `install.cmd` argv shim: `shift` inside a parenthesized `if` block didn't update `%1..%9` (cmd parses positionals at block-entry). Caused python to be invoked with `run main.py install …`, fail silently, and return 0 to the caller. Rewritten with delayed-expansion `%*` strip.
+### Added — Commands
+
+- `UNINSTALL_MODEL` command handler (#329). The agent now deletes
+  installed model artefacts on command, freeing disk without requiring
+  a manual file removal on the device.
+
+### Added — Installers
+
+- Windows `install.cmd` one-liner — previous Windows onboarding path
+  required PowerShell only.
+
+### Fixed — Local Zenoh
+
+- Local zenoh setup no longer fails when the router config path is
+  resolved relative to an unexpected cwd. Trivial guard, but it was
+  blocking single-device dev loops.
+
+## [1.0.13] - 2026-05-29
+
+Lands the `audio_transcriber` plugin (whisper.cpp) with a working macOS
+prebuilt path.
+
+### Added — Plugins
+
+- `plugins/audio_transcriber/` — new plugin packaging `whisper.cpp` for
+  on-device speech-to-text. Install script downloads macOS arm64/x64
+  prebuilts; Linux and Windows still build from source.
+- macOS build path for `audio_transcriber` mirrors the
+  `language_model` plugin's prebuilt-download pattern.
+
+## [1.0.12] - 2026-05-28
+
+First cut of the bundling subsystem and the `SwapManager`-backed
+language-model plugin — the foundation the 1.0.14 signing work and the
+1.0.15 ServingProxy build on.
+
+### Added — Bundling
+
+- `bundling/` directory with the initial PyInstaller spec
+  (`bundling/locai-link.spec`), a build CLI (`bundling/build.py`), and
+  a prefetch step that resolves plugin binaries (`llama.cpp`,
+  `whisper.cpp`) before the binary is assembled.
+- `.github/workflows/bundle.yml` — runs the bundle on every PR that
+  touches bundling, plugin install scripts, or runtime code, matrixed
+  across Ubuntu / Windows / macOS.
+
+### Added — llama-swap
+
+- `SwapManager` rewrite (~160 lines) — manages a single `llama-swap`
+  process per port, hot-swapping models on demand instead of spawning
+  one `llama-server` per pipeline. Foundation for ServingProxy
+  telemetry in 1.0.15.
+
+### Fixed — Onboarding
+
+- Registration metadata now includes `agent_version`, resolved the
+  same way `report_lifecycle` does (`_AGENT_VERSION` with a
+  `pyproject.toml` fallback). Closes the null-on-creation window where
+  new devices appeared in the backend with no version string.
+
+### Fixed — Runtime
+
+- Generic model error path in `runtime.py` no longer swallows the
+  exception. `_start_pipeline` failures now produce a structured
+  `report_command(..., "failed", ...)` instead of dropping silently.
+
+### Fixed — Bundling
+
+- Plugin server scripts (`plugins/*/server.py`) tightened so PyInstaller
+  picks them up on Windows and macOS — was bundling fine on Linux but
+  not on the other two.
+
+## [1.0.11] - 2026-05-18
+
+Patch — restores the `agent_version` field in lifecycle reports under
+PyInstaller-frozen builds.
+
+### Fixed — Reporting
+
+- `LinkReporter.report_lifecycle()` falls back to
+  `_resolve_agent_version()` at report time when `_AGENT_VERSION` was
+  empty at module-import time. PyInstaller-frozen environments can
+  defer the resolver, which left lifecycle messages arriving with
+  `agent_version: null` on bundled builds and broke version-keyed
+  dashboards.
+
+## [1.0.10] - 2026-05-18
+
+Adds the OAuth device flow for SSO-only accounts and surfaces
+previously-silenced onboarding errors.
+
+### Added — Onboarding
+
+- OAuth device flow fallback for SSO users. When `/auth/login` returns
+  HTTP 409 with `use_device_flow` in the body, the CLI now opens a
+  `control.locai.co.uk/link?user_code=…` URL and polls for approval —
+  no password needed for accounts that authenticate via SSO.
+
+### Fixed — Onboarding
+
+- Empty password (the natural reflex for SSO accounts) short-circuits
+  straight to the device flow rather than POSTing `password=""` to
+  `/auth/login`. The backend's form parser rejected the empty string
+  with HTTP 422 before the 409 `use_device_flow` signal could fire, so
+  the CLI exited with a validation error that gave no clue the user
+  was on an SSO account. Prompt now reads "Enter platform password
+  (leave blank for SSO accounts)".
+- `main.py:run()` no longer swallows the resulting `RuntimeError`
+  silently. Logs the exception with `exc_info=True` before exiting so
+  future onboarding failures produce a visible traceback instead of
+  disappearing after "Authenticating with the platform...".
+
+## [1.0.9] - 2026-05-08
+
+Adds deployment progress reporting, command dedup, Zenoh TLS/auth
+support, cross-platform temperature sensing, and end-to-end installer
+tests; cleans up the Windows dependency chain.
+
+### Added — Reporting & dedup
+
+- `LinkReporter.report_deployment_progress()` — incremental model
+  deployment events (`downloading`, `configuring`, `completed`) with
+  byte counts; throttled to 5% steps.
+- `AgentCommand._seen` deque + `mark_seen()` — bounded `command_id`
+  dedup to support online-reconcile flows where Firestore HTTP backlog
+  and live Zenoh inbox samples overlap.
+
+### Added — Zenoh client
+
+- `tls_root_ca`, `username`, `password` args in `transport.args`.
+  `tls_root_ca: "auto"` resolves to the `certifi` bundle at runtime —
+  no PEM file needs to live on disk.
+
+### Added — Installers
+
+- One-liner installers (`install.sh`, `install.cmd`) honor `--branch`
+  and `--repo-url` CLI args, matching `install.ps1`. Env vars
+  (`LOCAI_BRANCH`, `LOCAI_REPO_URL`) still respected; CLI overrides
+  them.
+- End-to-end installer tests (`tests/test_installers.py`) — bash on
+  POSIX, pwsh + cmd.exe on Windows CI.
+
+### Added — System metrics
+
+- Windows temperature: non-admin path via
+  `Win32_PerfFormattedData_Counters_ThermalZoneInformation` (perf
+  counter, no elevation), with admin-only
+  `MSAcpi_ThermalZoneTemperature` fallback for service-mode deploys.
+- macOS temperature: optional `osx-cpu-temp` brew binary (opt-in;
+  falls back to 0.0 silently when not installed).
+
+### Added — Docs & deps
+
+- `certifi>=2024.2.2` as an explicit dependency.
+- Pipeline reference page in the mkdocs nav.
+
+### Changed — Transport
+
+- `ZenohClient._build_config` gates TLS injection on `tls/` endpoint
+  scheme rather than mode, so peer-of-router setups verify outbound
+  TLS too.
+- `get_or_create_zenoh_session` no longer provisions a local `zenohd`
+  binary in pure client mode — install only runs for
+  `mode in ("router", "peer")`.
+- Router config generator (`infra/zenoh.py`) injects
+  `timestamping.enabled.router: true` into `generated_router.json5`
+  so rocksdb storage receives the `data_info` column-family records
+  it needs.
+
+### Changed — Plugin install
+
+- `language_model` and `audio_transcriber` install scripts
+  early-return silently when the binary is already at the pinned tag,
+  eliminating banner-log noise on every agent start.
+- Component registry: `Running custom install script for {name}…`
+  demoted INFO → DEBUG; plugin's own logs are the sole signal when
+  work happens.
+
+### Changed — Onboarding
+
+- `install.ps1` translates PowerShell-idiomatic params
+  (`-DeviceName`, `-Email`, `-RegistrationKey`) into argparse
+  kebab-case before invoking `main.py install`. Propagates
+  `$LASTEXITCODE` so installer crashes no longer return 0 silently.
+
+### Changed — Dependencies & docs
+
+- `pyproject.toml` `dependencies` cleaned: dropped stale entries;
+  verified against the wire deps now in use.
+- `NOTICE.md` rewritten to reflect the actual direct dependency set
+  with optional/dev sections.
+- `THIRDPARTYLICENSES` and `THIRDPARTYNOTICES` regenerated from the
+  current venv via `pip-licenses` — stale entries (`opencv-python`,
+  `pillow`, `tensorflow_cpu`, `sounddevice`, `python-dotenv`)
+  removed.
+
+### Removed — JIT config
+
+- `update_applied_agent_config` POST from `main.py` JIT-onboarding
+  path and from `runtime.py:_deploy_model`. Backend learns applied
+  config via Zenoh status events instead.
+
+### Removed — Windows deps
+
+- `wmi` Windows-only dependency. The Python lib's `pywin32`
+  postinstall is fragile under uv (dist-info lands, module doesn't)
+  and creates COM objects whose destructors spammed
+  `Win32 exception releasing IUnknown` lines at process teardown.
+  Replaced with PowerShell shell-out.
+
+### Fixed — Installers
+
+- `install.cmd` argv shim: `shift` inside a parenthesized `if` block
+  didn't update `%1..%9` (cmd parses positionals at block-entry).
+  Caused python to be invoked with `run main.py install …`, fail
+  silently, and return 0 to the caller. Rewritten with
+  delayed-expansion `%*` strip.
