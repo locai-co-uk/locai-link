@@ -274,8 +274,42 @@ class AgentRuntime:
                         is_active = p_data.get("active", False)
 
                         if is_active and pid in self.pipeline_configs:
-                            self._start_pipeline(pid)
+                            started = self._start_pipeline(pid)
                             recovered_any = True
+                            # Re-announce serving state to Control. Reporter
+                            # failures must NOT abort startup — they'd skip
+                            # the try/finally below that owns _shutdown() and
+                            # the offline lifecycle report.
+                            if started:
+                                p_conf = self.pipeline_configs[pid]
+                                src_args = p_conf.source.args if p_conf.source else {}
+                                try:
+                                    if src_args.get("mode") == "serve":
+                                        self.status_logger.report_model(
+                                            pid,
+                                            running=False,
+                                            pid=0,
+                                            serving=True,
+                                            serving_pid=1,
+                                            serving_port=src_args.get("port", 0),
+                                        )
+                                    elif src_args.get("model_path"):
+                                        # Inference-mode model pipeline —
+                                        # mirror the report that the
+                                        # StartModelInferenceCommand handler
+                                        # emits, gated on model_path so
+                                        # telemetry/poller pipelines stay
+                                        # silent.
+                                        self.status_logger.report_model(
+                                            pid,
+                                            running=True,
+                                            pid=1,
+                                            serving=False,
+                                            serving_pid=0,
+                                            serving_port=0,
+                                        )
+                                except Exception as e:
+                                    logger.warning(f"Failed to re-announce model state for '{pid}': {e}")
 
         # 2. Fresh Start Fallback
         if not recovered_any:

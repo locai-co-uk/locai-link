@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).parent
 
 # Pinned llama.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
-LLAMA_CPP_RELEASE = "b9222"
+LLAMA_CPP_RELEASE = "b9789"
 
 # Pinned llama-swap release — update manually after vetting a new release.
 # Find release tags at: https://github.com/mostlygeek/llama-swap/releases
@@ -92,7 +92,7 @@ def _prebuilt_url(tag):
 
     if system == "Windows":
         if cuda:
-            cuda_tag = "cuda-13.1" if cuda[0] >= 13 else "cuda-12.4"
+            cuda_tag = "cuda-13.3" if cuda[0] >= 13 else "cuda-12.4"
             logger.info(f"CUDA {cuda[0]}.{cuda[1]} detected — using {cuda_tag} build.")
             return f"{base}/llama-{tag}-bin-win-{cuda_tag}-x64.zip"
         return f"{base}/llama-{tag}-bin-win-cpu-x64.zip"

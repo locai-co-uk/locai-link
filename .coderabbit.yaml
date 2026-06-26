@@ -1,0 +1,162 @@
+# .coderabbit.yaml
+# CodeRabbit configuration for the locai-link repository.
+# Docs: https://docs.coderabbit.ai/configure/coderabbit-yaml
+#
+# CodeRabbit runs automatically on every PR to dev/main, catching routine
+# correctness, style, security, and test-gap issues per push. The rules below
+# encode the repo's blast-radius priorities (data egress, OTA, cross-platform,
+# secrets) so feedback stays consistent across reviewers.
+
+language: "en-GB"
+
+# Applies to review comments AND the PR summary.
+tone_instructions: >
+  Be direct, concise, and use British English spelling.
+  Prioritise security/data-egress issues. Suggest fixes
+  with code snippets. No compliments or motivational phrases.
+
+reviews:
+  # Assertive profile — full inline, line-by-line review (chill only posts summaries).
+  profile: "assertive"
+
+  # Comment-only; do not auto-request changes / block the PR via CodeRabbit.
+  request_changes_workflow: false
+
+  # Post a high-level plain-English summary at the top of every PR.
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: false
+  poem: false
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true   # Re-review only the new commits on each push.
+    drafts: false                   # Skip drafts — only review when marked ready.
+    base_branches:
+      - "main"
+      - "dev"
+
+  # Surface the repo's own linter output inline.
+  tools:
+    ruff:
+      enabled: true
+
+  path_instructions:
+    # Core edge runtime — Python / uv / Ruff / Pydantic v2 / pytest
+    - path: "src/link/**"
+      instructions: |
+        Python edge runtime (requires-python >=3.11). Uses uv, Ruff (line length 120),
+        Pydantic v2, and pytest. Review against these standards.
+
+        DATA EGRESS — flag as blocking (core product promise):
+        - Link is private by default: user/inference data stays on the device; only
+          operational metadata is sent to the control plane. Flag any code that sends
+          user content, inference inputs/outputs, prompts, images, audio, or video to the
+          control plane or any external endpoint BY DEFAULT — i.e. not behind an explicit
+          opt-in sink (e.g. a `zenoh_pub` sink attached to the pipeline). The default sink
+          must remain `console`.
+        - Flag any new telemetry field capturing more than operational metadata (device id,
+          os/arch, hostname, Link version, system metrics cpu/ram/temperature/storage,
+          lifecycle/command/model/deployment status). Never telemeter model inputs or outputs.
+        - Flag any new outbound network call, or any change that swaps a `console` sink for
+          a network-bound one in shipped configs.
+
+        OTA UPDATE PATH — flag as blocking (highest blast radius):
+        - Any change to src/link/app/updater.py (pull_and_update / reinstall_plugin_binaries),
+          the UPDATE_AGENT handling in src/link/app/runtime.py, or the
+          _apply_update_and_reexec / os.execv re-exec in src/link/main.py. A broken OTA can
+          brick every deployed device simultaneously.
+        - Anything that could leave the agent in a non-restartable state after update.
+
+        CROSS-PLATFORM — flag as blocking:
+        - Platform-specific code (paths, process management, service install, permissions)
+          that does not handle macOS, Linux, AND Windows, or lacks a guard/fallback.
+          Respect the ServiceManager backends in infra/service.py.
+        - os-specific path separators or hardcoded paths instead of pathlib.
+        - subprocess calls assuming a shell or binary present on only one platform.
+        - Any subprocess call with shell=True.
+
+        SECRETS & AUTH — flag as blocking:
+        - Any hardcoded credential, registration key, API key, JWT, or environment-specific URL.
+        - Any logging of secrets, tokens, passwords, or registration keys — even at debug level.
+        - Any change to the onboarding auth fallthrough (password -> device flow on HTTP 409
+          use_device_flow, or empty password -> device flow) that could break SSO-only onboarding.
+
+        CODE QUALITY — flag all issues including nits:
+        - Missing type hints on any function signature or return type.
+        - Pydantic v1 syntax (@validator, class Config, orm_mode) — must use v2.
+        - Any print() in non-test code — use the logger.
+        - Functions longer than 60 lines — suggest splitting.
+        - Missing docstrings on public functions and classes (docs auto-generate via
+          mkdocstrings, Google style).
+        - Bare except: clauses — catch specific exceptions.
+        - Bare pip instead of uv in scripts or install logic.
+        - Code that blurs the control-plane / data-plane separation.
+
+        TESTS — flag if missing:
+        - Any new core logic without a corresponding mocked pytest unit test.
+        - Any test needing network or real model downloads NOT gated behind the `ci` marker.
+
+    # Plugins — standalone installable packages registering pipeline components
+    - path: "plugins/**"
+      instructions: |
+        Standalone installable plugin packages registering pipeline components via the
+        `locai.plugins` entry point. Review against these standards.
+
+        BINARY INTEGRITY — flag as blocking:
+        - Any hardcoded plugin binary path instead of resolving via the plugin install mechanism.
+        - Any bump of the *_RELEASE constants in plugins/*/install.py (LLAMA_CPP_RELEASE,
+          LLAMA_SWAP_RELEASE, WHISPER_CPP_RELEASE) that is not mirrored in the plugin's
+          README.md, or vice versa — they must stay in sync.
+        - Any plugin that loads or executes a binary without version pinning.
+
+        QUALITY & TESTS:
+        - Same Python standards as src/link/ (type hints, docstrings, no print, no bare
+          except, uv not pip).
+        - Any plugin change without a corresponding plugin integration test.
+        - Tests needing real binaries or model downloads must be gated behind the `ci` marker.
+
+    # Bundling — PyInstaller + macOS signing / notarisation (release-critical)
+    - path: "bundling/**"
+      instructions: |
+        PyInstaller bundling and macOS signing/notarisation. Treat changes as release-critical:
+        a broken bundle ships to every device. Review against these standards.
+
+        - Flag any reference to, or logging of, Apple signing/notary secrets
+          (APPLE_DEVELOPER_ID_APPLICATION_*, APPLE_NOTARY_*) in code or output.
+        - Flag platform-specific bundling logic that silently breaks one of macOS/Linux/Windows.
+        - Flag changes to entitlements.plist or the bundle identifier (uk.co.locai.link)
+          without a clear justification.
+
+    # CI / release workflows — security-critical, reviewed per push (not deferred to Claude)
+    - path: ".github/workflows/**"
+      instructions: |
+        CI, bundle, and release workflows. Review against these standards.
+        - Flag any plaintext secret, or echoing of signing/notary secrets into logs.
+        - Signing/notarisation must remain gated to the release event in release.yml,
+          never moved into the per-PR CI workflow (bundle.yml / ci.yml).
+        - Flag any change that could publish an unsigned macOS release.
+        - Flag any removed or weakened version-bump, lint, or test gate.
+
+  # Files and paths to skip entirely
+  path_filters:
+    - "!**/.venv/**"
+    - "!**/dist/**"
+    - "!**/_artifacts/**"          # Pre-fetched native binaries (bundling/_artifacts)
+    - "!**/__pycache__/**"
+    - "!**/*.lock"
+    - "!**/uv.lock"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+    - "!configs/session_*.json"    # Runtime session state, not source
+    - "!docs/reference/**"         # Auto-generated from docstrings via mkdocstrings
+    - "!LICENSE.md"
+    - "!LICENSES/**"
+    - "!LICENSES-external/**"
+    - "!**/THIRDPARTY*"
+    - "!logs/**"
+    - "!models/**"
+
+# Chat — let engineers ask CodeRabbit questions on a PR
+chat:
+  auto_reply: true
