@@ -393,6 +393,28 @@ def test_resume_does_not_emit_running_for_non_model_pipelines(mocker, mock_zenoh
     agent._shutdown()
 
 
+def test_resume_swallows_reporter_failure(mocker, mock_zenoh_session, mock_state_manager):
+    """A status-logger exception during resume must NOT abort run().
+
+    The recovery block sits above the try/finally that owns _shutdown() and
+    the offline lifecycle report. Without local exception handling, a flaky
+    reporter would stop pipelines from being torn down cleanly on the next
+    shutdown and leave Control without an offline event.
+    """
+    mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("served", 8081)]}
+    config = AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "d"}, "pipelines": []})
+    agent = AgentRuntime(config, mock_state_manager, mock_zenoh_session)
+    status_logger = mocker.patch.object(agent, "status_logger")
+    status_logger.report_model.side_effect = RuntimeError("reporter exploded")
+    mocker.patch.object(agent, "_start_pipeline", return_value=True)
+    agent.shutdown_event.set()
+
+    agent.run()  # must not raise
+
+    status_logger.report_lifecycle.assert_any_call("offline")
+    agent._shutdown()
+
+
 def test_resume_skips_report_when_start_fails(mocker, mock_zenoh_session, mock_state_manager):
     """A failed resume must not emit serving=True — Control would then show a phantom serve."""
     mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("broken", 9000)]}

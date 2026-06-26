@@ -133,8 +133,8 @@ reviews:
       instructions: |
         CI, bundle, and release workflows. Review against these standards.
         - Flag any plaintext secret, or echoing of signing/notary secrets into logs.
-        - Signing/notarisation must remain gated to the release event (release-assets.yml),
-          never moved into the per-PR CI workflow.
+        - Signing/notarisation must remain gated to the release event in release.yml,
+          never moved into the per-PR CI workflow (bundle.yml / ci.yml).
         - Flag any change that could publish an unsigned macOS release.
         - Flag any removed or weakened version-bump, lint, or test gate.
 
