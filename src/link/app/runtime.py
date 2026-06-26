@@ -309,9 +309,7 @@ class AgentRuntime:
                                             serving_port=0,
                                         )
                                 except Exception as e:
-                                    logger.warning(
-                                        f"Failed to re-announce model state for '{pid}': {e}"
-                                    )
+                                    logger.warning(f"Failed to re-announce model state for '{pid}': {e}")
 
         # 2. Fresh Start Fallback
         if not recovered_any:
