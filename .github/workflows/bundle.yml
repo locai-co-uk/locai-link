@@ -59,7 +59,7 @@ jobs:
       # (LLAMA_CPP_RELEASE, WHISPER_CPP_RELEASE) live there; bumping a tag
       # invalidates the cache and triggers a fresh prefetch/build.
       - name: Cache prefetched binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: bundling/_artifacts
           key: bundle-artifacts-${{ runner.os }}-${{ hashFiles('plugins/*/install.py') }}
