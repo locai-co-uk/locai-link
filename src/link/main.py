@@ -12,7 +12,13 @@ from pathlib import Path
 from link.app.onboarding import FLEET_MARKER_PATH, activate_device, enroll_device, register_device
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
-from link.app.updater import pull_and_update, reinstall_plugin_binaries
+from link.app.updater import (
+    BundleUpdateError,
+    pull_and_update,
+    reinstall_plugin_binaries,
+    running_frozen_bundle,
+    swap_bundle,
+)
 from link.config.loader import load_config
 from link.config.models import AgentConfig
 from link.infra.service import ServiceManager
@@ -309,14 +315,94 @@ def run(args: argparse.Namespace):
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+def self_check(args: argparse.Namespace) -> int:
+    """Boot the runtime to the point of config + transport + plugins, then exit cleanly.
+
+    Sole consumer: ``bundle_updater.health_check()``. Run on a freshly extracted
+    bundle before flipping ``current`` — proves the new binary can import, parse
+    the active session, open its transport, and enumerate plugin entry points.
+    No pipelines start, no inference runs.
+
+    Exit 0 = healthy, nonzero = failure (caller rolls back the flip).
+    """
+    state_manager = StateManager()
+    saved_state = state_manager.load_state()
+    if saved_state is None:
+        # No session means there's nothing meaningful to check against. The
+        # bootstrap path (Pattern B) hits this — that's fine, it has its own
+        # verification at fetch time. OTA path always has a session.
+        logger.info("self-check: no session found — binary boot only.")
+        from link.components.registry import ComponentRegistry
+
+        ComponentRegistry._refresh_entry_points()
+        return 0
+
+    try:
+        agent_config = AgentConfig(**saved_state)
+    except Exception as e:
+        logger.error(f"self-check: session present but unparseable: {e}")
+        return 1
+
+    zenoh_session = None
+    if agent_config.transport and agent_config.transport.type == "zenoh":
+        try:
+            zenoh_session = get_or_create_zenoh_session(agent_config.transport)
+        except Exception as e:
+            logger.error(f"self-check: Zenoh open failed: {e}")
+            return 1
+
+    try:
+        from link.components.registry import ComponentRegistry
+
+        ComponentRegistry._refresh_entry_points()
+    except Exception as e:
+        logger.error(f"self-check: plugin enumeration failed: {e}")
+        return 1
+    finally:
+        if zenoh_session is not None:
+            try:
+                zenoh_session.close()
+            except Exception:
+                pass
+
+    logger.info(f"self-check: ok (device={agent_config.identity.device_id})")
+    return 0
+
+
 def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
-    """Applies an OTA update and re-execs the current Python process.
+    """Applies an OTA update via the right path for the install shape.
+
+    Source install (cloned repo, ``sys.frozen`` False): git pull + plugin
+    refresh + ``os.execv``. Same PID, same FDs, same env — service managers
+    see a continuously running process.
+
+    Bundled install (PyInstaller artifact): ``swap_bundle`` downloads the new
+    release, verifies, extracts, health-checks, and atomically flips the
+    ``current`` pointer. The process then exits with code 42, which the Rust
+    launcher (or any compatible supervisor) recognises as "respawn me from
+    whatever ``current`` now points at". We never ``execv`` in the bundle
+    path because ``sys.executable`` for a frozen binary points at the *old*
+    version's runtime, which the new ``current`` is replacing.
 
     Args:
-        repo_dir (Path): The project root (git repository).
-        config (AgentConfig): The active config — used to pick which plugins refresh.
+        repo_dir (Path): The project root (git repository) — used only on the source path.
+        config (AgentConfig): The active config — used to pick which plugins refresh on the source path.
     """
     logger.info("Applying OTA update...")
+
+    if running_frozen_bundle():
+        try:
+            swap_bundle()
+        except BundleUpdateError as e:
+            logger.critical(f"Bundle update failed: {e}")
+            sys.exit(1)
+        # Always exit 42 — whether we flipped or were already at latest, the
+        # launcher should respawn from `current`. Returning 0 would tell the
+        # launcher to stay stopped, which is the wrong outcome when the user
+        # explicitly requested an update check.
+        logger.info("Exiting (code 42) for launcher to respawn from current.")
+        sys.exit(42)
+
     try:
         pull_and_update(repo_dir)
         reinstall_plugin_binaries(repo_dir, config)
@@ -488,6 +574,12 @@ def main():
     subparsers.add_parser("stop", help="Stops all running services.")
     subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
 
+    # Self-check — minimal boot used by the OTA health check in bundle_updater.
+    subparsers.add_parser(
+        "self-check",
+        help="Boot to config+transport+plugins and exit 0 if healthy. Used by OTA rollback.",
+    )
+
     subparsers.add_parser("tui", help="Runs the TUI.")
     subparsers.add_parser("install-plugin", help="Installs a plugin.").add_argument("name")
 
@@ -514,6 +606,8 @@ def main():
         from link.components.registry import ComponentRegistry
 
         ComponentRegistry.install_plugin(args.name)
+    elif args.command == "self-check":
+        sys.exit(self_check(args))
     else:
         parser.print_help()
 

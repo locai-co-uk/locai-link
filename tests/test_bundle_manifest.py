@@ -96,3 +96,71 @@ def test_write_manifest_rejects_empty(tmp_path):
 def test_write_manifest_rejects_unknown_plugin(tmp_path):
     with pytest.raises(SystemExit):
         write_manifest(tmp_path, ["language_model", "image_classifier"], REPO_ROOT)
+
+
+# ---------------------------------------------------------------------------
+# restructure_to_versioned_layout
+# ---------------------------------------------------------------------------
+
+
+def test_restructure_to_versioned_layout(tmp_path):
+    """Flat PyInstaller output gets reshaped into install_root/versions/<v>/."""
+    from build import restructure_to_versioned_layout
+
+    bundle = tmp_path / "locai-link"
+    bundle.mkdir()
+    (bundle / "locai-link-runtime").write_text("#!/fake/binary\n")
+    internal = bundle / "_internal"
+    internal.mkdir()
+    (internal / "payload.txt").write_text("payload\n")
+
+    target = restructure_to_versioned_layout(bundle, "1.0.15")
+
+    assert target == bundle / "versions" / "1.0.15"
+    assert (target / "locai-link-runtime").read_text() == "#!/fake/binary\n"
+    assert (target / "_internal" / "payload.txt").read_text() == "payload\n"
+
+    current = bundle / "current"
+    pointer = bundle / "CURRENT"
+    assert current.is_symlink() or pointer.exists(), "neither current symlink nor CURRENT pointer was created"
+    if current.is_symlink():
+        # Relative symlink resolves against the install_root.
+        assert (bundle / current.readlink()).resolve() == target.resolve()
+    else:
+        assert pointer.read_text().strip() == "1.0.15"
+
+
+def test_restructure_to_versioned_layout_overwrites_stale_staging(tmp_path):
+    """A stale `_staged_<version>/` from a previous failed run is wiped, not merged."""
+    from build import restructure_to_versioned_layout
+
+    stale = tmp_path / "_staged_1.0.15"
+    stale.mkdir()
+    (stale / "from_previous_run.txt").write_text("should be gone after rebuild\n")
+
+    bundle = tmp_path / "locai-link"
+    bundle.mkdir()
+    (bundle / "locai-link-runtime").write_text("# fresh\n")
+
+    target = restructure_to_versioned_layout(bundle, "1.0.15")
+
+    assert (target / "locai-link-runtime").read_text() == "# fresh\n"
+    assert not (target / "from_previous_run.txt").exists()
+
+
+def test_install_launcher_drops_binary_into_install_root(tmp_path):
+    """install_launcher copies the prebuilt launcher into the install_root."""
+    from build import install_launcher
+
+    install_root = tmp_path / "locai-link"
+    install_root.mkdir()
+    fake_launcher = tmp_path / "fake-launcher"
+    fake_launcher.write_text("#!/fake/launcher\n")
+    fake_launcher.chmod(0o644)  # deliberately non-executable to confirm install_launcher fixes it
+
+    target = install_launcher(install_root, fake_launcher)
+
+    # On non-Windows the public name is `locai-link` regardless of source name.
+    assert target.name in ("locai-link", "locai-link.exe")
+    assert target.read_text() == "#!/fake/launcher\n"
+    assert target.stat().st_mode & 0o111, "launcher should be executable after install"
