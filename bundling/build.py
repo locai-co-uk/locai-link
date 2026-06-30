@@ -44,7 +44,10 @@ from prefetch import PREFETCHERS, _platform_tag  # type: ignore[import-not-found
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
-LAUNCHER_DIR = REPO_ROOT / "launcher"
+CRATES_DIR = REPO_ROOT / "crates"
+LAUNCHER_DIR = CRATES_DIR / "launcher"
+# Cargo workspace target — `cargo build` from any member crate writes here.
+CARGO_TARGET_DIR = CRATES_DIR / "target"
 LAUNCHER_BINARY_NAME = "locai-link.exe" if sys.platform == "win32" else "locai-link"
 
 # Bundleable plugins — the keys of PLUGIN_CODES, in their canonical order.
@@ -131,8 +134,8 @@ def build_launcher() -> Path:
     if not LAUNCHER_DIR.is_dir():
         raise SystemExit(f"Launcher source missing at {LAUNCHER_DIR}")
     logger.info("Building launcher (cargo build --release)")
-    subprocess.run(["cargo", "build", "--release"], cwd=LAUNCHER_DIR, check=True)
-    built = LAUNCHER_DIR / "target" / "release" / LAUNCHER_BINARY_NAME
+    subprocess.run(["cargo", "build", "--release", "-p", "locai-link-launcher"], cwd=CRATES_DIR, check=True)
+    built = CARGO_TARGET_DIR / "release" / LAUNCHER_BINARY_NAME
     if not built.is_file():
         raise SystemExit(f"Launcher build did not produce {built}")
     return built

@@ -35,9 +35,5 @@ tempfile = "3.10"
 # extract end-to-end against a fake release on loopback).
 mockito = "1.4"
 
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"
+# Release profile lives in the workspace root (../Cargo.toml). Cargo
+# ignores per-package release profiles inside a workspace.

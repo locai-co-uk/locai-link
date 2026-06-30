@@ -99,8 +99,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            launcher/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('launcher/Cargo.toml', 'launcher/src/**', 'launcher/tests/**') }}
+            crates/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 

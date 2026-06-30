@@ -12,9 +12,14 @@ on:
     branches:
       - "main"
     # Only run on PRs that touch bundling logic or things it depends on.
+    # Tauri-only changes (setup_assistant/, companion/) and .pkg-only
+    # changes (bundling/pkg/) live behind their own workflows.
     paths:
       - "bundling/**"
-      - "launcher/**"
+      - "!bundling/pkg/**"
+      - "crates/launcher/**"
+      - "crates/shared/**"
+      - "crates/Cargo.toml"
       - "plugins/*/install.py"
       - "plugins/*/pyproject.toml"
       - "src/link/**"
@@ -64,14 +69,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            launcher/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('launcher/Cargo.toml', 'launcher/src/**', 'launcher/tests/**') }}
+            crates/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
       - name: Test launcher
         shell: bash
-        run: cargo test --manifest-path launcher/Cargo.toml --release
+        run: cargo test --manifest-path crates/launcher/Cargo.toml --release
 
       # Cache the prefetched native binaries + cmake build outputs.
       # Key on every plugin's install.py because the pinned upstream tags
