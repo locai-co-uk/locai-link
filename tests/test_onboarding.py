@@ -576,3 +576,72 @@ def test_retry_after_negative_returns_none():
 def test_retry_after_clamped_to_honor_cap():
     over_cap = str(_RETRY_AFTER_HONOR_CAP_SECONDS + 1000)
     assert _retry_after_seconds(_resp_with_retry_after(over_cap)) == _RETRY_AFTER_HONOR_CAP_SECONDS
+
+
+# --- Browser-handoff helpers ---
+
+
+def test_open_in_browser_uses_open_on_macos(mocker):
+    from link.app.onboarding import _open_in_browser
+
+    mocker.patch("platform.system", return_value="Darwin")
+    mock_run = mocker.patch("link.app.onboarding.subprocess.run")
+    assert _open_in_browser("https://example.com") is True
+    mock_run.assert_called_once_with(
+        ["open", "https://example.com"], check=False, capture_output=True, timeout=5
+    )
+
+
+def test_open_in_browser_uses_xdg_open_on_linux(mocker):
+    from link.app.onboarding import _open_in_browser
+
+    mocker.patch("platform.system", return_value="Linux")
+    mock_run = mocker.patch("link.app.onboarding.subprocess.run")
+    assert _open_in_browser("https://example.com") is True
+    mock_run.assert_called_once_with(
+        ["xdg-open", "https://example.com"], check=False, capture_output=True, timeout=5
+    )
+
+
+def test_open_in_browser_returns_false_on_unknown_platform(mocker):
+    from link.app.onboarding import _open_in_browser
+
+    mocker.patch("platform.system", return_value="Plan9")
+    assert _open_in_browser("https://example.com") is False
+
+
+def test_open_in_browser_swallows_missing_opener(mocker):
+    """A missing ``xdg-open`` binary must not raise."""
+    from link.app.onboarding import _open_in_browser
+
+    mocker.patch("platform.system", return_value="Linux")
+    mocker.patch("link.app.onboarding.subprocess.run", side_effect=FileNotFoundError())
+    assert _open_in_browser("https://example.com") is False
+
+
+def test_running_detached_true_when_stdin_not_tty(mocker):
+    from link.app.onboarding import _running_detached
+
+    fake_stdin = mocker.MagicMock()
+    fake_stdin.isatty.return_value = False
+    mocker.patch("link.app.onboarding.sys.stdin", fake_stdin)
+    assert _running_detached() is True
+
+
+def test_running_detached_false_in_interactive_terminal(mocker):
+    from link.app.onboarding import _running_detached
+
+    fake_stdin = mocker.MagicMock()
+    fake_stdin.isatty.return_value = True
+    mocker.patch("link.app.onboarding.sys.stdin", fake_stdin)
+    assert _running_detached() is False
+
+
+def test_running_detached_treats_oserror_as_detached(mocker):
+    """isatty() can raise on weird stdin objects (frozen bundles)."""
+    from link.app.onboarding import _running_detached
+
+    fake_stdin = mocker.MagicMock()
+    fake_stdin.isatty.side_effect = OSError("bad fd")
+    mocker.patch("link.app.onboarding.sys.stdin", fake_stdin)
+    assert _running_detached() is True

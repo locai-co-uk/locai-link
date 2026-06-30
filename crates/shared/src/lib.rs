@@ -49,14 +49,22 @@ pub enum HealthStatus {
 ///
 /// Mirrored from `launcher/src/boot.rs::BootConfig` — kept here so the
 /// other Rust surfaces (Setup Assistant, menu-bar) can read the same
-/// record without depending on the launcher crate directly.
+/// record without depending on the launcher crate directly. Field
+/// optionality matches the launcher exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
-    pub host_app: Option<String>,
+    pub host_app: String,
+    #[serde(default)]
     pub plugin_set: Vec<String>,
+    #[serde(default = "default_channel")]
     pub channel: String,
     pub asset_repo: String,
+    #[serde(default)]
     pub asset_url: Option<String>,
+}
+
+fn default_channel() -> String {
+    "stable".to_string()
 }
 
 /// Resolved currently-installed version of Link, as the launcher would see it.
