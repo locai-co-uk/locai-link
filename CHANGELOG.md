@@ -98,15 +98,13 @@ input validation and the request-path security perimeter, hardens
   reads "configured host; default `127.0.0.1`" instead of the
   misleading "all interfaces".
 
-## [Unreleased]
+## [1.0.17] - 2026-07-01
 
-Lays down the over-the-air update path for bundled installs. Until now,
-updating a frozen Link install meant re-running the host app's installer
-or swapping the binary by hand. From this release on, a running bundled
-agent can fetch a newer Link off GitHub, swap to it, restart, and — if
-the new version doesn't come up cleanly — roll itself back to the
-previous one without anyone watching. Developer (source) installs still
-update by `git pull` as before.
+Lays down the over-the-air update path for bundled installs, adds a
+lightweight `/healthz` endpoint for host-app integrators, and scaffolds
+the Cargo workspace + Tauri surfaces the coming GUI installer will
+build on. Developer (source) installs are unaffected by the OTA
+machinery — they still update by `git pull` as before.
 
 ### Why a separate launcher?
 
@@ -215,22 +213,87 @@ bundle itself before anything inside the bundle exists.
   (within-window, past-window, exit 0, previous-version missing,
   pointer-file shape).
 
+### Added — `/healthz` endpoint
+
+- `src/link/infra/health_server.py` — small loopback HTTP server on
+  `127.0.0.1:8101` returning `{version, uptime_seconds,
+  currently_serving, model_id}`. Separate from `ServingProxy` so it
+  answers "is the agent alive" even when no model is loaded. Polled by
+  the menu-bar companion app; also available to host-app integrators
+  (SafeChat, Meetily) that want a lightweight state probe. Owned by
+  `AgentRuntime`, mutated by the `StartServingCommand` /
+  `StopServingCommand` handlers and the resume branch. Started lazily
+  in `run()`, stopped in `_shutdown()`; port-in-use failures degrade
+  gracefully to a warning.
+
+### Added — Cargo workspace + Tauri scaffolding
+
+- `crates/` top-level directory now hosts every native binary:
+  `launcher/` (moved from repo root, history preserved),
+  `shared/` (new helper crate with stubs for agent-status polling,
+  `boot.json` reading, version lookup), and two Tauri app scaffolds
+  (`setup_assistant/` and `companion/`) that the GUI installer flow
+  will grow into. Inert in this release — nothing on the shipping
+  agent path calls them, and CI path filters skip Tauri-only changes.
+- `bundling/build.py`, `.github/workflows/bundle.yml`, and
+  `.github/workflows/release.yml` updated to point at
+  `crates/launcher/` and the workspace target dir.
+- `bundling/pkg/boot.json` — production launcher config (channel,
+  asset repo, plugin set) shipped by the coming `.pkg` postinstall.
+
+### Added — Launcher configurability
+
+- `MacOSBackend` (`src/link/infra/service.py`) gains a
+  `scope: "user" | "system"` parameter — `system` writes the plist to
+  `/Library/LaunchAgents/` (the GUI installer's "install for all
+  users" path); `user` keeps the historical `~/Library/LaunchAgents/`
+  behaviour that existing `main.py deploy` callers get by default.
+- `label_prefix` parameter replaces the hard-coded `io.locai.{name}`
+  so the GUI installer can label plists as `uk.co.locai.link.agent` /
+  `uk.co.locai.link.menubar` to match its bundle identifier. Existing
+  callers keep `io.locai` — no behaviour change without opt-in.
+- `install_all(services, start_now)` helper registers multiple
+  LaunchAgents in lockstep with rollback on partial failure. The Setup
+  Assistant's Finish step will call this so one "Run at login" toggle
+  drives both the agent and menu-bar app.
+- `launchctl list` grep tightened to anchor on the full label — no
+  more false matches when two services share a prefix.
+
+### Added — Onboarding browser handoff
+
+- Device-flow SSO now opens the verification URL in the system
+  browser (`open` / `xdg-open` / `start`) when running detached from a
+  terminal (`sys.stdin.isatty() is False`). The existing stderr banner
+  still prints — the browser call is an additive supplement, not a
+  replacement. Interactive terminals see no behaviour change.
+
+### Under the hood — Pattern B first-install now works
+
+- The launcher's `bootstrap_from_boot()` (`crates/launcher/src/`)
+  reads `boot.json`, fetches the release asset off GitHub, verifies
+  the SHA256 sidecar, extracts to `versions/<v>/`, writes `current`,
+  and execs the runtime — all before any bundle exists on disk. Host
+  installers that ship just the launcher + `boot.json` are now viable
+  (Pattern B) alongside the pre-extracted-bundle path (Pattern A).
+
 ### Not in this release
 
-- **Pattern B first-install.** The host installer still needs to drop a
-  pre-extracted bundle (Pattern A) or trigger one out of band; the
-  launcher's "no `current` → fetch from `boot.json`" path lands next.
 - **Health-window heartbeat from the runtime.** Today the launcher
   decides rollback eligibility purely by wall-clock age of the stamp
   (≤ 120s). Hooking the runtime to clear the stamp itself, once it
   passes its first healthy ping, lands when the runtime grows a
   periodic backend ping.
-- **Windows.** Code path is in place but unsigned bundles are blocked
-  by Windows SmartScreen — code-signing procurement gates Windows GA.
-  macOS + Linux are not blocked.
-- **Bundled update telemetry to backend.** `bootstrap_*` and `update_*`
-  events are specified in the design doc but not yet emitted; they
-  ride the existing event publisher when wired up.
+- **macOS `.pkg` GUI installer + Setup Assistant + menu-bar
+  companion.** Scaffolded (`crates/setup_assistant/`,
+  `crates/companion/`, `bundling/pkg/`) but not functional in this
+  release. Coming in the 1.1.x line once the Apple Developer ID
+  Installer certificate is provisioned and the wizard UI is built out.
+- **Windows.** Code paths are in place but unsigned bundles are
+  blocked by Windows SmartScreen — code-signing procurement gates
+  Windows GA. macOS + Linux are not blocked.
+- **Bundled update telemetry to backend.** `bootstrap_*` and
+  `update_*` events are specified in the design doc but not yet
+  emitted; they ride the existing event publisher when wired up.
 
 ## [1.0.15] - 2026-06-18
 
