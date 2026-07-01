@@ -158,6 +158,11 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
     ``<dist>/locai-link/current`` so the tarball extracts onto a target machine
     as a valid Pattern-A first install (see ../OTA-BUNDLE.md §4.1).
 
+    If a prior build left stale ``versions/``, ``current``, or ``CURRENT``
+    artefacts inside ``bundle_dir``, those are removed before staging.
+    Otherwise a second run of this function would nest the old versioned
+    tree inside the new ``versions/<version>/``.
+
     Returns the new versioned bundle directory.
     """
     if not bundle_dir.is_dir():
@@ -166,6 +171,17 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
     install_root = bundle_dir
     dist_root = install_root.parent
     staging = dist_root / f"_staged_{version}"
+
+    # Clean stale versioning artefacts left by a prior build so they don't
+    # get carried into the new payload. PyInstaller re-writes everything
+    # else, but these entries live at the install-root layer we're about
+    # to synthesise ourselves.
+    for stale in ("versions", "current", "CURRENT"):
+        stale_path = install_root / stale
+        if stale_path.is_symlink() or stale_path.is_file():
+            stale_path.unlink()
+        elif stale_path.is_dir():
+            shutil.rmtree(stale_path)
 
     if staging.exists():
         shutil.rmtree(staging)

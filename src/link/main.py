@@ -332,9 +332,13 @@ def self_check(args: argparse.Namespace) -> int:
         # bootstrap path (Pattern B) hits this — that's fine, it has its own
         # verification at fetch time. OTA path always has a session.
         logger.info("self-check: no session found — binary boot only.")
-        from link.components.registry import ComponentRegistry
+        try:
+            from link.components.registry import ComponentRegistry
 
-        ComponentRegistry._refresh_entry_points()
+            ComponentRegistry._refresh_entry_points()
+        except Exception as e:
+            logger.error(f"self-check: plugin enumeration failed: {e}")
+            return 1
         return 0
 
     try:
@@ -398,6 +402,13 @@ def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
             swap_bundle()
         except BundleUpdateError as e:
             logger.critical(f"Bundle update failed: {e}")
+            sys.exit(1)
+        except Exception as e:
+            # Anything BundleUpdateError doesn't cover — OSError from disk
+            # full, a network stack panic, whatever. Route through the same
+            # graceful exit path rather than letting the launcher see an
+            # uncaught traceback and interpret it as a rollback trigger.
+            logger.critical(f"Bundle update failed with unexpected error ({type(e).__name__}): {e}")
             sys.exit(1)
         # Always exit 42 — whether we flipped or were already at latest, the
         # launcher should respawn from `current`. Returning 0 would tell the

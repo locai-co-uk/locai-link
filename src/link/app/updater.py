@@ -369,13 +369,22 @@ class BootConfig:
 
     Carried here for completeness; the actual bootstrap consumption (used when
     a host installer ships only the launcher + boot.json and the bundle is
-    downloaded on first launch) lives in the Rust launcher under ``launcher/``.
+    downloaded on first launch) lives in the Rust launcher under
+    ``crates/launcher/``. Field shape (name, optional/required) must match
+    the Rust ``BootConfig`` in ``crates/launcher/src/boot.rs`` and its
+    mirror in ``crates/shared/src/lib.rs`` — kept in lockstep because a
+    host installer that writes fields the Python side drops is a schema
+    drift bug.
     """
 
     host_app: str
     plugin_set: list[str]
     channel: str
     asset_repo: str
+    # Optional direct download URL. When present, the launcher skips the
+    # GitHub Releases API and downloads from this URL directly. Useful
+    # for air-gapped mirrors and CI stubs.
+    asset_url: str | None = None
 
 
 ProgressFn = Callable[[int, int], None]
@@ -439,11 +448,13 @@ def read_boot_config(root: Path) -> BootConfig | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ManifestMalformed(f"{path}: {exc}") from exc
+    asset_url_raw = data.get("asset_url")
     return BootConfig(
         host_app=str(data.get("host_app", "")),
         plugin_set=list(data.get("plugin_set", [])),
         channel=str(data.get("channel", DEFAULT_CHANNEL)),
         asset_repo=str(data.get("asset_repo", DEFAULT_RELEASES_REPO)),
+        asset_url=str(asset_url_raw) if asset_url_raw else None,
     )
 
 

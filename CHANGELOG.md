@@ -202,11 +202,6 @@ bundle itself before anything inside the bundle exists.
   `locai-link-runtime --self-check` boots config + transport + plugins
   and exits 0 on success. No telemetry, no side effects — explicitly
   designed to be safe to run on an unproven version.
-- **Dry-run harness.** `bundling/_dryrun_ota.py` reproduces a v1.0.15
-  → v1.0.16 swap end-to-end against a fake release on local disk:
-  builds a "current" install, simulates the OTA, asserts the flip, the
-  stamp, the GC, and the post-flip layout. `--target /some/path` keeps
-  the workspace around so you can inspect it.
 - **Integration tests.** 52 Python tests across the source and bundle
   paths; 11 Rust integration tests in the launcher covering exec
   dispatch, exit 42 respawn, and all five rollback conditions

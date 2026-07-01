@@ -17,9 +17,11 @@
 //!   menu-bar app's "About" surface and by the Setup Assistant's
 //!   existing-install check.
 //!
-//! All three are stubbed for the scaffolding step; they return well-typed
-//! `todo!()` placeholders so consumers can wire up signatures now and
-//! the implementation can land in a follow-up.
+//! All three currently return non-panicking interim values
+//! (`HealthStatus::Down`, `Err(NotFound)`, `None`) so consumers can
+//! depend on the signatures today. Real implementations land with the
+//! menu-bar app's polling loop and the Setup Assistant's
+//! existing-install check.
 
 use std::path::Path;
 
