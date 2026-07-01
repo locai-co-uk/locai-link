@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<!--
+  SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+  SPDX-License-Identifier: BUSL-1.1
+
+  Summary pane rendered by Installer.app after payload copy and
+  postinstall complete. The Setup Assistant has already been launched
+  by scripts/postinstall by the time this pane is visible.
+-->
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #1d1d1f;
+            margin: 20px 24px;
+        }
+        h1 {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0 0 12px 0;
+        }
+        p {
+            margin: 0 0 10px 0;
+        }
+        .eyebrow {
+            font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #00B85A;
+            margin-bottom: 6px;
+        }
+        .hint {
+            margin-top: 20px;
+            padding: 10px 12px;
+            background: #f5f5f7;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #444;
+        }
+    </style>
+</head>
+<body>
+    <div class="eyebrow">Installed</div>
+    <h1>The installation was successful</h1>
+
+    <p>
+        Loc.ai Link has been installed to <code>/Library/Locai</code>.
+        Setup Assistant will now open to finish configuration — sign in
+        to your Loc.ai Control account, choose which models to download,
+        and pick which one to serve on this device.
+    </p>
+
+    <div class="hint">
+        If Setup Assistant didn't open automatically, launch
+        <strong>Loc.ai Setup Assistant</strong> from your Applications
+        folder to finish the process.
+    </div>
+</body>
+</html>
