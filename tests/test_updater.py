@@ -679,6 +679,15 @@ def test_flip_current_symlink_shape(tmp_path):
     assert os.readlink(root / updater.PREVIOUS_LINK).endswith("1.0.15")
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "Pointer-file shape uses names 'CURRENT' and 'current' which collide on "
+        "case-insensitive filesystems (default APFS/HFS+). The pointer-file "
+        "fallback is only used on Windows without Developer Mode anyway; testing "
+        "it on macOS gives false failures without covering a real production path."
+    ),
+)
 def test_flip_current_pointer_file_shape(tmp_path):
     """Windows-without-Developer-Mode shape: CURRENT/PREVIOUS pointer files."""
     (tmp_path / updater.VERSIONS_DIR / "1.0.15").mkdir(parents=True)
@@ -812,6 +821,9 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
 
     mocker.patch.object(updater, "download", side_effect=fake_download)
     mocker.patch.object(updater, "verify")
+    # verify_extracted_macos shells out to `codesign` on macOS runners;
+    # the fake bash-script runtime we lay down isn't signed, so mock it.
+    mocker.patch.object(updater, "verify_extracted_macos")
 
     def fake_extract(archive, target):
         # Lay down a manifest + a runnable runtime stub at the target dir.
@@ -855,6 +867,8 @@ def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     )
     mocker.patch.object(updater, "download", side_effect=lambda url, dest, **_: dest)
     mocker.patch.object(updater, "verify")
+    # Same as the happy-path test: codesign would reject the fake runtime.
+    mocker.patch.object(updater, "verify_extracted_macos")
 
     def fake_extract(archive, target):
         # A runtime that exits nonzero so health_check fails.
