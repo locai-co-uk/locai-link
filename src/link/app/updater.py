@@ -283,7 +283,7 @@ CURRENT_POINTER_FILE = "CURRENT"
 PREVIOUS_POINTER_FILE = "PREVIOUS"
 MANIFEST_NAME = "manifest.json"
 BOOT_NAME = "boot.json"
-RUNTIME_BINARY = "locai-link-runtime"
+RUNTIME_BINARY = "locai-link-runtime.exe" if sys.platform == "win32" else "locai-link-runtime"
 UPDATE_PENDING_STAMP = ".update-pending"
 
 DEFAULT_RELEASES_REPO = "locai-co-uk/locai-link"
@@ -635,7 +635,13 @@ def _fetch_sha256(url: str, *, session: requests.Session | None = None) -> str:
     except requests.RequestException as exc:
         raise VerifyFailed(f"Could not fetch SHA from {url}: {exc}") from exc
     # Format: either bare hex digest, or "<hex>  <filename>" (sha256sum format).
-    first_token = resp.text.strip().split()[0]
+    body = resp.text.strip()
+    if not body:
+        raise VerifyFailed(f"SHA file at {url} is empty")
+    tokens = body.split()
+    if not tokens:
+        raise VerifyFailed(f"SHA file at {url} is whitespace-only")
+    first_token = tokens[0]
     if not re.fullmatch(r"[0-9a-fA-F]{64}", first_token):
         raise VerifyFailed(f"SHA file at {url} did not parse as a hex digest")
     return first_token

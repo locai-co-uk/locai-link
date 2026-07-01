@@ -43,10 +43,27 @@ if [[ ! -f "$LAUNCHER" ]]; then
     exit 1
 fi
 chmod 755 "$LAUNCHER"
-# Root-owned: the launcher itself never needs write access.
+# Root-owned: the launcher itself never needs write access. Only the
+# launcher binary is locked down; the rest of INSTALL_ROOT stays
+# writeable so the OTA updater (running as the user via the
+# LaunchAgent) can drop new versions under versions/, flip the
+# `current` pointer, and manage its own state.
 chown root:wheel "$LAUNCHER"
-chown -R root:wheel "$INSTALL_ROOT"
-log "launcher installed at $LAUNCHER"
+# Give the invoking user ownership of the install root itself + the
+# subtrees the runtime + OTA touch. The console user is resolved
+# below; use $SUDO_USER when available (pkg installs run as root via
+# sudo), otherwise fall back to the console user we detect for the
+# Setup Assistant handoff.
+INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
+if [[ "$INSTALL_USER" != "root" ]]; then
+    chown "$INSTALL_USER:staff" "$INSTALL_ROOT"
+    for d in versions state logs; do
+        if [[ -e "$INSTALL_ROOT/$d" ]]; then
+            chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
+        fi
+    done
+fi
+log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
 
 # --- 2. /usr/local/bin/locai symlink ---------------------------------
 # /usr/local/bin exists on macOS 14+ but isn't guaranteed writable in

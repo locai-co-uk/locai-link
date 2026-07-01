@@ -76,18 +76,33 @@ pub struct InstalledVersion {
 
 /// Probe Link's `/healthz` endpoint. Default URL is
 /// `http://127.0.0.1:8101/healthz`; callers can override for testing.
+///
+/// Interim implementation returns `HealthStatus::Down` — real ureq
+/// probe lands with the menu-bar app's polling loop. Kept
+/// non-panicking so callers can already depend on the signature
+/// without crashing on scaffolding.
 pub fn agent_health(_url: &str) -> HealthStatus {
-    todo!("scaffold stub — implement with ureq once /healthz lands")
+    HealthStatus::Down
 }
 
 /// Parse a `boot.json` from disk.
+///
+/// Interim implementation returns `NotFound`; the real parser lands
+/// with the Setup Assistant's existing-install check. Non-panicking
+/// so callers can depend on the signature today.
 pub fn read_boot_json(_path: &Path) -> Result<BootConfig, std::io::Error> {
-    todo!("scaffold stub — read + deserialise once boot.json schema is final")
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "read_boot_json not yet implemented",
+    ))
 }
 
 /// Resolve `<install_root>/current` to the version it points at.
+///
+/// Interim implementation returns `None` — real symlink+pointer-file
+/// resolution lands with the menu-bar app's version display.
 pub fn installed_version(_install_root: &Path) -> Option<InstalledVersion> {
-    todo!("scaffold stub — read the symlink + parse versions/<v>/ dir name")
+    None
 }
 
 #[cfg(test)]

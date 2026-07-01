@@ -340,7 +340,10 @@ def self_check(args: argparse.Namespace) -> int:
     try:
         agent_config = AgentConfig(**saved_state)
     except Exception as e:
-        logger.error(f"self-check: session present but unparseable: {e}")
+        # Log the exception class only — the message can include field
+        # values from saved_state (identity tokens, api keys) which we
+        # don't want written to the self-check log.
+        logger.error("self-check: session present but unparseable (%s)", type(e).__name__)
         return 1
 
     zenoh_session = None

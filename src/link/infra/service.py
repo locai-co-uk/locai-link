@@ -182,11 +182,19 @@ class MacOSBackend(ServiceBackend):
         return self.plist_path.exists()
 
     def is_running(self) -> bool:
-        # launchctl list returns 0 only when the label is currently
-        # loaded. Anchor the grep with a space so e.g. "agent" doesn't
-        # falsely match "agent.menubar" loaded for a different service.
-        res = subprocess.run(f"launchctl list | grep ' {self.label}$'", shell=True, capture_output=True)
-        return res.returncode == 0
+        # `launchctl list` prints one row per loaded label ("PID STATUS
+        # LABEL"). Match in Python instead of shelling out to grep —
+        # avoids shell=True (banned in src/link/**) and any interpolation
+        # of self.label into a shell command.
+        res = subprocess.run(["launchctl", "list"], capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            return False
+        for line in res.stdout.splitlines():
+            # Split on tabs/whitespace; the label is the last column.
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2 and parts[1] == self.label:
+                return True
+        return False
 
     def install(self, start_now: bool):
         self.prepare_logs()

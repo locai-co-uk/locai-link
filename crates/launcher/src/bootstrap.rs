@@ -333,6 +333,17 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         .map_err(|e| format!("iterate tarball entries: {e}"))?
     {
         let mut entry = entry.map_err(|e| format!("tarball entry: {e}"))?;
+        // Reject unsafe entry types (symlinks, hard links) before we
+        // touch the filesystem. A malicious release could otherwise
+        // point a symlink outside `target` and a later Regular write
+        // would follow it.
+        let etype = entry.header().entry_type();
+        if etype.is_symlink() || etype.is_hard_link() {
+            return Err(format!(
+                "tarball rejected: unsafe entry type {etype:?} at {}",
+                entry.path().map(|p| p.display().to_string()).unwrap_or_default(),
+            ));
+        }
         let path = entry
             .path()
             .map_err(|e| format!("entry path: {e}"))?
@@ -346,7 +357,21 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         if version_dir.as_os_str() != target_name.as_str() {
             continue;
         }
-        let rel: PathBuf = parts.collect();
+        // Anchor the destination: reject any Normal-only descent that
+        // includes ParentDir, RootDir, or Prefix components. This is
+        // the belt-and-braces check against zip-slip; combined with
+        // the strict `versions/<v>/` prefix filter above, the archive
+        // simply cannot escape `target`.
+        let rel_parts: Vec<std::path::Component> = parts.collect();
+        for comp in &rel_parts {
+            if !matches!(comp, std::path::Component::Normal(_) | std::path::Component::CurDir) {
+                return Err(format!(
+                    "tarball rejected: unsafe path component {comp:?} in entry {}",
+                    path.display(),
+                ));
+            }
+        }
+        let rel: PathBuf = rel_parts.iter().collect();
         let out = if rel.as_os_str().is_empty() {
             target.to_path_buf()
         } else {
