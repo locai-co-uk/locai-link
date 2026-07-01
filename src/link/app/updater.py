@@ -1001,9 +1001,7 @@ def swap_bundle(install_root: Path | None = None) -> bool:
 
     if not health_check(target / RUNTIME_BINARY):
         shutil.rmtree(target, ignore_errors=True)
-        raise HealthCheckFailed(
-            f"self-check failed for staged version {release.version}; rolled back"
-        )
+        raise HealthCheckFailed(f"self-check failed for staged version {release.version}; rolled back")
 
     flip_current(install_root, release.version)
     # Stamp the install for the launcher's post-update health window. If

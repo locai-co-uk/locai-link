@@ -587,9 +587,7 @@ def test_open_in_browser_uses_open_on_macos(mocker):
     mocker.patch("platform.system", return_value="Darwin")
     mock_run = mocker.patch("link.app.onboarding.subprocess.run")
     assert _open_in_browser("https://example.com") is True
-    mock_run.assert_called_once_with(
-        ["open", "https://example.com"], check=False, capture_output=True, timeout=5
-    )
+    mock_run.assert_called_once_with(["open", "https://example.com"], check=False, capture_output=True, timeout=5)
 
 
 def test_open_in_browser_uses_xdg_open_on_linux(mocker):
@@ -598,9 +596,7 @@ def test_open_in_browser_uses_xdg_open_on_linux(mocker):
     mocker.patch("platform.system", return_value="Linux")
     mock_run = mocker.patch("link.app.onboarding.subprocess.run")
     assert _open_in_browser("https://example.com") is True
-    mock_run.assert_called_once_with(
-        ["xdg-open", "https://example.com"], check=False, capture_output=True, timeout=5
-    )
+    mock_run.assert_called_once_with(["xdg-open", "https://example.com"], check=False, capture_output=True, timeout=5)
 
 
 def test_open_in_browser_returns_false_on_unknown_platform(mocker):

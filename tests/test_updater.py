@@ -759,9 +759,7 @@ def _install_root_with_runtime_stub(tmp_path: Path, version: str) -> Path:
     """An install_root whose locai-link-runtime stub exits 0 on `self-check`."""
     root = _setup_install_root(tmp_path, version=version)
     runtime = root / updater.VERSIONS_DIR / version / updater.RUNTIME_BINARY
-    runtime.write_text(
-        '#!/usr/bin/env bash\n[ "$1" = "self-check" ] && exit 0 || exit 1\n'
-    )
+    runtime.write_text('#!/usr/bin/env bash\n[ "$1" = "self-check" ] && exit 0 || exit 1\n')
     runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return root
 
@@ -804,6 +802,7 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
             sha256_url="https://example/" + asset_name + ".sha256",
         ),
     )
+
     # Stub download + verify so we don't need a network. extract gets a real
     # tarball so the on-disk flip / health-check exercise real code paths.
     def fake_download(url, dest, **kw):

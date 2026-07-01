@@ -73,6 +73,7 @@ def _running_detached() -> bool:
         # treating as detached so we still try to open the browser.
         return True
 
+
 # expires_in is 600s with a 5s interval (~120 polls); cap at 240 to leave room for slow_down.
 _DEVICE_POLL_MAX_ITERATIONS = 240
 
@@ -186,8 +187,7 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
             logger.info("Device-flow URL opened in browser (no TTY detected).")
         else:
             logger.warning(
-                "No TTY and browser-open failed — user must read the verification "
-                "URL from the log file at %s",
+                "No TTY and browser-open failed — user must read the verification URL from the log file at %s",
                 Path.cwd() / "logs",
             )
 

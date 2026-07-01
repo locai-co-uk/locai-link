@@ -185,9 +185,7 @@ class MacOSBackend(ServiceBackend):
         # launchctl list returns 0 only when the label is currently
         # loaded. Anchor the grep with a space so e.g. "agent" doesn't
         # falsely match "agent.menubar" loaded for a different service.
-        res = subprocess.run(
-            f"launchctl list | grep ' {self.label}$'", shell=True, capture_output=True
-        )
+        res = subprocess.run(f"launchctl list | grep ' {self.label}$'", shell=True, capture_output=True)
         return res.returncode == 0
 
     def install(self, start_now: bool):
