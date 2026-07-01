@@ -679,15 +679,6 @@ def test_flip_current_symlink_shape(tmp_path):
     assert os.readlink(root / updater.PREVIOUS_LINK).endswith("1.0.15")
 
 
-@pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason=(
-        "Pointer-file shape uses names 'CURRENT' and 'current' which collide on "
-        "case-insensitive filesystems (default APFS/HFS+). The pointer-file "
-        "fallback is only used on Windows without Developer Mode anyway; testing "
-        "it on macOS gives false failures without covering a real production path."
-    ),
-)
 def test_flip_current_pointer_file_shape(tmp_path):
     """Windows-without-Developer-Mode shape: CURRENT/PREVIOUS pointer files."""
     (tmp_path / updater.VERSIONS_DIR / "1.0.15").mkdir(parents=True)
@@ -700,7 +691,13 @@ def test_flip_current_pointer_file_shape(tmp_path):
 
     assert (tmp_path / updater.CURRENT_POINTER_FILE).read_text().strip() == "1.0.16"
     assert (tmp_path / updater.PREVIOUS_POINTER_FILE).read_text().strip() == "1.0.15"
-    assert not (tmp_path / updater.CURRENT_LINK).exists()
+    # Check is_symlink() not exists(): on case-insensitive filesystems
+    # (macOS APFS/HFS+, Windows NTFS by default) the pointer file "CURRENT"
+    # and the symlink name "current" resolve to the same directory entry,
+    # so `exists()` returns True from the pointer file itself. The
+    # invariant we care about is that no *symlink* was created in the
+    # pointer-file shape — which is_symlink checks correctly.
+    assert not (tmp_path / updater.CURRENT_LINK).is_symlink()
 
 
 def test_flip_current_missing_target_raises(tmp_path):
@@ -732,6 +729,11 @@ def test_gc_keeps_extra_when_keep_higher(tmp_path):
 # --- health_check ---
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Fixture uses a #!/usr/bin/env bash shebang script which Windows can't exec. "
+    "Windows OTA validation exercises health_check with a real locai-link.exe in CI.",
+)
 def test_health_check_passes_on_exit_zero(tmp_path):
     script = tmp_path / "fake_runtime"
     script.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -794,6 +796,11 @@ def test_swap_bundle_short_circuits_when_already_at_latest(tmp_path, mocker):
     flip_spy.assert_not_called()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fake_extract lays down a bash-script runtime the Windows loader can't exec; "
+    "health_check fails for the wrong reason. Windows OTA is validated separately.",
+)
 def test_swap_bundle_happy_path(tmp_path, mocker):
     """End-to-end mock: newer release available -> chain runs, current flipped."""
     root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
@@ -848,6 +855,12 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
     assert lines[1] == "1.0.15", "stamp second line must record the previous version"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fake_extract lays down a bash-script runtime; on Windows the exec fails "
+    "before we test the exit-17 path we actually care about (test would pass by "
+    "accident for the wrong reason).",
+)
 def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     """A failing self-check should remove the staged version and raise."""
     root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
