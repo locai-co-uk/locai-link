@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from link.infra.service import LinuxBackend, MacOSBackend, ServiceManager, WindowsBackend
@@ -160,3 +162,96 @@ def test_windows_service_env_written_to_registry(mock_windows_env, tmp_path, moc
     assert set_args[1] == "Environment"
     assert set_args[3] == fake_winreg.REG_MULTI_SZ
     assert set_args[4] == ["PYTHONUNBUFFERED=1"]
+
+
+# --- New macOS scope + label_prefix + install_all coverage ---
+
+
+def test_mac_user_scope_writes_to_home(mock_mac_env, tmp_path):
+    """Default scope=user lands the plist under ~/Library/LaunchAgents/."""
+    manager = ServiceManager(
+        service_name="agent",
+        command="/opt/locai/locai-link run",
+        description="Loc.ai Agent",
+    )
+    manager.install(start_now=False)
+    assert manager.plist_path == tmp_path / "Users/test/Library/LaunchAgents/io.locai.agent.plist"
+    assert manager.plist_path.exists()
+
+
+def test_mac_system_scope_writes_to_library(mock_mac_env):
+    """scope=system lands the plist under /Library/LaunchAgents/."""
+    manager = ServiceManager(
+        service_name="agent",
+        command="/Library/Locai/locai-link",
+        description="Loc.ai Agent",
+        scope="system",
+    )
+    # Don't actually write — write would need /Library/ root.
+    assert manager.plist_path == Path("/Library/LaunchAgents/io.locai.agent.plist")
+
+
+def test_mac_label_prefix_threads_into_plist(mock_mac_env, tmp_path):
+    """Custom label_prefix flows into plist filename, <Label>, and launchctl grep."""
+    manager = ServiceManager(
+        service_name="agent",
+        command="/Library/Locai/locai-link",
+        description="Loc.ai Agent",
+        label_prefix="uk.co.locai.link",
+    )
+    manager.install(start_now=False)
+
+    expected_plist = tmp_path / "Users/test/Library/LaunchAgents/uk.co.locai.link.agent.plist"
+    assert manager.plist_path == expected_plist
+    assert expected_plist.exists()
+    content = expected_plist.read_text()
+    assert "<string>uk.co.locai.link.agent</string>" in content
+    # Old prefix must NOT appear.
+    assert "io.locai.agent" not in content
+
+
+def test_install_all_registers_two_services_in_lockstep(mock_mac_env, tmp_path):
+    """install_all() installs every service in the list."""
+    from link.infra.service import install_all
+
+    a = ServiceManager(
+        service_name="agent",
+        command="/Library/Locai/locai-link",
+        description="Agent",
+        label_prefix="uk.co.locai.link",
+    )
+    b = ServiceManager(
+        service_name="menubar",
+        command="/Applications/Locai\\ Link.app/Contents/MacOS/menubar",
+        description="Menu-bar",
+        label_prefix="uk.co.locai.link",
+    )
+    install_all([a, b], start_now=True)
+    assert a.plist_path.exists()
+    assert b.plist_path.exists()
+
+
+def test_install_all_rolls_back_on_failure(mock_mac_env, tmp_path, mocker):
+    """If one install raises, prior installs are uninstalled."""
+    from link.infra.service import install_all
+
+    a = ServiceManager(
+        service_name="agent",
+        command="/Library/Locai/locai-link",
+        description="Agent",
+        label_prefix="uk.co.locai.link",
+    )
+    b = ServiceManager(
+        service_name="menubar",
+        command="/Applications/Locai/menubar",
+        description="Menu-bar",
+        label_prefix="uk.co.locai.link",
+    )
+    # Make the second install raise.
+    mocker.patch.object(b, "install", side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError, match="disk full"):
+        install_all([a, b], start_now=True)
+
+    # First service should have been uninstalled by the rollback.
+    assert not a.plist_path.exists()

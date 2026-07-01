@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
+# Cargo workspace root. Members are the launcher (existing), the shared
+# helper crate (agent-status polling, boot.json reading, version lookup),
+# and the two Tauri apps that drive the installer UX.
+
+[workspace]
+resolver = "2"
+members = [
+    "launcher",
+    "shared",
+    # Tauri apps. Each has a `src-tauri/` directory housing the Rust
+    # backend; the Svelte frontend lives alongside it under `src/`.
+    "setup_assistant/src-tauri",
+    "companion/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+# Shared dependency versions used by more than one member crate. Members
+# pin against `{ workspace = true }` to keep the tree consistent.
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
+
+# NOTE: Cargo.lock pins `time = 0.3.49` because cookie 0.18.1 (pulled
+# in by Tauri) hasn't been updated for the `Parsable::parse` signature
+# change introduced in time 0.3.50+. Keep Cargo.lock committed until
+# upstream cookie picks up the new API. To refresh other deps without
+# regressing this, use `cargo update --workspace --exclude time`.
+
+# Release profile applies to the whole workspace. The launcher targets a
+# small static binary; tuning here keeps the Tauri builds small too.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,23 +1,68 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""OTA update logic — pulls latest code and refreshes dependencies/plugin binaries.
+"""OTA update logic — covers both install shapes.
 
-The agent itself signals an update request by setting `AgentRuntime.update_requested = True`
-and shutting down. The caller (main.py run) then invokes `pull_and_update()` and
-re-execs the Python process via `os.execv()` to load the new code.
+Source install (``curl … | bash`` deployments): pulls latest code via git +
+refreshes dependencies and plugin binaries. Entry point: ``pull_and_update``.
+
+Bundled install (PyInstaller artifact deployed to ``<install_root>/``):
+downloads a release tarball, verifies, extracts, flips the ``current``
+pointer, health-checks the new runtime, GCs the old. Entry points: the
+``Bundle OTA`` section below — ``discover_install_root``, ``read_manifest``,
+``latest_release_for``, ``download``, ``verify``, ``extract``,
+``flip_current``, ``health_check``, ``gc_old_versions``.
+
+The runtime signals an update request by setting
+``AgentRuntime.update_requested = True`` and shutting down. ``main.run`` then
+invokes ``_apply_update_and_reexec`` which routes to one of the two paths
+above based on ``sys.frozen`` (dispatch wiring not yet in this commit).
+
+Bundled-install layout this module operates on::
+
+    <install_root>/
+    ├── locai-link               (launcher; not our concern — see launcher/)
+    ├── versions/<v>/locai-link-runtime
+    ├── current -> versions/<v>  (symlink OR a ``CURRENT`` text file)
+    ├── previous -> versions/<v> (same shape as current)
+    ├── staging/                 (downloads in flight)
+    └── data/                    (configs, sessions, models — never touched here)
+
+The launcher is the stable entry point the OS service starts; it follows the
+``current`` pointer and exec's the runtime there. That indirection is what
+makes A/B updates safe — we extract the new version next to the old, flip
+the pointer atomically, and the next launch picks it up.
 """
 
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
 import logging
+import os
+import re
 import shutil
 import subprocess
+import sys
+import tarfile
+import tempfile
+import time
 import tomllib
+import zipfile
 from pathlib import Path
+from typing import Callable, Iterable
+
+import requests
 
 from link.config.models import AgentConfig
 
 logger = logging.getLogger(__name__)
 
+
+# ===========================================================================
+# Source-install OTA — git-based, used when running from a cloned repo.
+# ===========================================================================
 
 DEFAULT_BRANCH = "main"
 
@@ -217,3 +262,810 @@ def _plugin_entry_point_names(plugin_dir: Path) -> set[str]:
         return set()
     entries = data.get("project", {}).get("entry-points", {}).get("locai.plugins", {})
     return set(entries.keys())
+
+
+# ===========================================================================
+# Bundle OTA — download / verify / extract / flip / GC for PyInstaller bundles.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Layout constants — single source of truth for the on-disk shape
+# ---------------------------------------------------------------------------
+
+VERSIONS_DIR = "versions"
+STAGING_DIR = "staging"
+CURRENT_LINK = "current"
+PREVIOUS_LINK = "previous"
+# Windows-without-Developer-Mode fallback for the symlink. The build process
+# writes one or the other depending on what the OS allows; the Rust launcher
+# (under ``launcher/``) accepts either shape.
+CURRENT_POINTER_FILE = "CURRENT"
+PREVIOUS_POINTER_FILE = "PREVIOUS"
+MANIFEST_NAME = "manifest.json"
+BOOT_NAME = "boot.json"
+RUNTIME_BINARY = "locai-link-runtime.exe" if sys.platform == "win32" else "locai-link-runtime"
+UPDATE_PENDING_STAMP = ".update-pending"
+
+DEFAULT_RELEASES_REPO = "locai-co-uk/locai-link"
+DEFAULT_CHANNEL = "stable"
+
+# Download tuning. Generous: this runs once per OTA, not in a hot path.
+_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+_DOWNLOAD_TIMEOUT = 60  # seconds for connect/read on a single chunk
+_GH_API_TIMEOUT = 15
+
+# Path-traversal guard during extract.
+_UNSAFE_PATH_RE = re.compile(r"(^[/\\])|(^|[/\\])\.\.([/\\]|$)")
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class BundleUpdateError(Exception):
+    """Anything that goes wrong in the bundle OTA path raises a subclass of this."""
+
+
+class InstallRootNotFound(BundleUpdateError):
+    """Could not locate ``manifest.json`` walking up from ``sys.executable``."""
+
+
+class ManifestMalformed(BundleUpdateError):
+    """``manifest.json`` is missing required fields or unparseable."""
+
+
+class ReleaseNotFound(BundleUpdateError):
+    """GitHub API returned a release but no asset matched our stem + version."""
+
+
+class DownloadFailed(BundleUpdateError):
+    """Network or HTTP error during download, after retries."""
+
+
+class VerifyFailed(BundleUpdateError):
+    """SHA mismatch or platform-signature verification failed."""
+
+
+class ExtractRefused(BundleUpdateError):
+    """Tarball/zip contained an entry that would escape the destination directory."""
+
+
+class HealthCheckFailed(BundleUpdateError):
+    """``--self-check`` of the newly extracted bundle did not exit 0 in time."""
+
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Manifest:
+    """Mirror of ``manifest.json`` written by ``bundling/manifest.py::write_manifest``."""
+
+    manifest_version: int
+    asset_name: str  # e.g. "locai-link-llm-linux-x86_64"
+    version: str  # e.g. "1.0.15"
+    git_sha: str
+    built_at: str
+    plugins: list[dict]
+
+
+@dataclasses.dataclass(frozen=True)
+class ReleaseInfo:
+    """Resolved target of an update: where to download from and what to expect."""
+
+    version: str  # the tag minus the "v" prefix
+    tag: str  # the raw tag, e.g. "v1.0.16"
+    asset_name: str  # full filename including the version suffix and extension
+    download_url: str
+    sha256_url: str | None  # sibling .sha256 — None if release didn't ship one
+
+
+@dataclasses.dataclass(frozen=True)
+class BootConfig:
+    """Mirror of ``boot.json`` written by host installers for the fetch-on-first-launch path.
+
+    Carried here for completeness; the actual bootstrap consumption (used when
+    a host installer ships only the launcher + boot.json and the bundle is
+    downloaded on first launch) lives in the Rust launcher under
+    ``crates/launcher/``. Field shape (name, optional/required) must match
+    the Rust ``BootConfig`` in ``crates/launcher/src/boot.rs`` and its
+    mirror in ``crates/shared/src/lib.rs`` — kept in lockstep because a
+    host installer that writes fields the Python side drops is a schema
+    drift bug.
+    """
+
+    host_app: str
+    plugin_set: list[str]
+    channel: str
+    asset_repo: str
+    # Optional direct download URL. When present, the launcher skips the
+    # GitHub Releases API and downloads from this URL directly. Useful
+    # for air-gapped mirrors and CI stubs.
+    asset_url: str | None = None
+
+
+ProgressFn = Callable[[int, int], None]
+"""``progress(bytes_done, bytes_total)`` — ``bytes_total`` is 0 when unknown."""
+
+
+# ---------------------------------------------------------------------------
+# Layout discovery
+# ---------------------------------------------------------------------------
+
+
+def discover_install_root(start: Path | None = None) -> Path:
+    """Walk up from ``sys.executable`` (or ``start``) to find the install_root.
+
+    Defined as the nearest ancestor that contains either ``current``, the
+    ``CURRENT`` pointer file, or a ``versions/`` directory. That heuristic
+    avoids depending on the manifest, which lives one layer deeper.
+    """
+    if start is None:
+        start = Path(sys.executable).resolve()
+    here = start if start.is_dir() else start.parent
+    for candidate in (here, *here.parents):
+        if (candidate / CURRENT_LINK).exists() or (candidate / CURRENT_POINTER_FILE).is_file():
+            return candidate
+        if (candidate / VERSIONS_DIR).is_dir():
+            return candidate
+    raise InstallRootNotFound(f"No install_root found walking up from {start}")
+
+
+def read_manifest(root: Path) -> Manifest:
+    """Parse ``<root>/<current>/manifest.json`` into a Manifest."""
+    current = _resolve_current(root)
+    if current is None:
+        raise InstallRootNotFound(f"No current version under {root}")
+    path = current / MANIFEST_NAME
+    if not path.is_file():
+        raise ManifestMalformed(f"manifest.json missing at {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ManifestMalformed(f"{path}: {exc}") from exc
+    try:
+        return Manifest(
+            manifest_version=int(data["manifest_version"]),
+            asset_name=str(data["asset_name"]),
+            version=str(data["version"]),
+            git_sha=str(data.get("git_sha", "")),
+            built_at=str(data.get("built_at", "")),
+            plugins=list(data.get("plugins", [])),
+        )
+    except KeyError as exc:
+        raise ManifestMalformed(f"{path}: missing field {exc}") from exc
+
+
+def read_boot_config(root: Path) -> BootConfig | None:
+    """Parse ``<root>/boot.json`` if present. Returns None otherwise.
+
+    Field types are validated strictly (no silent coercion) so a
+    malformed ``boot.json`` fails here rather than later during OTA,
+    and so the Python side stays in lockstep with the Rust launcher's
+    stricter serde deserialisation.
+    """
+    path = root / BOOT_NAME
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ManifestMalformed(f"{path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ManifestMalformed(f"{path}: expected a JSON object, got {type(data).__name__}")
+
+    def _require_str(key: str, default: str | None = None) -> str:
+        raw = data.get(key, default)
+        if raw is None:
+            raise ManifestMalformed(f"{path}: missing required string field {key!r}")
+        if not isinstance(raw, str):
+            raise ManifestMalformed(f"{path}: {key!r} must be a string, got {type(raw).__name__}")
+        return raw
+
+    plugin_set_raw = data.get("plugin_set", [])
+    if not isinstance(plugin_set_raw, list) or not all(isinstance(p, str) for p in plugin_set_raw):
+        raise ManifestMalformed(f"{path}: 'plugin_set' must be a list of strings")
+
+    asset_url_raw = data.get("asset_url")
+    if asset_url_raw is not None and not isinstance(asset_url_raw, str):
+        raise ManifestMalformed(f"{path}: 'asset_url' must be a string or absent, got {type(asset_url_raw).__name__}")
+
+    return BootConfig(
+        host_app=_require_str("host_app"),
+        plugin_set=list(plugin_set_raw),
+        channel=_require_str("channel", DEFAULT_CHANNEL),
+        asset_repo=_require_str("asset_repo", DEFAULT_RELEASES_REPO),
+        asset_url=asset_url_raw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Release resolution
+# ---------------------------------------------------------------------------
+
+
+def latest_release_for(
+    asset_stem: str,
+    *,
+    repo: str = DEFAULT_RELEASES_REPO,
+    api_base: str = "https://api.github.com",
+    session: requests.Session | None = None,
+) -> ReleaseInfo:
+    """Find the latest release that publishes an asset matching ``asset_stem``.
+
+    ``asset_stem`` is the platform-and-plugin-set prefix, e.g.
+    ``locai-link-llm-linux-x86_64`` (from ``manifest.asset_name``). The actual
+    asset filename is ``<stem>-v<version>.<ext>`` — see
+    ``bundling/manifest.py::derive_asset_name`` for the naming rules.
+    """
+    http = session or requests
+    url = f"{api_base.rstrip('/')}/repos/{repo}/releases/latest"
+    try:
+        resp = http.get(url, timeout=_GH_API_TIMEOUT, headers={"Accept": "application/vnd.github+json"})
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise ReleaseNotFound(f"GitHub releases lookup failed: {exc}") from exc
+    payload = resp.json()
+    tag = str(payload.get("tag_name") or "")
+    if not tag:
+        raise ReleaseNotFound(f"Release at {url} has no tag_name")
+    version = tag.lstrip("v")
+
+    assets: Iterable[dict] = payload.get("assets") or []
+    asset_match, sha_match = _pick_assets(assets, asset_stem, version)
+    if asset_match is None:
+        raise ReleaseNotFound(f"No asset matching '{asset_stem}-v{version}.(tar.gz|zip)' on release {tag}")
+    return ReleaseInfo(
+        version=version,
+        tag=tag,
+        asset_name=str(asset_match["name"]),
+        download_url=str(asset_match["browser_download_url"]),
+        sha256_url=str(sha_match["browser_download_url"]) if sha_match else None,
+    )
+
+
+def _pick_assets(assets: Iterable[dict], stem: str, version: str) -> tuple[dict | None, dict | None]:
+    bundle_re = re.compile(rf"^{re.escape(stem)}-v{re.escape(version)}\.(tar\.gz|zip)$")
+    sha_re = re.compile(rf"^{re.escape(stem)}-v{re.escape(version)}\.(tar\.gz|zip)\.sha256$")
+    bundle_match: dict | None = None
+    sha_match: dict | None = None
+    for a in assets:
+        name = a.get("name") or ""
+        if bundle_re.match(name) and bundle_match is None:
+            bundle_match = a
+        elif sha_re.match(name) and sha_match is None:
+            sha_match = a
+    return bundle_match, sha_match
+
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+
+
+def download(
+    url: str,
+    dest: Path,
+    *,
+    progress: ProgressFn | None = None,
+    session: requests.Session | None = None,
+    max_retries: int = 3,
+) -> Path:
+    """Stream ``url`` into ``dest`` via a ``.partial`` sidecar; rename on completion.
+
+    Resumable: if ``dest.partial`` exists from a previous run it's reused with a
+    Range request. Returns the path to the completed file (== ``dest``).
+    """
+    http = session or requests
+    partial = dest.with_suffix(dest.suffix + ".partial")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        existing = partial.stat().st_size if partial.is_file() else 0
+        headers = {"Range": f"bytes={existing}-"} if existing else {}
+        try:
+            with http.get(url, stream=True, timeout=_DOWNLOAD_TIMEOUT, headers=headers) as r:
+                # Partial Content is fine; 200 with no Range header is also fine.
+                if r.status_code not in (200, 206):
+                    raise DownloadFailed(f"HTTP {r.status_code} fetching {url}")
+                total = existing + int(r.headers.get("Content-Length") or 0)
+                mode = "ab" if r.status_code == 206 and existing else "wb"
+                if mode == "wb":
+                    existing = 0
+                done = existing
+                with partial.open(mode) as fh:
+                    if progress is not None:
+                        progress(done, total)
+                    for chunk in r.iter_content(chunk_size=_CHUNK_SIZE):
+                        if not chunk:
+                            continue
+                        fh.write(chunk)
+                        done += len(chunk)
+                        if progress is not None:
+                            progress(done, total)
+            os.replace(partial, dest)
+            return dest
+        except (requests.RequestException, DownloadFailed) as exc:
+            last_exc = exc
+            logger.warning(f"download attempt {attempt}/{max_retries} for {url} failed: {exc}")
+    raise DownloadFailed(f"Giving up after {max_retries} attempts on {url}: {last_exc}")
+
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+
+
+def verify(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+    expected_sha256_url: str | None = None,
+    platform: str | None = None,
+    session: requests.Session | None = None,
+) -> None:
+    """Verify a downloaded bundle. Raises ``VerifyFailed`` on mismatch.
+
+    SHA check is mandatory — pass either the literal hex digest or a URL to a
+    sibling ``.sha256`` file (the format GitHub Actions publishes). Platform
+    signature is best-effort and dispatches by OS:
+        - macOS: ``codesign --verify --deep --strict`` over the extracted
+          bundle (skipped here; runs post-extract via ``verify_extracted_macos``).
+        - Linux: SHA is the only gate, by design.
+        - Windows: not supported in v1 (no code-signing cert yet).
+    """
+    if expected_sha256 is None and expected_sha256_url is None:
+        raise VerifyFailed("verify() requires expected_sha256 or expected_sha256_url")
+
+    if expected_sha256 is None:
+        expected_sha256 = _fetch_sha256(expected_sha256_url or "", session=session)
+
+    actual = _hash_sha256(path)
+    if actual.lower() != expected_sha256.lower():
+        raise VerifyFailed(f"SHA256 mismatch: expected {expected_sha256}, got {actual}")
+
+    # Platform-signature dispatch is intentionally a no-op for the tarball
+    # itself. The macOS codesign check happens against the extracted bundle
+    # — see verify_extracted_macos. This keeps the function callable for the
+    # download path on all platforms.
+    if platform == "win32":
+        # Documented for v1: SHA is the only integrity gate; Authenticode
+        # check requires a signed binary, which we don't have a cert for yet.
+        logger.debug("verify: Windows Authenticode check skipped (v1 limitation)")
+
+
+def verify_extracted_macos(extracted_dir: Path) -> None:
+    """Run ``codesign --verify --deep --strict`` over an extracted macOS bundle.
+
+    Separate from ``verify()`` because codesign operates on the laid-out
+    binary, not the tarball. Raises ``VerifyFailed`` on rejection.
+    """
+    if sys.platform != "darwin":
+        return
+    runtime = extracted_dir / RUNTIME_BINARY
+    if not runtime.exists():
+        # Nothing to verify; let extraction errors surface elsewhere.
+        return
+    try:
+        subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(runtime)],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:
+        raise VerifyFailed("codesign not found — required on macOS") from exc
+    except subprocess.CalledProcessError as exc:
+        raise VerifyFailed(f"codesign rejected {runtime}: {exc.stderr.decode(errors='replace')[:400]}") from exc
+
+
+def _fetch_sha256(url: str, *, session: requests.Session | None = None) -> str:
+    http = session or requests
+    try:
+        resp = http.get(url, timeout=_GH_API_TIMEOUT)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise VerifyFailed(f"Could not fetch SHA from {url}: {exc}") from exc
+    # Format: either bare hex digest, or "<hex>  <filename>" (sha256sum format).
+    body = resp.text.strip()
+    if not body:
+        raise VerifyFailed(f"SHA file at {url} is empty")
+    tokens = body.split()
+    if not tokens:
+        raise VerifyFailed(f"SHA file at {url} is whitespace-only")
+    first_token = tokens[0]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", first_token):
+        raise VerifyFailed(f"SHA file at {url} did not parse as a hex digest")
+    return first_token
+
+
+def _hash_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(_CHUNK_SIZE), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Extract
+# ---------------------------------------------------------------------------
+
+
+def extract(archive: Path, dest: Path) -> None:
+    """Extract a release archive's ``versions/<v>/`` payload into ``dest``.
+
+    The release tarball produced by ``bundling/build.py`` wraps the bundle in
+    ``versions/<v>/`` plus a launcher + ``current`` pointer at the root, so
+    extracting the same artifact into a fresh install_root yields a valid
+    first install. For OTA updates we only want the inner ``versions/<v>/``
+    directory — the launcher and pointer already exist in the deployed
+    install_root and must not be overwritten.
+
+    Refuses path-traversal entries. Atomic replace of ``dest`` on success.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = dest.with_name(dest.name + ".tmp")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    suffix = "".join(archive.suffixes[-2:]).lower()
+    try:
+        if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
+            _extract_tar(archive, staging)
+        elif suffix.endswith(".zip"):
+            _extract_zip(archive, staging)
+        else:
+            raise ExtractRefused(f"Unknown archive type: {archive.name}")
+
+        payload = _locate_versioned_payload(staging)
+        if dest.exists():
+            shutil.rmtree(dest)
+        os.replace(payload, dest)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _locate_versioned_payload(staging: Path) -> Path:
+    """Find ``staging/versions/<single>/`` inside an extracted release.
+
+    Falls back to ``staging/<single>/`` for the legacy/flat tarball shape used
+    by some tests — keeps callers honest while preserving compatibility.
+    """
+    versions_dir = staging / VERSIONS_DIR
+    if versions_dir.is_dir():
+        children = [p for p in versions_dir.iterdir() if p.is_dir()]
+        if len(children) == 1:
+            return children[0]
+        raise BundleUpdateError(
+            f"expected exactly one versions/<v>/ inside archive, found {[c.name for c in children]}"
+        )
+    # Legacy shape: a single top-level dir wrapping the bundle directly.
+    top_dirs = [p for p in staging.iterdir() if p.is_dir()]
+    if len(top_dirs) == 1:
+        return top_dirs[0]
+    raise BundleUpdateError("archive layout unrecognised: expected versions/<v>/ payload or a single top-level dir")
+
+
+def _extract_tar(archive: Path, dest: Path) -> None:
+    with tarfile.open(archive, mode="r:*") as tf:
+        for member in tf.getmembers():
+            _refuse_unsafe(member.name)
+            if member.islnk() or member.issym():
+                target = member.linkname
+                _refuse_unsafe(target)
+        # data_filter (3.12+) handles a lot of this defensively. Fall back to
+        # the legacy untrusted-safe extract on older Pythons.
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(dest, filter="data")  # type: ignore[arg-type]
+        else:  # pragma: no cover — Python <3.12, not a target version
+            tf.extractall(dest)
+
+
+def _extract_zip(archive: Path, dest: Path) -> None:
+    with zipfile.ZipFile(archive) as zf:
+        for name in zf.namelist():
+            _refuse_unsafe(name)
+        zf.extractall(dest)
+
+
+def _refuse_unsafe(name: str) -> None:
+    if _UNSAFE_PATH_RE.search(name):
+        raise ExtractRefused(f"Refusing unsafe archive entry: {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# Current/previous pointer management
+# ---------------------------------------------------------------------------
+
+
+def _resolve_current(root: Path) -> Path | None:
+    """Return the absolute path of ``versions/<v>/`` for the live version."""
+    return _resolve_pointer(root, CURRENT_LINK, CURRENT_POINTER_FILE)
+
+
+def _resolve_previous(root: Path) -> Path | None:
+    return _resolve_pointer(root, PREVIOUS_LINK, PREVIOUS_POINTER_FILE)
+
+
+def _resolve_pointer(root: Path, link_name: str, file_name: str) -> Path | None:
+    link = root / link_name
+    if link.is_symlink() or link.is_dir():
+        try:
+            resolved = link.resolve()
+            if resolved.is_dir():
+                return resolved
+        except OSError:
+            pass
+    pointer = root / file_name
+    if pointer.is_file():
+        version = pointer.read_text(encoding="utf-8").strip()
+        target = root / VERSIONS_DIR / version
+        if target.is_dir():
+            return target
+    return None
+
+
+def flip_current(root: Path, new_version: str) -> None:
+    """Point ``current`` at ``versions/<new_version>``, demote the old to ``previous``.
+
+    Preserves the pointer *shape* — if the install was using a CURRENT pointer
+    file (Windows-without-developer-mode fallback chosen at build time), the
+    new pointer is written the same way. Otherwise a symlink is used.
+    """
+    new_target = root / VERSIONS_DIR / new_version
+    if not new_target.is_dir():
+        raise BundleUpdateError(f"Cannot flip current to missing version: {new_target}")
+
+    use_symlink = _install_uses_symlink(root)
+    old_current_version = _read_pointer_version(root, CURRENT_LINK, CURRENT_POINTER_FILE)
+
+    _write_pointer(root, CURRENT_LINK, CURRENT_POINTER_FILE, new_version, use_symlink=use_symlink)
+
+    # `previous` only makes sense if we actually had a current to demote.
+    if old_current_version and old_current_version != new_version:
+        _write_pointer(
+            root,
+            PREVIOUS_LINK,
+            PREVIOUS_POINTER_FILE,
+            old_current_version,
+            use_symlink=use_symlink,
+        )
+
+
+def _install_uses_symlink(root: Path) -> bool:
+    """The build process chose between symlink and pointer-file. Match what's there."""
+    if (root / CURRENT_LINK).is_symlink():
+        return True
+    if (root / CURRENT_POINTER_FILE).is_file():
+        return False
+    # Fresh install with no current yet — prefer symlink, the OS will tell us
+    # if it isn't allowed and `_write_pointer` falls back.
+    return sys.platform != "win32"
+
+
+def _read_pointer_version(root: Path, link_name: str, file_name: str) -> str | None:
+    link = root / link_name
+    if link.is_symlink():
+        return Path(os.readlink(link)).name
+    pointer = root / file_name
+    if pointer.is_file():
+        return pointer.read_text(encoding="utf-8").strip() or None
+    return None
+
+
+def _write_pointer(
+    root: Path,
+    link_name: str,
+    file_name: str,
+    version: str,
+    *,
+    use_symlink: bool,
+) -> None:
+    """Atomically replace the pointer for ``link_name`` / ``file_name``.
+
+    Symlink path: create a uniquely-named temp symlink in the same dir, then
+    ``os.replace`` it onto the target. POSIX atomic; ``MoveFileEx`` on Windows.
+    Pointer-file path: write ``file_name + .tmp``, then ``os.replace``.
+    """
+    if use_symlink:
+        target = root / link_name
+        with tempfile.TemporaryDirectory(dir=root) as td:
+            tmp = Path(td) / "link.tmp"
+            tmp.symlink_to(Path(VERSIONS_DIR) / version, target_is_directory=True)
+            # Move into the parent dir under a unique name first — symlinks
+            # cannot be atomically replaced across directories on every fs,
+            # but os.replace within the same dir is atomic on POSIX.
+            staged = root / f".{link_name}.tmp"
+            if staged.exists() or staged.is_symlink():
+                staged.unlink()
+            tmp.rename(staged)
+            os.replace(staged, target)
+        # Clean up stray pointer file from a previous shape.
+        stale = root / file_name
+        if stale.is_file():
+            stale.unlink()
+        return
+
+    # Pointer-file shape.
+    pointer = root / file_name
+    tmp = root / (file_name + ".tmp")
+    tmp.write_text(version + "\n", encoding="utf-8")
+    os.replace(tmp, pointer)
+    # Clean up stray symlink from a previous shape.
+    link = root / link_name
+    if link.is_symlink():
+        link.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+
+def health_check(runtime_path: Path, *, timeout: float = 30.0) -> bool:
+    """Spawn ``runtime_path --self-check`` and return True on a clean exit 0.
+
+    Captures stderr for log forwarding on failure. Does not raise — the caller
+    decides what to do on a False result (typically: skip the flip, GC the
+    staged version).
+    """
+    if not runtime_path.is_file():
+        logger.error(f"health_check: runtime not found at {runtime_path}")
+        return False
+    try:
+        result = subprocess.run(
+            [str(runtime_path), "self-check"],
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(f"health_check: timed out after {timeout}s on {runtime_path}")
+        return False
+    except OSError as exc:
+        logger.error(f"health_check: could not exec {runtime_path}: {exc}")
+        return False
+    if result.returncode != 0:
+        logger.error(f"health_check: exit {result.returncode} on {runtime_path}\nstderr: {result.stderr[:800]}")
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# GC
+# ---------------------------------------------------------------------------
+
+
+def gc_old_versions(root: Path, *, keep: int = 2) -> list[str]:
+    """Delete versions that are neither current nor previous (plus N-2 oldest).
+
+    ``keep`` is the upper bound *including* current and previous. Default 2 =
+    current + previous, nothing else retained. Returns the list of removed
+    version names for logging.
+    """
+    versions_dir = root / VERSIONS_DIR
+    if not versions_dir.is_dir():
+        return []
+
+    current_version = _read_pointer_version(root, CURRENT_LINK, CURRENT_POINTER_FILE)
+    previous_version = _read_pointer_version(root, PREVIOUS_LINK, PREVIOUS_POINTER_FILE)
+    pinned = {v for v in (current_version, previous_version) if v}
+
+    # Sort newest-first by mtime so a `keep > 2` retains the freshest.
+    candidates = sorted(
+        (p for p in versions_dir.iterdir() if p.is_dir() and not p.name.endswith(".tmp")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    keepers: set[str] = set(pinned)
+    for entry in candidates:
+        if len(keepers) >= keep:
+            break
+        keepers.add(entry.name)
+
+    removed: list[str] = []
+    for entry in candidates:
+        if entry.name in keepers:
+            continue
+        try:
+            shutil.rmtree(entry)
+            removed.append(entry.name)
+        except OSError as exc:
+            logger.warning(f"gc_old_versions: could not remove {entry}: {exc}")
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Staging helpers
+# ---------------------------------------------------------------------------
+
+
+def staging_path(root: Path) -> Path:
+    p = root / STAGING_DIR
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def clear_staging(root: Path) -> None:
+    p = root / STAGING_DIR
+    if p.exists():
+        shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration
+# ---------------------------------------------------------------------------
+
+
+def running_frozen_bundle() -> bool:
+    """True when this process is a PyInstaller-frozen bundle (vs a source install)."""
+    return bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+
+
+def swap_bundle(install_root: Path | None = None) -> bool:
+    """Run the full bundle OTA chain end-to-end. Returns True if current was flipped.
+
+    Discovers ``install_root`` if not given, identifies the live version from
+    its manifest, asks GitHub for the latest matching release. Returns
+    ``False`` without I/O when already at latest. Otherwise: download,
+    SHA256 verify against the sibling sidecar, extract, codesign on macOS,
+    health-check the new runtime, atomic flip, GC.
+
+    Failures along the way raise the matching ``BundleUpdateError`` subclass
+    so the caller can log and exit. On health-check failure the staged
+    version directory is removed before the exception propagates.
+    """
+    if install_root is None:
+        install_root = discover_install_root()
+    manifest = read_manifest(install_root)
+    release = latest_release_for(manifest.asset_name)
+
+    if release.version == manifest.version:
+        logger.info(f"swap_bundle: already at latest ({manifest.version})")
+        return False
+
+    logger.info(f"swap_bundle: {manifest.version} -> {release.version}")
+    staging = staging_path(install_root)
+    archive = download(release.download_url, staging / release.asset_name)
+    verify(archive, expected_sha256_url=release.sha256_url, platform=sys.platform)
+
+    target = install_root / VERSIONS_DIR / release.version
+    extract(archive, target)
+    verify_extracted_macos(target)  # no-op on non-macOS
+
+    if not health_check(target / RUNTIME_BINARY):
+        shutil.rmtree(target, ignore_errors=True)
+        raise HealthCheckFailed(f"self-check failed for staged version {release.version}; rolled back")
+
+    flip_current(install_root, release.version)
+    # Stamp the install for the launcher's post-update health window. If
+    # the runtime spawned from the new version exits nonzero within the
+    # window, the launcher rolls current back to the version recorded here.
+    _write_update_pending(install_root, previous_version=manifest.version)
+    gc_old_versions(install_root)
+    clear_staging(install_root)
+    logger.info(f"swap_bundle: flipped current -> {release.version}")
+    return True
+
+
+def _write_update_pending(install_root: Path, *, previous_version: str) -> None:
+    """Drop the ``.update-pending`` stamp the launcher reads on child exit.
+
+    Two-line plain-text format so the Rust launcher can parse it without
+    pulling in a JSON dep::
+
+        <unix_timestamp_seconds>
+        <previous_version>
+    """
+    stamp = install_root / UPDATE_PENDING_STAMP
+    body = f"{int(time.time())}\n{previous_version}\n"
+    tmp = stamp.with_name(stamp.name + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, stamp)

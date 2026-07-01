@@ -1,0 +1,101 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Runs after the .pkg payload has been copied to /Library/Locai.
+#
+# Payload provides:
+#     /Library/Locai/locai-link            (the launcher binary)
+#     /Library/Locai/boot.json             (production channel config)
+#     /Library/Locai/Setup Assistant.app   (the Tauri first-run app)
+#
+# This script:
+#     1. Ensures the launcher is executable and owned correctly.
+#     2. Symlinks /usr/local/bin/locai to the launcher so users can
+#        invoke "locai …" from a terminal without a PATH edit.
+#     3. Launches Setup Assistant.app so the user picks up in the
+#        wizard the moment Installer.app's conclusion pane appears.
+#
+# We deliberately do NOT register the runtime or menu-bar LaunchAgents
+# here — the user's "Run at login" choice is captured by Setup Assistant
+# on its Permissions step, so LaunchAgent registration happens on
+# Finish rather than at .pkg install time.
+#
+# pkgbuild passes these positional args:
+#     $1 — the .pkg's own path (unused)
+#     $2 — the target-location inside the payload (unused)
+#     $3 — the target volume ("/" on a normal install)
+#     $4 — install location root ("/" for volume-only installs)
+set -euo pipefail
+
+INSTALL_ROOT="/Library/Locai"
+LAUNCHER="${INSTALL_ROOT}/locai-link"
+CLI_SYMLINK="/usr/local/bin/locai"
+SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
+
+log() {
+    echo "[postinstall] $*"
+}
+
+# --- 1. Executable + ownership ---------------------------------------
+if [[ ! -f "$LAUNCHER" ]]; then
+    log "ERROR: launcher not found at $LAUNCHER"
+    exit 1
+fi
+chmod 755 "$LAUNCHER"
+# Root-owned: the launcher itself never needs write access. Only the
+# launcher binary is locked down; the rest of INSTALL_ROOT stays
+# writeable so the OTA updater (running as the user via the
+# LaunchAgent) can drop new versions under versions/, flip the
+# `current` pointer, and manage its own state.
+chown root:wheel "$LAUNCHER"
+# Give the invoking user ownership of the install root itself + the
+# subtrees the runtime + OTA touch. The console user is resolved
+# below; use $SUDO_USER when available (pkg installs run as root via
+# sudo), otherwise fall back to the console user we detect for the
+# Setup Assistant handoff.
+INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
+if [[ "$INSTALL_USER" != "root" ]]; then
+    chown "$INSTALL_USER:staff" "$INSTALL_ROOT"
+    for d in versions state logs; do
+        if [[ -e "$INSTALL_ROOT/$d" ]]; then
+            chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
+        fi
+    done
+fi
+log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
+
+# --- 2. /usr/local/bin/locai symlink ---------------------------------
+# /usr/local/bin exists on macOS 14+ but isn't guaranteed writable in
+# every environment. mkdir -p is safe; ln -sf overwrites an existing
+# symlink (e.g. from a previous install) without complaint.
+mkdir -p "$(dirname "$CLI_SYMLINK")"
+ln -sf "$LAUNCHER" "$CLI_SYMLINK"
+log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
+
+# --- 3. Launch Setup Assistant ---------------------------------------
+# The postinstall runs as root; the Setup Assistant must run as the
+# actual user for LaunchAgent registration and Keychain access to work
+# correctly. Resolve the console user (the person driving Installer.app)
+# and hand off with "sudo -u".
+CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
+    # No graphical console user (headless install, remote deployment,
+    # or the user is running via Terminal as root). Skip the launch —
+    # the user can open Setup Assistant.app manually from Applications.
+    log "no console user detected; skipping Setup Assistant auto-launch"
+    exit 0
+fi
+
+if [[ -d "$SETUP_ASSISTANT" ]]; then
+    # `open` returns immediately once the .app is dispatched to
+    # launchd; the postinstall doesn't hold the Installer.app UI thread.
+    sudo -u "$CONSOLE_USER" open -a "$SETUP_ASSISTANT" || {
+        log "WARN: failed to launch Setup Assistant.app; user must launch it manually"
+    }
+    log "Setup Assistant handed off to $CONSOLE_USER"
+else
+    log "Setup Assistant.app not found at $SETUP_ASSISTANT — user must launch it manually"
+fi
+
+exit 0

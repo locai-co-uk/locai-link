@@ -31,6 +31,7 @@ import platform as _pf
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from manifest import (  # type: ignore[import-not-found]
@@ -43,6 +44,11 @@ from prefetch import PREFETCHERS, _platform_tag  # type: ignore[import-not-found
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
+CRATES_DIR = REPO_ROOT / "crates"
+LAUNCHER_DIR = CRATES_DIR / "launcher"
+# Cargo workspace target — `cargo build` from any member crate writes here.
+CARGO_TARGET_DIR = CRATES_DIR / "target"
+LAUNCHER_BINARY_NAME = "locai-link.exe" if sys.platform == "win32" else "locai-link"
 
 # Bundleable plugins — the keys of PLUGIN_CODES, in their canonical order.
 # Anything outside this set is a config error at parse time; bundling a
@@ -116,6 +122,110 @@ def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
     return dist_dir / "locai-link"
 
 
+def build_launcher() -> Path:
+    """Compile the Rust launcher and return the path to the built binary.
+
+    The launcher is the stable public entry point — it lives at
+    ``<install_root>/locai-link`` and exec's whichever runtime version
+    ``current`` points at. See ../OTA-BUNDLE.md §6.5.
+    """
+    if not _have("cargo"):
+        raise SystemExit("cargo is required to build the launcher. Install Rust via https://rustup.rs/")
+    if not LAUNCHER_DIR.is_dir():
+        raise SystemExit(f"Launcher source missing at {LAUNCHER_DIR}")
+    logger.info("Building launcher (cargo build --release)")
+    subprocess.run(["cargo", "build", "--release", "-p", "locai-link-launcher"], cwd=CRATES_DIR, check=True)
+    built = CARGO_TARGET_DIR / "release" / LAUNCHER_BINARY_NAME
+    if not built.is_file():
+        raise SystemExit(f"Launcher build did not produce {built}")
+    return built
+
+
+def install_launcher(install_root: Path, launcher_binary: Path) -> Path:
+    """Copy the launcher binary into the install_root at its public name."""
+    target = install_root / LAUNCHER_BINARY_NAME
+    shutil.copy2(launcher_binary, target)
+    # copy2 preserves perms but make sure it's executable.
+    target.chmod(0o755)
+    return target
+
+
+def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
+    """Reshape PyInstaller's flat output into the install_root + versions/<v>/ layout.
+
+    PyInstaller writes everything to ``<dist>/locai-link/``. We move that into
+    ``<dist>/locai-link/versions/<version>/`` and add a ``current`` pointer at
+    ``<dist>/locai-link/current`` so the tarball extracts onto a target machine
+    as a valid Pattern-A first install (see ../OTA-BUNDLE.md §4.1).
+
+    If a prior build left stale ``versions/``, ``current``, or ``CURRENT``
+    artefacts inside ``bundle_dir``, those are removed before staging.
+    Otherwise a second run of this function would nest the old versioned
+    tree inside the new ``versions/<version>/``.
+
+    Returns the new versioned bundle directory.
+    """
+    if not bundle_dir.is_dir():
+        raise SystemExit(f"Expected PyInstaller output at {bundle_dir}, but it isn't a directory.")
+
+    install_root = bundle_dir
+    dist_root = install_root.parent
+    staging = dist_root / f"_staged_{version}"
+
+    # Clean stale versioning artefacts left by a prior build so they don't
+    # get carried into the new payload. PyInstaller re-writes everything
+    # else, but these entries live at the install-root layer we're about
+    # to synthesise ourselves.
+    for stale in ("versions", "current", "CURRENT"):
+        stale_path = install_root / stale
+        if stale_path.is_symlink() or stale_path.is_file():
+            stale_path.unlink()
+        elif stale_path.is_dir():
+            shutil.rmtree(stale_path)
+
+    if staging.exists():
+        shutil.rmtree(staging)
+    install_root.rename(staging)
+
+    versions_dir = install_root / "versions"
+    versions_dir.mkdir(parents=True)
+    target_dir = versions_dir / version
+    staging.rename(target_dir)
+
+    _write_current_pointer(install_root, version)
+    return target_dir
+
+
+def _write_current_pointer(install_root: Path, version: str) -> None:
+    """Write the ``current`` pointer the launcher follows on start.
+
+    POSIX: relative symlink ``current -> versions/<version>``. Windows hosts
+    without Developer Mode / admin can't create symlinks; fall back to a
+    plain text ``CURRENT`` file containing the version string. Phase 2's
+    launcher must accept both shapes.
+    """
+    rel_target = Path("versions") / version
+    link = install_root / "current"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    try:
+        link.symlink_to(rel_target, target_is_directory=True)
+        logger.info(f"  current -> {rel_target} (symlink)")
+        return
+    except (OSError, NotImplementedError) as exc:
+        logger.warning(f"Symlink creation failed ({exc}); writing CURRENT pointer file instead.")
+    pointer = install_root / "CURRENT"
+    pointer.write_text(version + "\n", encoding="utf-8")
+    logger.info(f"  CURRENT pointer file -> {version}")
+
+
+def _read_root_version() -> str:
+    pp = REPO_ROOT / "pyproject.toml"
+    with pp.open("rb") as f:
+        data = tomllib.load(f)
+    return str(data["project"]["version"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -135,16 +245,30 @@ def main() -> None:
     logger.info(f"== Plugins: {', '.join(plugins)} ==")
     logger.info(f"== Asset name: {asset_name} ==")
 
+    # Build the launcher first — if cargo/Rust isn't installed, fail fast
+    # before the lengthy PyInstaller step.
+    launcher_binary = build_launcher()
+
     run_prefetch(plugins, tag)
     ensure_plugins_installed(plugins)
     bundle_dir = run_pyinstaller(plugins)
-    manifest_path = write_manifest(bundle_dir, list(plugins), REPO_ROOT)
 
+    version = _read_root_version()
+    logger.info(f"== Version: {version} ==")
+    versioned_dir = restructure_to_versioned_layout(bundle_dir, version)
+    manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT)
+
+    install_root = bundle_dir
+    launcher_path = install_launcher(install_root, launcher_binary)
+    logger.info(f"Launcher installed: {launcher_path}")
     logger.info(f"Manifest written: {manifest_path}")
-    logger.info(f"Bundle ready: {bundle_dir}")
-    logger.info(f"Test with: {bundle_dir / 'locai-link'} --help")
+    logger.info(f"Install root: {install_root}")
+    logger.info(f"  Versioned bundle: {versioned_dir}")
+    logger.info(f"Test with: {launcher_path} --help")
     logger.info(
-        f"Package as: {asset_name}-{tag}-v<version>.tar.gz (.zip on Windows). CI reads asset_name from manifest.json."
+        f"Package the WHOLE install_root as: "
+        f"{asset_name}-{tag}-v{version}.tar.gz (.zip on Windows). "
+        "Extraction gives a valid Pattern-A first install."
     )
 
 

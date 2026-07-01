@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+  SPDX-License-Identifier: BUSL-1.1
+
+  productbuild distribution definition for the Locai Link installer.
+
+  Referenced by the release CI when running productbuild against this
+  file plus the component .pkg produced by pkgbuild. See
+  bundling/pkg/README.md for the full build sequence.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>Locai Link</title>
+    <organization>uk.co.locai</organization>
+
+    <!-- System-wide install to /Library/Locai. Users can't relocate. -->
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
+
+    <!-- macOS 14 (Sonoma) minimum — matches the SMAppService floor we
+         picked in INSTALLER_PLAN.md. -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <!-- Wizard panes rendered by Installer.app. See welcome.html /
+         license.html / conclusion.html in this directory. -->
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="license.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <!-- One component. "Control Plane CLI" from the design mockup is
+         a /usr/local/bin/locai symlink dropped by the postinstall, not
+         a separate payload. -->
+    <choices-outline>
+        <line choice="default">
+            <line choice="uk.co.locai.link.runtime"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+
+    <choice id="uk.co.locai.link.runtime"
+            visible="false"
+            title="Loc.ai:Link"
+            description="On-device inference agent"
+            start_selected="true">
+        <pkg-ref id="uk.co.locai.link.runtime"/>
+    </choice>
+
+    <!-- Version stamped by the release workflow before productbuild
+         runs; the "0.0.0" placeholder is what the skeleton ships with. -->
+    <pkg-ref id="uk.co.locai.link.runtime"
+             version="0.0.0"
+             onConclusion="none">locai-link-runtime.pkg</pkg-ref>
+</installer-gui-script>

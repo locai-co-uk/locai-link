@@ -9,14 +9,36 @@ import platform
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
+
+# Default reverse-DNS prefix used for service labels. The new
+# installer flow overrides this to "uk.co.locai.link" to match the
+# bundle identifier on the .pkg / .app artefacts.
+DEFAULT_LABEL_PREFIX = "io.locai"
+
+# Service scope. "user" lands the unit file under the user's home
+# directory (the historical default); "system" lands it under the
+# OS-level system directory (the .pkg installer's "install for all
+# users" path). Only honoured by MacOSBackend today — Linux and
+# Windows backends keep their historical behaviour.
+ServiceScope = Literal["user", "system"]
 
 
 class ServiceBackend(ABC):
     """Abstract Base Class for OS-specific service operations."""
 
-    def __init__(self, service_name, command, description, working_dir, env_vars):
+    def __init__(
+        self,
+        service_name,
+        command,
+        description,
+        working_dir,
+        env_vars,
+        scope: ServiceScope = "user",
+        label_prefix: str = DEFAULT_LABEL_PREFIX,
+    ):
         """Initialises the service backend."""
         self.service_name = service_name
         self.command = command
@@ -24,10 +46,17 @@ class ServiceBackend(ABC):
         self.working_dir = Path(working_dir) if working_dir else Path.cwd()
         self.env_vars = env_vars or {}
         self.home = Path.home()
+        self.scope = scope
+        self.label_prefix = label_prefix
 
         # Standardise logs across platforms
         self.log_dir = self.working_dir / "logs"
         self.log_file = self.log_dir / f"{self.service_name}.log"
+
+    @property
+    def label(self) -> str:
+        """Full reverse-DNS label, e.g. ``uk.co.locai.link.agent``."""
+        return f"{self.label_prefix}.{self.service_name}"
 
     def prepare_logs(self):
         """Prepares the log directory."""
@@ -127,19 +156,45 @@ WantedBy=default.target
 
 
 class MacOSBackend(ServiceBackend):
-    """LaunchAgents Implementation."""
+    """LaunchAgents Implementation.
+
+    Supports two scopes:
+        * ``user``   — ``~/Library/LaunchAgents/<label>.plist``. Runs
+          when this user logs in. Historical default.
+        * ``system`` — ``/Library/LaunchAgents/<label>.plist``. Runs
+          when *any* user logs in. The .pkg installer's "Install for
+          all users of this Mac" path lands here.
+
+    System-scope writes require write access to ``/Library/`` (root or
+    sudo). The .pkg postinstall script runs with the right privileges;
+    the developer one-liner flow does not, which is why ``user`` stays
+    the default.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.plist_path = self.home / "Library/LaunchAgents" / f"io.locai.{self.service_name}.plist"
+        launchagents_root = (
+            Path("/Library/LaunchAgents") if self.scope == "system" else self.home / "Library" / "LaunchAgents"
+        )
+        self.plist_path = launchagents_root / f"{self.label}.plist"
 
     def is_installed(self) -> bool:
         return self.plist_path.exists()
 
     def is_running(self) -> bool:
-        # Launchctl doesn't have a simple boolean exit code check, requires parsing
-        res = subprocess.run(f"launchctl list | grep io.locai.{self.service_name}", shell=True, capture_output=True)
-        return res.returncode == 0
+        # `launchctl list` prints one row per loaded label ("PID STATUS
+        # LABEL"). Match in Python instead of shelling out to grep —
+        # avoids shell=True (banned in src/link/**) and any interpolation
+        # of self.label into a shell command.
+        res = subprocess.run(["launchctl", "list"], capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            return False
+        for line in res.stdout.splitlines():
+            # Split on tabs/whitespace; the label is the last column.
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2 and parts[1] == self.label:
+                return True
+        return False
 
     def install(self, start_now: bool):
         self.prepare_logs()
@@ -160,7 +215,7 @@ class MacOSBackend(ServiceBackend):
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key> <string>io.locai.{self.service_name}</string>
+    <key>Label</key> <string>{self.label}</string>
     <key>ProgramArguments</key> <array><string>{exe}</string>{args_xml}</array>
     <key>WorkingDirectory</key> <string>{self.working_dir}</string>
     <key>RunAtLoad</key> <{"true" if start_now else "false"}/>
@@ -314,6 +369,8 @@ def ServiceManager(
     description: str = "Loc.ai Service",
     working_dir: Path | str | None = None,
     env_vars: dict[str, str] | None = None,
+    scope: ServiceScope = "user",
+    label_prefix: str = DEFAULT_LABEL_PREFIX,
 ) -> ServiceBackend:
     """Factory function that returns the correct OS backend.
 
@@ -323,6 +380,14 @@ def ServiceManager(
         description (str): Description of the service.
         working_dir (Path | str | None): Working directory for the service.
         env_vars (dict[str, str] | None): Environment variables to set.
+        scope: "user" (default, per-user) or "system" (.pkg "install for
+            all users" path — system-wide unit file). Only honoured by
+            MacOSBackend today.
+        label_prefix: Reverse-DNS prefix for the service label. The new
+            installer flow passes "uk.co.locai.link" to align with the
+            bundle identifier on .pkg / .app artefacts. Default is
+            "io.locai" to preserve historical behaviour for the
+            developer one-liner flow.
 
     Returns:
         ServiceBackend: An instance of LinuxBackend, MacOSBackend, or WindowsBackend.
@@ -331,12 +396,46 @@ def ServiceManager(
         NotImplementedError: If the OS is not supported.
     """
     system = platform.system().lower()
+    kwargs = {"scope": scope, "label_prefix": label_prefix}
 
     if system == "linux":
-        return LinuxBackend(service_name, command, description, working_dir, env_vars)
+        return LinuxBackend(service_name, command, description, working_dir, env_vars, **kwargs)
     elif system == "darwin":
-        return MacOSBackend(service_name, command, description, working_dir, env_vars)
+        return MacOSBackend(service_name, command, description, working_dir, env_vars, **kwargs)
     elif system == "windows":
-        return WindowsBackend(service_name, command, description, working_dir, env_vars)
+        return WindowsBackend(service_name, command, description, working_dir, env_vars, **kwargs)
     else:
         raise NotImplementedError(f"OS '{system}' is not supported.")
+
+
+def install_all(services: list[ServiceBackend], start_now: bool) -> None:
+    """Install several services in lockstep.
+
+    Used by the Setup Assistant's Finish step to register the agent and
+    menu-bar LaunchAgents together — both come up under the same
+    "Run at login" toggle. If any install raises, every service
+    already installed in this batch is rolled back so the caller doesn't
+    end up with half a system registered.
+
+    Args:
+        services: ServiceBackend instances to register. Each is
+            constructed by the caller with its own service_name, command,
+            and label_prefix — this function just sequences the install
+            calls.
+        start_now: Passed straight through to each backend's
+            ``install``. RunAtLoad on every plist tracks this flag.
+    """
+    installed: list[ServiceBackend] = []
+    try:
+        for svc in services:
+            svc.install(start_now=start_now)
+            installed.append(svc)
+    except Exception:
+        for svc in installed:
+            try:
+                svc.uninstall()
+            except Exception:
+                # Best-effort rollback; surface the original install
+                # failure rather than the rollback exception.
+                logger.exception("Rollback of %s failed", svc.label if hasattr(svc, "label") else svc.service_name)
+        raise

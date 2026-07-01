@@ -8,6 +8,7 @@ import json
 import logging
 import platform
 import random
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -33,6 +34,45 @@ logger = logging.getLogger(__name__)
 
 # RFC 8628 grant_type.
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+def _open_in_browser(url: str) -> bool:
+    """Best-effort: open ``url`` in the system browser. Returns True on success.
+
+    The GUI install path runs the agent under launchd with no terminal
+    attached — printing the device-flow URL to stderr lands in a log
+    file the user never sees. Detect that case (stdin is not a TTY) and
+    shell out to the platform browser-opener instead.
+
+    Never raises: a failed ``open`` shouldn't break enrolment. The
+    URL is always printed too, so a user who finds the log can still
+    paste it manually.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        opener = ["open", url]
+    elif system == "Linux":
+        opener = ["xdg-open", url]
+    elif system == "Windows":
+        opener = ["cmd", "/c", "start", "", url]
+    else:
+        return False
+    try:
+        subprocess.run(opener, check=False, capture_output=True, timeout=5)
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _running_detached() -> bool:
+    """True when stdin has no terminal attached — i.e. running under launchd/systemd."""
+    try:
+        return not sys.stdin.isatty()
+    except (AttributeError, OSError):
+        # Frozen bundle or unusual exec environment — err on the side of
+        # treating as detached so we still try to open the browser.
+        return True
+
 
 # expires_in is 600s with a 5s interval (~120 polls); cap at 240 to leave room for slow_down.
 _DEVICE_POLL_MAX_ITERATIONS = 240
@@ -121,7 +161,9 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
     verification_uri_complete = data.get("verification_uri_complete", verification_uri)
     interval = int(data.get("interval", 5))
 
-    # Print to stderr so the banner stays visible regardless of stdout redirection.
+    # Print to stderr so the banner stays visible regardless of stdout
+    # redirection — and so the URL is recoverable from a log if the
+    # browser open below fails or the user dismissed the window.
     print(
         "\n"
         "To authenticate, open this URL on any device:\n"
@@ -136,6 +178,18 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
         file=sys.stderr,
         flush=True,
     )
+
+    # GUI install path has no terminal: shell out to the system browser
+    # so the user actually sees the verification page. Best-effort; the
+    # URL is still in the stderr banner above for the fallback case.
+    if _running_detached():
+        if _open_in_browser(verification_uri_complete):
+            logger.info("Device-flow URL opened in browser (no TTY detected).")
+        else:
+            logger.warning(
+                "No TTY and browser-open failed — user must read the verification URL from the log file at %s",
+                Path.cwd() / "logs",
+            )
 
     token_url = f"{api_url}/auth/device/token"
     token_body = {"device_code": device_code, "grant_type": DEVICE_GRANT_TYPE}

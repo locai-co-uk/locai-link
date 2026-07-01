@@ -27,21 +27,31 @@ AUDIO_PATH = TEMP_DIR / "jfk.wav"
 TEST_PORT = 8098
 
 
-def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> None:
-    """Download url to path, retrying on 429 with jittered backoff."""
+def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
+    """Download url to path, retrying on 429 with jittered backoff.
+
+    Returns True on success, False when all retries are exhausted on a
+    429 (i.e. the CDN is rate-limiting us — a transient infrastructure
+    condition the caller should skip on, not fail). Non-429 HTTP errors
+    still raise, so genuine bugs surface immediately.
+    """
     for attempt in range(1, max_attempts + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
                 shutil.copyfileobj(resp, f)  # type: ignore
-            return
+            return True
         except urllib.error.HTTPError as exc:
-            if exc.code != 429 or attempt == max_attempts:
+            if exc.code != 429:
                 raise
+            if attempt == max_attempts:
+                print(f"\n{label} download failed after {max_attempts} attempts (HTTP 429).")
+                return False
             retry_after = int(exc.headers.get("Retry-After", 0))
             wait = max(retry_after, min(2**attempt, 60))
             print(f"\nRate-limited downloading {label} (attempt {attempt}/{max_attempts}); retrying in {wait}s...")
             time.sleep(wait)
+    return False
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -54,7 +64,12 @@ def setup_teardown():
     ]:
         if not path.exists():
             print(f"\nDownloading {label} to {path}...")
-            _download(url, path, label)
+            if not _download(url, path, label):
+                # Skip rather than fail — HuggingFace / raw.githubusercontent
+                # both rate-limit anonymous downloads and a 429 shouldn't
+                # block unrelated PR merges. Mirrors language_model /
+                # audio_classifier test behaviour.
+                pytest.skip(f"{label} CDN unavailable; skipping audio_transcriber integration test.")
 
     yield
 

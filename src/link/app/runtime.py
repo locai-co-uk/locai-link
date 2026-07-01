@@ -32,7 +32,9 @@ from link.config.commands import (
 )
 from link.config.models import AgentConfig, GenericConfig, PipelineConfig
 from link.config.templating import resolve_templates
+from link.infra.health_server import HealthServer, HealthState
 from link.utils.logger import LinkReporter
+from link.utils.version import resolve_agent_version
 
 if TYPE_CHECKING:
     import zenoh
@@ -70,6 +72,13 @@ class AgentRuntime:
         self.shutdown_event = threading.Event()
         self.update_requested = False
         self.config_restart_requested = False
+
+        # Health server for the menu-bar companion. Daemon thread on
+        # 127.0.0.1:8101; mutated from command dispatch when a serve
+        # starts/stops. Started lazily in run() so unit tests that
+        # construct an AgentRuntime don't accidentally bind the port.
+        self.health_state = HealthState(version=resolve_agent_version())
+        self.health_server = HealthServer(self.health_state)
 
         if threading.current_thread() is threading.main_thread():
             try:
@@ -179,6 +188,7 @@ class AgentRuntime:
                     self.status_logger.report_model(
                         cmd.pipeline_id, running=False, pid=0, serving=True, serving_pid=1, serving_port=cmd.port
                     )
+                    self.health_state.set_serving(cmd.pipeline_id)
                 else:
                     self.status_logger.report_command(cmd.id, "failed", f"Failed to start serving {cmd.pipeline_id}")
 
@@ -189,6 +199,12 @@ class AgentRuntime:
                     self.status_logger.report_model(
                         cmd.pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
                     )
+                    # Only clear health state if THIS was the serving
+                    # pipeline. Multi-model serving in a single agent is
+                    # rare today but the explicit guard avoids reporting
+                    # idle while a different model is still serving.
+                    if self.health_state.model_id == cmd.pipeline_id:
+                        self.health_state.set_serving(None)
                 else:
                     self.status_logger.report_command(cmd.id, "failed", f"Failed to stop {cmd.pipeline_id}")
 
@@ -250,6 +266,9 @@ class AgentRuntime:
         """
         logger.info("Agent Runtime active...")
         self.status_logger.report_lifecycle("online")
+        # Lazy-start the health server here (not in __init__) so tests
+        # that construct an AgentRuntime in-process don't race for port 8101.
+        self.health_server.start()
 
         # 1. Try Recovery First
         recovered_any = False
@@ -293,6 +312,7 @@ class AgentRuntime:
                                             serving_pid=1,
                                             serving_port=src_args.get("port", 0),
                                         )
+                                        self.health_state.set_serving(pid)
                                     elif src_args.get("model_path"):
                                         # Inference-mode model pipeline —
                                         # mirror the report that the
@@ -694,6 +714,11 @@ class AgentRuntime:
                 if pipe.is_alive():
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
+
+        # Tear down the health server last — its daemon thread would
+        # be killed at process exit anyway, but joining cleanly avoids
+        # the "address already in use" race on a fast restart.
+        self.health_server.stop()
 
 
 # ---------------------------------------------------------------------------

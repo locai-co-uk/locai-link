@@ -72,11 +72,38 @@ Without an entry in `PLUGIN_CODES`, the build hard-fails. This is intentional:
 the asset name is part of the public release surface, so adding a plugin
 should force a deliberate naming decision.
 
+## Output layout
+
+`bundling/build.py` produces an install_root with an A/B versioned layout
+under `dist/locai-link/`:
+
+```
+dist/locai-link/                       ← the install_root (this is what gets tarballed)
+├── locai-link                         ← Rust launcher; stable public entry point
+├── current → versions/<version>       ← symlink; CURRENT pointer file on hosts that can't symlink
+└── versions/
+    └── <version>/                     ← the versioned PyInstaller bundle
+        ├── locai-link-runtime         ← runtime binary (what the launcher spawns)
+        ├── manifest.json
+        ├── _internal/…
+        └── configs/…
+```
+
+The launcher source lives in `../launcher/` and is compiled with
+`cargo build --release` before the PyInstaller step. Both binaries end up
+inside the same `dist/locai-link/` install_root.
+
+Tarballing the whole `dist/locai-link/` directory and extracting it onto a
+target machine gives a valid Pattern-A first install — `current` already
+points at the seeded version, no bootstrap download needed. See
+`../OTA-BUNDLE.md` for the broader update story.
+
 ## `manifest.json`
 
-Each built bundle ships a `manifest.json` at its root. Read-only metadata
-describing what was built. Not consumed by the running agent (that reads
-`configs/agent.json`). Useful for bug reports, telemetry, integrity checks.
+Each built bundle ships a `manifest.json` inside its versioned directory
+(`versions/<v>/manifest.json`). Read-only metadata describing what was
+built. Not consumed by the running agent (that reads `configs/agent.json`).
+Useful for bug reports, telemetry, integrity checks.
 
 | Field | Source |
 |---|---|
@@ -90,12 +117,11 @@ describing what was built. Not consumed by the running agent (that reads
 Inspect it directly:
 
 ```bash
-cat dist/locai-link/manifest.json
+cat dist/locai-link/current/manifest.json
 ```
 
-Output goes to `dist/locai-link/`. Native binaries are pre-fetched into
-`bundling/_artifacts/<os>-<arch>/` as a build-time side effect (cached
-across runs so re-builds are fast).
+Native binaries are pre-fetched into `bundling/_artifacts/<os>-<arch>/` as
+a build-time side effect (cached across runs so re-builds are fast).
 
 ## CI
 
