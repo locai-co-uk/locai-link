@@ -267,6 +267,34 @@ bundle itself before anything inside the bundle exists.
   still prints — the browser call is an additive supplement, not a
   replacement. Interactive terminals see no behaviour change.
 
+### Added — `.pkg` installer source skeleton
+
+- `bundling/pkg/` now holds the productbuild sources for the coming
+  macOS GUI installer: `Distribution.xml` (system-wide install to
+  `/Library/Locai`, macOS 14 minimum, arm64+x86_64),
+  `welcome.html` / `license.html` / `conclusion.html` for the wizard
+  panes, and `scripts/postinstall` (chown, `/usr/local/bin/locai`
+  symlink, launches Setup Assistant.app as the console user).
+- `bundling/pkg/README.md` documents the pkgbuild + productbuild build
+  sequence for the future release CI.
+- Not built by any workflow yet — waiting on the Developer ID
+  Installer certificate. Lands as sources so subsequent PRs can wire
+  the CI without also having to author the wizard structure.
+
+### Added — Design assets in Tauri apps
+
+- Brand icons (`.icns`, `.ico`, PNG sizes for macOS / Windows / Android
+  / iOS) generated via `tauri icon` from the design hand-off's
+  512×512 `app-icon.png`, replacing the create-tauri-app placeholders
+  under `crates/setup_assistant/src-tauri/icons/` and
+  `crates/companion/src-tauri/icons/`.
+- Design tokens (`tokens.css`, `tokens.json`) and SVG icon set (10
+  glyphs — check, chevron, cloud, disk, download, search, spinner,
+  trash, wifi) copied to each app's `src/lib/tokens/` and
+  `src/lib/icons/`. Not yet consumed by any Svelte component — landed
+  ahead of the Setup Assistant / Companion UI work so those tasks
+  start with the design system already in the tree.
+
 ### Under the hood — Pattern B first-install now works
 
 - The launcher's `bootstrap_from_boot()` (`crates/launcher/src/`)
@@ -284,10 +312,12 @@ bundle itself before anything inside the bundle exists.
   passes its first healthy ping, lands when the runtime grows a
   periodic backend ping.
 - **macOS `.pkg` GUI installer + Setup Assistant + menu-bar
-  companion.** Scaffolded (`crates/setup_assistant/`,
-  `crates/companion/`, `bundling/pkg/`) but not functional in this
-  release. Coming in the 1.1.x line once the Apple Developer ID
-  Installer certificate is provisioned and the wizard UI is built out.
+  companion.** Scaffolds, sources, and design assets are all in the
+  tree (`crates/setup_assistant/`, `crates/companion/`, `bundling/pkg/`),
+  but nothing is wired into a build pipeline yet and none of the Tauri
+  UI is functional. Coming in the 1.1.x line once the Apple Developer
+  ID Installer certificate is provisioned and the wizard + menu-bar
+  apps are built out.
 - **Windows.** Code paths are in place but unsigned bundles are
   blocked by Windows SmartScreen — code-signing procurement gates
   Windows GA. macOS + Linux are not blocked.
