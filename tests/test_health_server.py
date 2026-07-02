@@ -297,9 +297,7 @@ def test_post_500_when_handler_raises():
 
     state = HealthState(
         version="1",
-        models_provider=lambda: [
-            {"id": "x", "alias": "x", "port": 8080, "host": "127.0.0.1", "is_serving": False}
-        ],
+        models_provider=lambda: [{"id": "x", "alias": "x", "port": 8080, "host": "127.0.0.1", "is_serving": False}],
         command_handler=bad_dispatch,
     )
     srv = HealthServer(state, port=port)
