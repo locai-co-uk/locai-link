@@ -55,7 +55,7 @@ Clone the repository and install dependencies. `main.py setup` will install `uv`
 ```bash
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
-uv run main.py setup          # add --dev for testing/docs tools, --tui for the text UI
+uv run main.py setup          # add --dev for testing/docs tools
 ```
 
 ### Running the Agent
@@ -80,13 +80,12 @@ uv run main.py run            # or --prod to install as a systemd/launchd/Window
 
 | Command | Purpose |
 |---------|---------|
-| `setup [--dev] [--tui]` | Install Python dependencies. |
+| `setup [--dev]` | Install Python dependencies. |
 | `run [options]` | Resume an existing session, onboard a new device, or load a config. |
 | `install [options]` | Full one-liner flow: clone repo → setup → register → run. |
 | `stop` | Stop all running services (`locai-link`, `zenohd`). |
 | `reset [--hard]` | Clean up venv, caches, and (with `--hard`) session files. |
 | `install-plugin <name>` | Install a plugin by name. |
-| `tui` | Launch the text UI (requires the `tui` extra). |
 
 ### API Reference
 API docs are generated from source docstrings via `mkdocs` + `mkdocstrings` (part of the `--dev` extras):

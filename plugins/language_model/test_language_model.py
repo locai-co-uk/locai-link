@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import io
 import shutil
 import sys
 import time
@@ -18,8 +19,9 @@ from link_language_model.adapter import LanguageModel  # type: ignore
 # which can't encode those characters; subsequent print() calls then crash
 # with UnicodeEncodeError even though the test logic itself passed. Force
 # UTF-8 with backslash-escape fallback so debug prints don't fail the test.
-if hasattr(sys.stdout, "reconfigure"):
+if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+if isinstance(sys.stderr, io.TextIOWrapper):
     sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 # Constants
@@ -88,6 +90,7 @@ def test_llm_server_mode_lifecycle():
     try:
         if not swap_mode:
             assert agent.server is not None and agent.server.running
+            assert agent.server.process is not None, "server.process must be set once running"
             pid = agent.server.process.pid
             assert psutil.pid_exists(pid), "Server process should exist"
 
@@ -116,4 +119,6 @@ def test_llm_server_mode_lifecycle():
 
         if not swap_mode and pid is not None:
             assert not psutil.pid_exists(pid), "Zombie process detected! Server did not exit cleanly."
-            assert agent.server is not None and not agent.server.monitor_thread.is_alive()
+            assert agent.server is not None
+            assert agent.server.monitor_thread is not None, "monitor_thread must have been started"
+            assert not agent.server.monitor_thread.is_alive()

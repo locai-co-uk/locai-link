@@ -5,9 +5,9 @@
 
 import json
 import socket
-import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 import pytest
 
@@ -21,9 +21,19 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _get_health(port: int) -> dict:
+def _get_health(port: int) -> dict[str, Any]:
     with urllib.request.urlopen(f"http://{HEALTH_HOST}:{port}/healthz", timeout=2) as resp:
         return json.loads(resp.read())
+
+
+def _get_models(port: int) -> dict[str, Any]:
+    with urllib.request.urlopen(f"http://{HEALTH_HOST}:{port}/models", timeout=2) as resp:
+        return json.loads(resp.read())
+
+
+def _post_no_body(port: int, path: str) -> Any:
+    req = urllib.request.Request(f"http://{HEALTH_HOST}:{port}{path}", method="POST")
+    return urllib.request.urlopen(req, timeout=2)
 
 
 @pytest.fixture
@@ -63,12 +73,20 @@ def test_clearing_serving_returns_to_idle(server):
     assert body["model_id"] is None
 
 
-def test_uptime_advances(server):
-    _, _, port = server
-    first = _get_health(port)["uptime_seconds"]
-    time.sleep(1.1)
-    second = _get_health(port)["uptime_seconds"]
-    assert second >= first + 1
+def test_uptime_advances(mocker):
+    """Uptime is derived from time.monotonic() deltas — mock it rather
+    than sleep for real seconds. Same guarantee, ~0ms wall clock."""
+    # HealthState calls monotonic() once at init and once per snapshot.
+    # side_effect gives us controlled values without stubbing globally.
+    mocker.patch(
+        "link.infra.health_server.time.monotonic",
+        side_effect=[100.0, 100.0, 102.5],
+    )
+    state = HealthState(version="1.2.3")
+    first = state.snapshot()["uptime_seconds"]
+    second = state.snapshot()["uptime_seconds"]
+    assert first == 0
+    assert second == 2
 
 
 def test_other_paths_return_404(server):
@@ -103,3 +121,207 @@ def test_start_is_idempotent(server):
     srv.start()  # second call should no-op
     # Server still responds — second start didn't break anything.
     _get_health(port)
+
+
+def test_models_returns_empty_when_no_provider(server):
+    """HealthState constructed without a provider (default in tests)
+    returns an empty models list — GET /models still succeeds."""
+    _, _, port = server
+    body = _get_models(port)
+    assert body == {"models": []}
+
+
+def test_models_calls_provider_on_every_request():
+    """Provider is called lazily on each GET so /models never serves
+    stale data — even if the runtime never pushes an update."""
+    port = _free_port()
+    seq = [
+        [{"id": "a", "alias": "A", "port": 8080, "host": "127.0.0.1", "is_serving": False}],
+        [
+            {"id": "a", "alias": "A", "port": 8080, "host": "127.0.0.1", "is_serving": True},
+            {"id": "b", "alias": "B", "port": 8080, "host": "127.0.0.1", "is_serving": False},
+        ],
+    ]
+    calls = {"n": 0}
+
+    def provider() -> list[dict[str, Any]]:
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    state = HealthState(version="1", models_provider=provider)
+    srv = HealthServer(state, port=port)
+    srv.start()
+    try:
+        first = _get_models(port)["models"]
+        second = _get_models(port)["models"]
+        assert len(first) == 1 and first[0]["id"] == "a" and first[0]["is_serving"] is False
+        assert len(second) == 2 and second[1]["id"] == "b"
+        assert calls["n"] == 2, "provider must be called once per request"
+    finally:
+        srv.stop()
+
+
+# --- POST /models/{id}/serve and /stop-serving -------------------------------
+
+
+def _server_with_handlers(models: list[dict[str, Any]]):
+    """Boot a HealthServer with a provider that returns `models` and a
+    dispatch handler that records the last command received."""
+    port = _free_port()
+    received: list[dict[str, Any]] = []
+
+    def dispatch(cmd: dict[str, Any]) -> None:
+        received.append(cmd)
+
+    state = HealthState(
+        version="1.0.18-test",
+        models_provider=lambda: models,
+        command_handler=dispatch,
+    )
+    srv = HealthServer(state, port=port)
+    srv.start()
+    return srv, port, received
+
+
+def test_post_serve_dispatches_start_serving_command():
+    srv, port, received = _server_with_handlers(
+        [
+            {
+                "id": "llm_server",
+                "alias": "smollm-135m",
+                "port": 8123,
+                "host": "127.0.0.1",
+                "is_serving": False,
+            }
+        ]
+    )
+    try:
+        resp = _post_no_body(port, "/models/llm_server/serve")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+
+    assert len(received) == 1
+    cmd = received[0]
+    assert cmd["type"] == "START_SERVING"
+    assert cmd["pipeline_id"] == "llm_server"
+    assert cmd["port"] == 8123
+    assert cmd["host"] == "127.0.0.1"
+    assert cmd["model_display_name"] == "smollm-135m"
+    # Every dispatched command carries a unique id so the runtime's
+    # dedup doesn't collapse repeated toggles.
+    assert cmd["id"].startswith("companion-")
+
+
+def test_post_stop_serving_dispatches_stop_serving_command():
+    srv, port, received = _server_with_handlers(
+        [
+            {
+                "id": "llm_server",
+                "alias": "smollm-135m",
+                "port": 8123,
+                "host": "127.0.0.1",
+                "is_serving": True,
+            }
+        ]
+    )
+    try:
+        resp = _post_no_body(port, "/models/llm_server/stop-serving")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+
+    assert len(received) == 1
+    cmd = received[0]
+    assert cmd["type"] == "STOP_SERVING"
+    assert cmd["pipeline_id"] == "llm_server"
+    # No port/host/alias on stop — they're not part of the command
+    # schema and can't be sent without triggering pydantic's
+    # extra=forbid.
+    assert "port" not in cmd
+    assert "host" not in cmd
+
+
+def test_post_unknown_pipeline_returns_404():
+    srv, port, received = _server_with_handlers([])  # no pipelines
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/models/nonexistent/serve")
+        assert exc.value.code == 404
+    finally:
+        srv.stop()
+    assert received == [], "no command should dispatch for an unknown pipeline"
+
+
+def test_post_serve_falls_back_to_defaults_when_config_is_bare():
+    """A pipeline that's never served yet may have port/host unset in
+    args. The endpoint should fill in the same defaults StartServingCommand
+    would use, not fail."""
+    srv, port, received = _server_with_handlers(
+        [{"id": "fresh", "alias": "fresh", "port": None, "host": None, "is_serving": False}]
+    )
+    try:
+        resp = _post_no_body(port, "/models/fresh/serve")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+
+    cmd = received[0]
+    assert cmd["port"] == 8100  # StartServingCommand default
+    assert cmd["host"] == "0.0.0.0"  # StartServingCommand default
+
+
+def test_post_returns_503_when_no_command_handler():
+    """If the runtime hasn't wired a command_handler, the POST path
+    must degrade rather than crash — GET /models still works."""
+    port = _free_port()
+    state = HealthState(version="1", models_provider=lambda: [])
+    srv = HealthServer(state, port=port)
+    srv.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/models/anything/serve")
+        assert exc.value.code == 503
+    finally:
+        srv.stop()
+
+
+def test_post_500_when_handler_raises():
+    """A handler that blows up shouldn't bring the whole server down —
+    the POST returns 500 and subsequent requests still work."""
+    port = _free_port()
+
+    def bad_dispatch(_cmd: dict[str, Any]) -> None:
+        raise RuntimeError("boom")
+
+    state = HealthState(
+        version="1",
+        models_provider=lambda: [
+            {"id": "x", "alias": "x", "port": 8080, "host": "127.0.0.1", "is_serving": False}
+        ],
+        command_handler=bad_dispatch,
+    )
+    srv = HealthServer(state, port=port)
+    srv.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/models/x/serve")
+        assert exc.value.code == 500
+        # And /models still responds.
+        body = _get_models(port)
+        assert body["models"][0]["id"] == "x"
+    finally:
+        srv.stop()
+
+
+def test_post_invalid_action_returns_404():
+    srv, port, _ = _server_with_handlers(
+        [{"id": "x", "alias": "x", "port": 8080, "host": "127.0.0.1", "is_serving": False}]
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/models/x/pause")  # not a valid action
+        assert exc.value.code == 404
+    finally:
+        srv.stop()

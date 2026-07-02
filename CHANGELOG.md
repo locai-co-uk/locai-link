@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased]
+
+Companion menu-bar app groundwork — swaps both Tauri frontends off
+SvelteKit onto bare Svelte + Vite so future GUI work builds on the
+smallest possible frontend footprint.
+
+### Changed — Tauri frontends
+
+- `crates/setup_assistant/` and `crates/companion/`: swapped from
+  SvelteKit onto bare Svelte + Vite. Both Tauri surfaces are single-page
+  windows with no server, no routing, and no adapter — SvelteKit's
+  machinery was dead weight. Standard Vite shape now: `index.html` at
+  root, `src/main.ts` mounts `App.svelte` into `#app`, design tokens
+  imported once in `main.ts`. Output moved from `build/` to `dist/`
+  (Vite default); `tauri.conf.json.frontendDist` follows.
+- Companion Vite dev server runs on port `1421` (setup_assistant on
+  `1420`) so both apps can be run concurrently during dev; companion
+  HMR moved to `1423` to sidestep setup_assistant's HMR port.
+
+### Removed — TUI
+
+- `src/link/ui/` deleted, along with the `tui` subcommand, the
+  `--tui` setup flag, and the `textual>=7.0.0` optional dependency.
+  The GUI installer (setup assistant + menu-bar companion) supersedes
+  the Textual-based agent-management interface, which never made it
+  past a niche developer utility.
+
+### Fixed — Editor-only diagnostics
+
+- `pyproject.toml`: added `[tool.pyright]` with `extraPaths = ["src",
+  "bundling"]` so Pylance can resolve `from link.xxx import ...` under
+  the src/ layout (mirrors the existing pytest `pythonpath`).
+- `src/link/infra/service.py`: `ServiceManager` factory now passes
+  `scope` / `label_prefix` as explicit keyword arguments to each
+  backend rather than via a `**kwargs` dict, so type checkers keep the
+  `ServiceScope` `Literal` instead of widening it to `str`.
+
 ## [1.0.16] - 2026-06-25
 
 Restores serve-state reporting after an unclean shutdown, tightens command

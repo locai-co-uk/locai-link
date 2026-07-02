@@ -18,6 +18,7 @@ import threading
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -410,7 +411,7 @@ def test_read_boot_config_absent(tmp_path):
 # --- latest_release_for ---
 
 
-def _fake_release_payload(stem: str, version: str) -> dict:
+def _fake_release_payload(stem: str, version: str) -> dict[str, Any]:
     return {
         "tag_name": f"v{version}",
         "assets": [
@@ -433,7 +434,7 @@ def _fake_release_payload(stem: str, version: str) -> dict:
 class _StubSession:
     """A drop-in for ``requests.Session`` that returns canned responses by URL."""
 
-    def __init__(self, responses: dict[str, tuple[int, bytes] | dict]):
+    def __init__(self, responses: dict[str, tuple[int, bytes] | dict[str, Any]]):
         self._responses = responses
 
     def get(self, url, *, timeout=None, headers=None, stream=False, **kwargs):  # noqa: D401
@@ -446,11 +447,11 @@ class _StubSession:
 
 
 class _StubResponse:
-    def __init__(self, status: int, body: bytes = b"", json_body: dict | None = None):
+    def __init__(self, status: int, body: bytes = b"", json_body: dict[str, Any] | None = None):
         self.status_code = status
         self._body = body
         self._json = json_body
-        self.text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+        self.text = body.decode("utf-8", errors="replace")
         self.headers = {"Content-Length": str(len(body))}
 
     def raise_for_status(self):
@@ -538,7 +539,7 @@ def test_download_retries_then_raises_on_persistent_failure(tmp_path):
         updater.download(
             "https://nope.invalid/asset.bin",
             dest,
-            session=FailingSession(),
+            session=FailingSession(),  # type: ignore[arg-type]
             max_retries=2,
         )
 
@@ -576,7 +577,7 @@ def test_verify_fetches_sha_from_url(tmp_path):
     # sha256sum-style: "<hex>  <filename>"
     sha_body = f"{digest}  asset.bin\n".encode()
     session = _StubSession({"https://example/asset.sha256": (200, sha_body)})
-    updater.verify(target, expected_sha256_url="https://example/asset.sha256", session=session)
+    updater.verify(target, expected_sha256_url="https://example/asset.sha256", session=session)  # type: ignore[arg-type]
 
 
 # --- extract ---

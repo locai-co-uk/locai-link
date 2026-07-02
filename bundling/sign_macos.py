@@ -103,7 +103,7 @@ def _discover_mach_o(bundle: Path) -> list[Path]:
     return found
 
 
-def _run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess[str]:
     """Thin wrapper around subprocess.run with a single-line log."""
     logger.info("$ %s", " ".join(cmd))
     return subprocess.run(

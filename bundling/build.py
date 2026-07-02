@@ -34,12 +34,12 @@ import sys
 import tomllib
 from pathlib import Path
 
-from manifest import (  # type: ignore[import-not-found]
+from manifest import (
     PLUGIN_CODES,
     derive_asset_name,
     write_manifest,
 )
-from prefetch import PREFETCHERS, _platform_tag  # type: ignore[import-not-found]
+from prefetch import PREFETCHERS, _platform_tag
 
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent

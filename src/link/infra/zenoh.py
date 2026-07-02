@@ -25,18 +25,21 @@ class ZenohRouter:
         self,
         config: dict[str, Any] | None = None,
         config_path: Path | None = None,
-        zenoh_dir: Path = Path.cwd() / ".zenoh",
-        working_dir: Path = Path.cwd(),
+        zenoh_dir: Path | None = None,
+        working_dir: Path | None = None,
     ):
         """Initialises the ZenohRouter manager.
 
         Args:
             config (dict[str, Any] | None): Dictionary configuration (preferred).
             config_path (Path | None): Legacy path to a static file (fallback).
-            zenoh_dir (Path): Directory for binaries/plugins (hidden).
-            working_dir (Path): Root for database/logs (Defaults to current dir).
+            zenoh_dir (Path | None): Directory for binaries/plugins; defaults
+                to ``<cwd>/.zenoh`` resolved at construction time.
+            working_dir (Path | None): Root for database/logs; defaults to the
+                current working directory resolved at construction time.
         """
-        self.zenoh_dir = zenoh_dir
+        self.zenoh_dir = zenoh_dir if zenoh_dir is not None else Path.cwd() / ".zenoh"
+        working_dir = working_dir if working_dir is not None else Path.cwd()
         self.working_dir = working_dir
 
         self.zenoh_dir.mkdir(parents=True, exist_ok=True)
@@ -77,7 +80,7 @@ class ZenohRouter:
         """
         endpoints = config.get("endpoints", ["tcp/0.0.0.0:7447"])
 
-        router_conf = {"mode": "router", "listen": {"endpoints": endpoints}, "plugins": {}}
+        router_conf: dict[str, Any] = {"mode": "router", "listen": {"endpoints": endpoints}, "plugins": {}}
 
         if "storage" in config:
             s_conf = config["storage"]
@@ -189,7 +192,7 @@ def get_or_create_zenoh_session(config: TransportConfig) -> Any:
             time.sleep(1)
 
 
-def _ensure_router_running(args: dict):
+def _ensure_router_running(args: dict[str, Any]):
     """Ensures the Zenoh Router is running, installing if necessary.
 
     Args:

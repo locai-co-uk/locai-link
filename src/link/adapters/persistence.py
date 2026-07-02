@@ -9,6 +9,8 @@ import sqlite3
 from abc import ABC, abstractmethod
 from typing import Any
 
+from typing_extensions import override
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,7 @@ class ZenohStorageBackend(StorageBackend):
         """
         self.session = session
 
+    @override
     def save(self, key: str, data: Any):
         """Saves data to Zenoh.
 
@@ -92,6 +95,7 @@ class SQLiteStorageBackend(StorageBackend):
         except Exception as e:
             logger.error(f"Failed to init SQLite buffer: {e}")
 
+    @override
     def save(self, key: str, data: Any):
         """Saves data to the local SQLite database.
 
@@ -111,6 +115,7 @@ class SQLiteStorageBackend(StorageBackend):
         except Exception as e:
             logger.error(f"SQLite Save Failed: {e}")
 
+    @override
     def close(self):
         """Closes the SQLite connection."""
         if self._conn:

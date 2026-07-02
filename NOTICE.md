@@ -34,39 +34,33 @@ in the `LICENSES-external/` directory and the `THIRDPARTYLICENSES` file.
    License: MPL 2.0
    Copyright (c) 2015 Kenneth Reitz
 
-#### Optional dependencies
-
-7. Textual (github.com/textualize/textual) — `tui` extra
-   License: MIT
-   Copyright (c) 2021 Will McGugan
-
 #### Development dependencies
 
-8. Ruff (github.com/astral-sh/ruff)
+7. Ruff (github.com/astral-sh/ruff)
    License: MIT
    Copyright (c) 2022 Charlie Marsh
 
-9. pytest (github.com/pytest-dev/pytest)
+8. pytest (github.com/pytest-dev/pytest)
    License: MIT
    Copyright (c) 2004 Holger Krekel and others
 
-10. pytest-mock (github.com/pytest-dev/pytest-mock)
-    License: MIT
-    Copyright (c) 2014 Bruno Oliveira
+9. pytest-mock (github.com/pytest-dev/pytest-mock)
+   License: MIT
+   Copyright (c) 2014 Bruno Oliveira
 
-11. pytest-cov (github.com/pytest-dev/pytest-cov)
+10. pytest-cov (github.com/pytest-dev/pytest-cov)
     License: MIT
     Copyright (c) 2010 Meme Dough
 
-12. MkDocs (github.com/mkdocs/mkdocs)
+11. MkDocs (github.com/mkdocs/mkdocs)
     License: BSD 2-Clause
     Copyright (c) 2014-present, Tom Christie
 
-13. Material for MkDocs (github.com/squidfunk/mkdocs-material)
+12. Material for MkDocs (github.com/squidfunk/mkdocs-material)
     License: MIT
     Copyright (c) 2016-2026 Martin Donath
 
-14. mkdocstrings (github.com/mkdocstrings/mkdocstrings)
+13. mkdocstrings (github.com/mkdocstrings/mkdocstrings)
     License: ISC
     Copyright (c) 2019, Timothée Mazzucotelli
 

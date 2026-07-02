@@ -10,6 +10,7 @@ import subprocess
 import time
 
 import psutil
+from typing_extensions import override
 
 from link.components.registry import ComponentRegistry, Source
 
@@ -52,6 +53,7 @@ class SystemMonitor(Source):
         if "cpu_usage" in self.enabled_metrics:
             psutil.cpu_percent(interval=None)
 
+    @override
     def __call__(self) -> dict[str, float] | None:
         """Collects metrics (Non-Blocking).
 

@@ -26,24 +26,27 @@ WHISPER_CPP_RELEASE = "v1.8.4"
 # Detect Virtual Environment Root and define Install Directory.
 # FROZEN: running from a PyInstaller bundle.
 FROZEN = bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
-if FROZEN:
-    BIN_WHISPER_DIR = Path(sys._MEIPASS) / "bin-whisper"  # type: ignore[attr-defined]
-    BUILD_CACHE_DIR = BIN_WHISPER_DIR  # never written in frozen mode; kept for parity
-elif sys.prefix != sys.base_prefix:
-    VENV_ROOT = Path(sys.prefix)
-    BIN_WHISPER_DIR = VENV_ROOT / "bin-whisper"
-    BUILD_CACHE_DIR = VENV_ROOT / "build-cache"
-else:
+
+
+def _resolve_install_dirs() -> tuple[Path, Path]:
+    """Pick (bin-dir, build-cache-dir) based on frozen/venv/system layout."""
+    if FROZEN:
+        meipass = Path(getattr(sys, "_MEIPASS"))
+        bin_dir = meipass / "bin-whisper"
+        return bin_dir, bin_dir  # build cache never written in frozen mode; kept for parity
+    if sys.prefix != sys.base_prefix:
+        venv_root = Path(sys.prefix)
+        return venv_root / "bin-whisper", venv_root / "build-cache"
     potential_venv = PROJECT_ROOT / ".venv"
     if potential_venv.exists():
-        BIN_WHISPER_DIR = potential_venv / "bin-whisper"
-        BUILD_CACHE_DIR = potential_venv / "build-cache"
-    else:
-        BIN_WHISPER_DIR = PROJECT_ROOT / "bin-whisper"
-        BUILD_CACHE_DIR = PROJECT_ROOT / "build-cache"
+        return potential_venv / "bin-whisper", potential_venv / "build-cache"
+    return PROJECT_ROOT / "bin-whisper", PROJECT_ROOT / "build-cache"
 
 
-def _command_exists(name):
+BIN_WHISPER_DIR, BUILD_CACHE_DIR = _resolve_install_dirs()
+
+
+def _command_exists(name: str):
     """Checks if a tool is available on the PATH."""
     return shutil.which(name) is not None
 

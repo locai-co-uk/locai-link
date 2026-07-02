@@ -38,7 +38,6 @@ dev = [
     # Bundling
     "pyinstaller>=6.20.0",
 ]
-tui = ["textual>=7.0.0"]
 
 [project.scripts]
 locai-link = "link.main:main"

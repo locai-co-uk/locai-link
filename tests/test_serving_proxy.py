@@ -33,9 +33,11 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 import pytest
 import requests
+from typing_extensions import override
 
 from link.infra.serving_proxy import ServingProxy
 
@@ -62,6 +64,7 @@ class _FakeUpstream:
         outer = self  # capture for the handler
 
         class Handler(BaseHTTPRequestHandler):
+            @override
             def log_message(self, *_args, **_kwargs):  # noqa: A002
                 pass  # silence the default per-request log spam
 
@@ -114,7 +117,9 @@ class _FakeUpstream:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self._server.daemon_threads = True
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # poll_interval=0.05 keeps teardown fast; the default 0.5 makes
+        # every fixture stop() block ~500ms and dominates the suite.
+        self._thread = threading.Thread(target=lambda: self._server.serve_forever(poll_interval=0.05), daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -344,6 +349,7 @@ class _ProgrammableUpstream:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            @override
             def log_message(self, *_a, **_k):  # noqa: A002
                 pass
 
@@ -364,7 +370,9 @@ class _ProgrammableUpstream:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self._server.daemon_threads = True
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # poll_interval=0.05 keeps teardown fast; the default 0.5 makes
+        # every fixture stop() block ~500ms and dominates the suite.
+        self._thread = threading.Thread(target=lambda: self._server.serve_forever(poll_interval=0.05), daemon=True)
         self._thread.start()
 
     def _reply_nonstream(self, handler: BaseHTTPRequestHandler) -> None:
@@ -428,7 +436,7 @@ def _run_chat_request(public_port: int, *, stream: bool) -> None:
             _ = resp.content
 
 
-def _make_proxy(upstream_port: int, captured: list) -> tuple[ServingProxy, int]:
+def _make_proxy(upstream_port: int, captured: list[Any]) -> tuple[ServingProxy, int]:
     public_port = _free_port()
     proxy = ServingProxy(
         public_port=public_port,
@@ -450,7 +458,7 @@ def _make_proxy(upstream_port: int, captured: list) -> tuple[ServingProxy, int]:
 def test_telemetry_non_streaming_uses_usage_block():
     """Non-streaming JSON response: tokens_generated comes from usage.completion_tokens."""
     upstream = _ProgrammableUpstream(_free_port(), mode="nonstream")
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
     proxy, public_port = _make_proxy(upstream.port, captured)
     try:
         _run_chat_request(public_port, stream=False)
@@ -477,7 +485,7 @@ def test_telemetry_non_streaming_uses_usage_block():
 def test_telemetry_streaming_with_usage_pulls_from_final_frame():
     """Streaming + include_usage: tokens_generated pulled from the final SSE usage frame."""
     upstream = _ProgrammableUpstream(_free_port(), mode="stream_with_usage")
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
     proxy, public_port = _make_proxy(upstream.port, captured)
     try:
         _run_chat_request(public_port, stream=True)
@@ -501,7 +509,7 @@ def test_telemetry_streaming_with_usage_pulls_from_final_frame():
 def test_telemetry_streaming_without_usage_falls_back_to_delta_count():
     """Streaming + no include_usage: tokens_generated = number of delta.content events."""
     upstream = _ProgrammableUpstream(_free_port(), mode="stream_no_usage")
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
     proxy, public_port = _make_proxy(upstream.port, captured)
     try:
         _run_chat_request(public_port, stream=True)
@@ -523,7 +531,7 @@ def test_telemetry_streaming_without_usage_falls_back_to_delta_count():
 def test_telemetry_off_means_no_buffering_and_no_callback(fake_upstream):
     """on_telemetry=None: pass-through, no per-response parsing, no callback."""
     public_port = _free_port()
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
     proxy = ServingProxy(
         public_port=public_port,
         upstream_port=fake_upstream.port,

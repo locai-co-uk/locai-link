@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 import requests
 from pydantic import ValidationError
 
-import link.components  # noqa: F401
 from link.app.state import StateManager
 from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
@@ -26,7 +25,6 @@ from link.config.commands import (
     StopServingCommand,
     UninstallModelCommand,
     UpdateAgentCommand,
-    UpdateAgentConfigCommand,
     UpdatePipelineCommand,
     parse_command,
 )
@@ -77,7 +75,17 @@ class AgentRuntime:
         # 127.0.0.1:8101; mutated from command dispatch when a serve
         # starts/stops. Started lazily in run() so unit tests that
         # construct an AgentRuntime don't accidentally bind the port.
-        self.health_state = HealthState(version=resolve_agent_version())
+        # `models_provider` is a callable so /models always reflects
+        # the current pipeline set without pushed updates.
+        # `command_handler` is our own `handle_command` — the companion
+        # menu-bar app POSTs START_SERVING / STOP_SERVING commands
+        # through here so the loopback API and the Zenoh command
+        # channel share one dispatch path.
+        self.health_state = HealthState(
+            version=resolve_agent_version(),
+            models_provider=self._snapshot_models,
+            command_handler=self.handle_command,
+        )
         self.health_server = HealthServer(self.health_state)
 
         if threading.current_thread() is threading.main_thread():
@@ -87,7 +95,7 @@ class AgentRuntime:
             except ValueError:
                 logger.debug("Signal handlers skipped (not main thread).")
 
-    def handle_command(self, data: dict):
+    def handle_command(self, data: dict[str, Any]):
         """Validate an incoming command against the shared contract and dispatch it.
 
         Commands arrive clean and flat, so there is nothing to parse: resolve our
@@ -95,10 +103,6 @@ class AgentRuntime:
         the typed object. A command that fails validation is reported `failed`
         (when it carries an id) so it stops being retried.
         """
-        if not isinstance(data, dict):
-            logger.warning(f"Invalid command format: expected dict, got {type(data)}")
-            return
-
         # Resolve ${identity.*} placeholders (e.g. a sink topic) before validating.
         ident = self.agent_config.identity
         context = {
@@ -248,7 +252,7 @@ class AgentRuntime:
                 self.running = False
                 self.shutdown_event.set()
 
-            elif isinstance(cmd, UpdateAgentConfigCommand):
+            else:  # UpdateAgentConfigCommand — last remaining variant in the Command union
                 from link.app.reconfigure import apply_agent_config
 
                 result = apply_agent_config(self, cmd.agent_config.model_dump())
@@ -343,7 +347,7 @@ class AgentRuntime:
             self._shutdown()
             self.status_logger.report_lifecycle("offline")
 
-    def _start_pipeline(self, pipeline_id: str, config_data: dict | None = None) -> bool:
+    def _start_pipeline(self, pipeline_id: str, config_data: dict[str, Any] | None = None) -> bool:
         """Starts (or restarts) a pipeline.
 
         Args:
@@ -543,12 +547,45 @@ class AgentRuntime:
         else:
             self.status_logger.report_command(cmd.id, "failed", f"Failed to update pipeline '{pipeline_id}'")
 
+    def _snapshot_models(self) -> list[dict[str, Any]]:
+        """Freshly enumerate servable-model pipelines for `GET /models`.
+
+        A pipeline qualifies as a "model" if its source args carry a
+        `model_path` — the pragmatic marker for LLM / plugin pipelines
+        that participate in llama-swap serving. Extend the filter here
+        when we onboard other model types (audio transcription, image
+        classification) into the tray menu.
+
+        `is_serving` mirrors the live runtime: the pipeline must be in
+        `self.pipelines` (actually running) AND have `mode=serve` on
+        its source, because a pipeline can run in inference or serve
+        modes and only the second one is what the companion menu
+        toggles.
+        """
+        out: list[dict[str, Any]] = []
+        for pid, cfg in self.pipeline_configs.items():
+            args = cfg.source.args or {}
+            if "model_path" not in args:
+                continue
+            active = pid in self.pipelines
+            is_serving = active and args.get("mode") == "serve"
+            out.append(
+                {
+                    "id": pid,
+                    "alias": args.get("alias") or pid,
+                    "port": args.get("port"),
+                    "host": args.get("host", "127.0.0.1"),
+                    "is_serving": is_serving,
+                }
+            )
+        return out
+
     def _uninstall_model(
         self,
         command_id: str,
         pipeline_id: str,
         force_stop: bool = False,
-        payload: dict | None = None,
+        payload: dict[str, Any] | None = None,
     ):
         """Uninstalls a pipeline by removing its configuration and on-disk artifacts.
 

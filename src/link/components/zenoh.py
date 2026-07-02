@@ -9,6 +9,8 @@ import queue
 import time
 from typing import Any
 
+from typing_extensions import override
+
 from link.adapters.persistence import SQLiteStorageBackend, StorageBackend, ZenohStorageBackend
 from link.components.registry import ComponentRegistry, Sink, Source
 
@@ -47,6 +49,7 @@ class ZenohPublisher(Sink):
             logger.warning(f"Warning: Unknown storage_type '{storage_type}'. Defaulting to Zenoh.")
             self.backend = ZenohStorageBackend(session)
 
+    @override
     def __call__(self, data: Any) -> bool | None:
         """Publish data to Zenoh.
 
@@ -91,7 +94,7 @@ class ZenohListener(Source):
         """
         self.session = session
         self.topic = topic
-        self._queue: queue.Queue = queue.Queue()
+        self._queue: queue.Queue[Any] = queue.Queue()
         self._subscriber = None
 
         self.start()
@@ -120,6 +123,7 @@ class ZenohListener(Source):
 
         self._queue.put(data)
 
+    @override
     def __call__(self) -> Any | None:
         """Pull next message from queue (non-blocking).
 

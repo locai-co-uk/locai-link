@@ -23,10 +23,15 @@ class WhisperServer:
         self.model_path = Path(model_path)
         self.host = host
         self.port = int(port)
-        self.process = None
+        self.process: subprocess.Popen[str] | None = None
         self.running = False
         self.ready = False
         self._stop_event = threading.Event()
+        # Set on the first start(); reset on stop(). Declared here so type
+        # checkers don't flag the later assignments as uninitialised.
+        self.log_path: Path | None = None
+        self.monitor_thread: threading.Thread | None = None
+        self.health_thread: threading.Thread | None = None
 
         self.language = kwargs.get("language")
         self.n_threads = kwargs.get("n_threads")
@@ -37,7 +42,7 @@ class WhisperServer:
         try:
             from .install import BIN_WHISPER_DIR
         except ImportError:
-            from install import BIN_WHISPER_DIR  # type: ignore[no-redef]
+            from install import BIN_WHISPER_DIR
         self.bin_dir = BIN_WHISPER_DIR
 
     @staticmethod
@@ -186,17 +191,18 @@ class WhisperServer:
 
     def _log_tail(self, lines: int = 20):
         """Emit the last N lines of the server's stdout/stderr log to the agent's logger."""
+        log_path = self.log_path
+        if log_path is None or not log_path.exists():
+            return
         try:
-            if not getattr(self, "log_path", None) or not self.log_path.exists():
-                return
-            with open(self.log_path, encoding="utf-8", errors="replace") as f:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
                 tail = f.read().splitlines()[-lines:]
             if tail:
-                logger.error(f"Last {len(tail)} line(s) from {self.log_path.name}:")
+                logger.error(f"Last {len(tail)} line(s) from {log_path.name}:")
                 for line in tail:
                     logger.error(f"  | {line}")
         except Exception as e:
-            logger.debug(f"Could not read server log {self.log_path}: {e}")
+            logger.debug(f"Could not read server log {log_path}: {e}")
 
     def wait_until_ready(self, timeout: float) -> bool:
         """Blocks until the server is healthy, has died, or `timeout` elapses.
@@ -216,7 +222,7 @@ class WhisperServer:
 
     def _log_monitor_loop(self):
         """Reads server output and writes to log file."""
-        if self.process is None or self.process.stdout is None:
+        if self.process is None or self.process.stdout is None or self.log_path is None:
             return
 
         try:
