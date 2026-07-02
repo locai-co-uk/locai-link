@@ -16,16 +16,18 @@
 //!   pairs shifts, so steady-state polls don't churn the menu.
 //!
 //! Everything the user interacts with lives in the native tray menu:
-//! status header, Open Control, Models (with per-model toggles wired
-//! in task 42c), Quit. No separate popover windows.
+//! status header, Open Control, Models (with per-model serve toggles),
+//! Quit. Quit closes the tray only — the agent is a shared service
+//! other integrators depend on. Autostart is managed by the `.pkg`
+//! installer / Setup Assistant, not from here.
 
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use locai_link_shared::{
-    agent_health, autostart, list_models, toggle_serving, HealthStatus, ModelInfo, ModelsStatus, ServingAction,
-    AGENT_APP_ID, COMPANION_APP_ID, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
+    agent_health, list_models, toggle_serving, HealthStatus, ModelInfo, ModelsStatus, ServingAction,
+    DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
 };
 use tauri::{
     image::Image,
@@ -81,7 +83,6 @@ const CONTROL_URL: &str = "https://control.locai.co.uk";
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
 const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
-const MENU_ID_AUTOSTART: &str = "autostart";
 const MENU_ID_QUIT: &str = "quit";
 
 /// Prefix for per-model CheckMenuItem ids. The suffix after the prefix
@@ -181,10 +182,13 @@ pub fn run() {
 ///     ☑/☐ <alias>·:port        (one CheckMenuItem per model)
 ///     …
 /// ─────────
-/// ☑/☐ Start at login           (autostart toggle for the companion)
-/// ─────────
-/// Quit Loc.ai Link             Cmd/Ctrl+Q
+/// Quit                         Cmd/Ctrl+Q
 /// ```
+///
+/// Quit closes the companion only — the agent runs as a shared
+/// service that other integrator apps (SafeChat, Meetily) depend on,
+/// so a tray-app quit must not stop it. Autostart is managed by the
+/// `.pkg` installer + Setup Assistant, not by a companion toggle.
 fn build_tray_menu(
     app: &AppHandle,
     models: &[ModelInfo],
@@ -199,21 +203,9 @@ fn build_tray_menu(
     let models_submenu = build_models_submenu(app, models)?;
 
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let autostart = CheckMenuItem::with_id(
-        app,
-        MENU_ID_AUTOSTART,
-        "Start at login",
-        true,
-        autostart::is_enabled(COMPANION_APP_ID),
-        None::<&str>,
-    )?;
-    let sep3 = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit Loc.ai Link", true, Some("CmdOrCtrl+Q"))?;
+    let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
 
-    let menu = Menu::with_items(
-        app,
-        &[&status, &sep1, &control, &models_submenu, &sep2, &autostart, &sep3, &quit],
-    )?;
+    let menu = Menu::with_items(app, &[&status, &sep1, &control, &models_submenu, &sep2, &quit])?;
     Ok((menu, status))
 }
 
@@ -284,8 +276,13 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 eprintln!("[companion] failed to open {CONTROL_URL}: {e}");
             }
         }
-        MENU_ID_AUTOSTART => handle_autostart_toggle(),
-        MENU_ID_QUIT => handle_quit(app),
+        MENU_ID_QUIT => {
+            // Close the tray only. The agent is a shared service that
+            // integrator apps (SafeChat, Meetily) depend on — quitting
+            // the companion must not stop it. Users who want to stop
+            // the agent do it via Control's web UI.
+            app.exit(0);
+        }
         _ if id.starts_with(MENU_ID_MODEL_PREFIX) => {
             let pipeline_id = id[MENU_ID_MODEL_PREFIX.len()..].to_string();
             handle_model_toggle(app, pipeline_id);
@@ -295,54 +292,6 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER => {}
         other => eprintln!("[companion] unhandled menu id: {other}"),
     }
-}
-
-/// Flip the companion's autostart registration. The CheckMenuItem's
-/// visual toggle happens automatically on click; we invert whatever
-/// state the OS believes we're in.
-///
-/// `env::current_exe()` gives the running binary — in `.pkg`
-/// installs that's the companion inside the `.app` bundle; in
-/// `tauri dev` it's the debug binary under `crates/target/`.
-/// Either way, that's the path launchd should relaunch at login.
-fn handle_autostart_toggle() {
-    let currently_enabled = autostart::is_enabled(COMPANION_APP_ID);
-    let result = if currently_enabled {
-        autostart::disable(COMPANION_APP_ID)
-    } else {
-        match std::env::current_exe() {
-            Ok(exe) => autostart::enable(COMPANION_APP_ID, &exe),
-            Err(e) => {
-                eprintln!("[companion] current_exe() failed: {e}");
-                return;
-            }
-        }
-    };
-    if let Err(e) = result {
-        eprintln!(
-            "[companion] autostart {} for {COMPANION_APP_ID} failed: {e}",
-            if currently_enabled { "disable" } else { "enable" }
-        );
-    }
-}
-
-/// Quit stops both the agent and the companion (LM-Studio-style).
-/// `stop_now` unloads the agent's LaunchAgent so the agent process
-/// exits now, but leaves the plist file intact so next login
-/// auto-starts it again. The companion is killed by `app.exit(0)`
-/// immediately after — since its own plist has KeepAlive=false, it
-/// won't respawn from under us.
-///
-/// In the developer flow (agent running as `python -m link.main run`
-/// from a terminal, not as a LaunchAgent), `stop_now` is a no-op —
-/// there's no plist to unload.
-fn handle_quit(app: &AppHandle) {
-    if let Err(e) = autostart::stop_now(AGENT_APP_ID) {
-        // Non-fatal — Quit still needs to close the companion even if
-        // unloading the agent hit an unexpected error.
-        eprintln!("[companion] failed to stop agent ({AGENT_APP_ID}): {e}");
-    }
-    app.exit(0);
 }
 
 /// User clicked a model checkbox. Look up the pipeline's current
