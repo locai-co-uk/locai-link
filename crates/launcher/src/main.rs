@@ -221,8 +221,12 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
             Ok(()) => {
                 fs::rename(&tmp, &symlink_path)
                     .map_err(|e| format!("rename rollback symlink: {e}"))?;
-                // If a stale pointer file is hanging around, get rid of it.
-                let _ = fs::remove_file(install_root.join(CURRENT_POINTER_FILE));
+                // If a stale pointer file is hanging around, get rid of it —
+                // but only if it's a regular file. On case-insensitive
+                // filesystems (macOS APFS/HFS+ default) `CURRENT` and
+                // `current` share an inode; a naked remove would delete the
+                // symlink we just wrote.
+                remove_if_regular_file(&install_root.join(CURRENT_POINTER_FILE));
                 return Ok(());
             }
             Err(_) => {
@@ -237,9 +241,29 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
     let tmp = install_root.join(format!("{CURRENT_POINTER_FILE}.rollback.tmp"));
     fs::write(&tmp, format!("{version}\n")).map_err(|e| format!("write rollback pointer: {e}"))?;
     fs::rename(&tmp, &pointer).map_err(|e| format!("rename rollback pointer: {e}"))?;
-    // Clean up any stale symlink from a previous shape.
-    let _ = fs::remove_file(&symlink_path);
+    // Clean up any stale symlink from a previous shape — same
+    // case-insensitive caveat as above.
+    remove_if_symlink(&symlink_path);
     Ok(())
+}
+
+/// Remove `path` iff it's a plain file (not a symlink). See the
+/// case-insensitive-filesystem note on the call sites above.
+fn remove_if_regular_file(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if !meta.file_type().is_symlink() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Symmetric guard — remove `path` iff it's actually a symlink.
+fn remove_if_symlink(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(unix)]
