@@ -51,7 +51,7 @@ def _resolve_install_dirs() -> tuple[Path, Path]:
 BIN_LLAMA_DIR, BUILD_CACHE_DIR = _resolve_install_dirs()
 
 
-def _command_exists(name: str):
+def _command_exists(name: str) -> bool:
     """Checks if a tool is available on the PATH."""
     return shutil.which(name) is not None
 

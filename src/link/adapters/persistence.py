@@ -18,7 +18,7 @@ class StorageBackend(ABC):
     """Abstract interface for data persistence."""
 
     @abstractmethod
-    def save(self, key: str, data: Any):
+    def save(self, key: str, data: Any) -> None:
         """Saves data to the storage backend.
 
         Args:
@@ -27,7 +27,7 @@ class StorageBackend(ABC):
         """
         pass
 
-    def close(self):
+    def close(self) -> None:
         """Closes the storage connection. Default: no-op — override if needed."""
         pass
 
@@ -48,7 +48,7 @@ class ZenohStorageBackend(StorageBackend):
         self.session = session
 
     @override
-    def save(self, key: str, data: Any):
+    def save(self, key: str, data: Any) -> None:
         """Saves data to Zenoh.
 
         Args:
@@ -96,7 +96,7 @@ class SQLiteStorageBackend(StorageBackend):
             logger.error(f"Failed to init SQLite buffer: {e}")
 
     @override
-    def save(self, key: str, data: Any):
+    def save(self, key: str, data: Any) -> None:
         """Saves data to the local SQLite database.
 
         Args:
@@ -116,7 +116,7 @@ class SQLiteStorageBackend(StorageBackend):
             logger.error(f"SQLite Save Failed: {e}")
 
     @override
-    def close(self):
+    def close(self) -> None:
         """Closes the SQLite connection."""
         if self._conn:
             self._conn.close()
