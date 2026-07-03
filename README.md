@@ -115,10 +115,8 @@ A modular, pipeline-based runtime. The **control plane** (lifecycle, configurati
 
 ```mermaid
 flowchart TB
-    %% --- External Entities (Top) ---
     User([User / CLI])
 
-    %% --- The Edge Device (Middle) ---
     subgraph Device["Edge Device"]
         direction TB
 
@@ -136,6 +134,8 @@ flowchart TB
             Zenoh[Zenoh Client]
             Service[Service Manager]
             Provision[Provisioner]
+            Health[Health Server<br/>127.0.0.1:8101]
+            Updater[Updater / OTA]
         end
 
         subgraph Exec["Execution Layer (Pipelines)"]
@@ -154,24 +154,29 @@ flowchart TB
         end
     end
 
-    %% --- External Entities (Bottom) ---
     Cloud([Loc.ai Control Plane])
 
-    %% --- Flows (vertical chain) ---
+    %% Vertical chain (subgraph-level edges keep the layout narrow)
     User --> Entry
     Entry --> App
     Entry -.-> Infra
     App --> Exec
+
+    %% Internal relationships — small plain lines that give each
+    %% node at least one edge so no node drops off the render.
+    Runtime --- State
+    Runtime --- Onboard
+    Pipe --> Source
+    Source --> Sink
     Source -.->|Load active only| Plugins
 
-    %% Two distinct upstream paths to the control plane:
-    %%  • Pipeline sinks: telemetry + inference results (data plane)
-    %%  • LinkReporter: logs, status, commands, model state, deployment progress (control plane reporting)
+    %% Upstream flows to the control plane
     Sink -->|Telemetry / Results| Cloud
     Runtime -->|Logs / Status / Reports| Cloud
     Onboard -->|Register / Activate| Cloud
+    Updater -->|Manifest / Payload| Cloud
 
-    %% --- Optionality styling: dashed borders signal "any subset" ---
+    %% Optionality styling: dashed borders signal "any subset"
     style LM stroke-dasharray:5 5
     style AT stroke-dasharray:5 5
     style IC stroke-dasharray:5 5
@@ -179,10 +184,16 @@ flowchart TB
     style More stroke-dasharray:5 5,fill:none
 
     %% --- Force vertical stacking inside each layer + pin Cloud below Device ---
+    %% Intra-subgraph chains keep nodes in a vertical column;
+    %% `Runtime --- State` / `Runtime --- Onboard` above give those
+    %% two nodes a real edge each so they can't drop off GitHub's
+    %% renderer even if these invisible chains glitch.
     Runtime ~~~ State
     State ~~~ Onboard
     Zenoh ~~~ Service
     Service ~~~ Provision
+    Provision ~~~ Health
+    Health ~~~ Updater
     Pipe ~~~ Source
     Source ~~~ Sink
     LM ~~~ AT
