@@ -199,6 +199,33 @@
   --easing-out: ease-out;
 }
 
+/* =============================================================================
+   Global reset — kept here (not inside a Svelte component) so styles reach
+   html/body reliably regardless of scoping quirks. The Setup Assistant is a
+   fixed-size window with a single-viewport layout, so we neutralise the
+   default 8px body margin, enforce border-box everywhere, and hide native
+   scrollbars (content still scrolls via wheel/touch on any element that
+   overflows — matches the flat installer-chrome aesthetic).
+============================================================================= */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100vh; overflow: hidden; }
+#app { height: 100vh; }
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/* Wizard shell layout — kept unscoped so Svelte's per-component class
+   hashing can't accidentally leave the layout as `display: block`. Any
+   Svelte-scoped rules on `.wizard` inside App.svelte still cascade for
+   background/color/font, but the load-bearing flex-row + full-height
+   layout is locked in here. */
+#app > main {
+  display: flex;
+  flex-direction: row;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
 /* Live status dot pulse */
 @keyframes locaiPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 /* Installer progress spinner */

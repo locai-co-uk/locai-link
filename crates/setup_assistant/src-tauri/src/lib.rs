@@ -18,6 +18,10 @@ pub struct CheckInstallResult {
     pub version: Option<String>,
     pub path: Option<String>,
     pub boot: Option<BootConfig>,
+    /// Populated when `boot.json` exists but couldn't be parsed. Kept
+    /// distinct from `reason` so the UI can say "install found but
+    /// config is broken" rather than hiding the failure.
+    pub boot_error: Option<String>,
     /// Human-readable reason when `installed` is false. `None` on the
     /// success path.
     pub reason: Option<String>,
@@ -26,8 +30,9 @@ pub struct CheckInstallResult {
 /// Read the on-disk install state at `install_root`.
 ///
 /// Never returns an `Err` — the failure modes ("no install here",
-/// "install root doesn't exist") are legitimate outcomes the UI needs
-/// to render, not exceptions. The `reason` field carries the detail.
+/// "install root doesn't exist", "boot.json corrupt") are legitimate
+/// outcomes the UI needs to render, not exceptions. `reason` /
+/// `boot_error` carry the detail.
 #[tauri::command]
 fn check_install(install_root: String) -> CheckInstallResult {
     let root = PathBuf::from(&install_root);
@@ -37,11 +42,20 @@ fn check_install(install_root: String) -> CheckInstallResult {
             version: None,
             path: None,
             boot: None,
+            boot_error: None,
             reason: Some(format!("Install root does not exist: {install_root}")),
         };
     }
 
-    let boot = read_boot_json(&root.join("boot.json")).ok();
+    let boot_path = root.join("boot.json");
+    let (boot, boot_error) = if boot_path.exists() {
+        match read_boot_json(&boot_path) {
+            Ok(cfg) => (Some(cfg), None),
+            Err(e) => (None, Some(format!("boot.json unreadable: {e}"))),
+        }
+    } else {
+        (None, None)
+    };
 
     match installed_version(&root) {
         Some(v) => CheckInstallResult {
@@ -49,6 +63,7 @@ fn check_install(install_root: String) -> CheckInstallResult {
             version: Some(v.version),
             path: Some(v.path.to_string_lossy().into_owned()),
             boot,
+            boot_error,
             reason: None,
         },
         None => CheckInstallResult {
@@ -56,6 +71,7 @@ fn check_install(install_root: String) -> CheckInstallResult {
             version: None,
             path: None,
             boot,
+            boot_error,
             reason: Some("No `current` pointer found under install root.".to_string()),
         },
     }

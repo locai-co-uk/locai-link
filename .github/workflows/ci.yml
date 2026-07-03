@@ -123,9 +123,18 @@ jobs:
   # Rust logic worth guarding lives in `shared` (autostart, health
   # probing, install-state reading). Add the Tauri crates here when
   # they gain non-trivial Rust logic that needs its own CI safety net.
+  #
+  # Run on all three OSes so the platform-gated `autostart/{macos,
+  # windows,linux}.rs` modules (via `#[cfg(target_os = ...)]`) all
+  # actually get compiled. The shared crate has no OS-specific system
+  # deps, so this stays fast.
   rust-check:
-    name: Rust Check (shared)
-    runs-on: ubuntu-latest
+    name: Rust Check (shared) on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -141,6 +150,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "crates -> target"
+          key: ${{ matrix.os }}
 
       - name: Cargo check
         working-directory: crates

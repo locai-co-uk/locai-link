@@ -24,6 +24,7 @@
       asset_repo: string;
       asset_url: string | null;
     } | null;
+    boot_error: string | null;
     reason: string | null;
   };
 
@@ -59,16 +60,21 @@
   }
 
   function next() {
-    if (current < STEPS.length - 1) {
-      current += 1;
-      if (STEPS[current].id === "check-install") {
-        void runCheck();
-      }
-    }
+    if (current < STEPS.length - 1) current += 1;
   }
   function back() {
     if (current > 0) current -= 1;
   }
+
+  // Re-run the install probe every time we land on the Check Install
+  // step — via next() OR back(). Using $effect here (rather than
+  // firing from next() only) means state can't go stale after the
+  // user navigates back to review the result.
+  $effect(() => {
+    if (STEPS[current].id === "check-install") {
+      void runCheck();
+    }
+  });
 
   function statusOf(idx: number): "done" | "current" | "pending" {
     if (idx < current) return "done";
@@ -138,6 +144,12 @@
               <strong>Found Loc.ai Link {checkResult.version}</strong>
               <p class="callout__body">{checkResult.path}</p>
             </div>
+            {#if checkResult.boot_error}
+              <div class="callout callout--warn">
+                <strong>boot.json needs attention</strong>
+                <p class="callout__body">{checkResult.boot_error}</p>
+              </div>
+            {/if}
             {#if checkResult.boot}
               <dl class="kv">
                 <div><dt>Channel</dt><dd>{checkResult.boot.channel}</dd></div>
@@ -180,27 +192,14 @@
 </main>
 
 <style>
-  /* border-box everywhere — with default content-box, every padding
-     value adds to declared width/height and small px overflows sneak
-     in even when the math looks like it should fit. */
-  :global(*, *::before, *::after) {
-    box-sizing: border-box;
-  }
-  :global(html, body) {
-    margin: 0;
-    padding: 0;
-    height: 100vh;
-    overflow: hidden; /* wizard is a fixed-size window; nothing outside it should scroll */
-  }
-  :global(#app) {
-    height: 100vh;
-  }
+  /* Global reset (border-box, body margin, hidden scrollbars) lives in
+     lib/tokens/tokens.css so it applies without Svelte scoping quirks. */
 
   .wizard {
     display: flex;
+    flex-direction: row;
+    width: 100vw;
     height: 100vh;
-    /* Belt-and-suspenders: even if the :global() reset misses body's
-       default 8px margin, clipping here guarantees no outer scroll. */
     overflow: hidden;
     background: var(--color-paper);
     color: var(--color-text);

@@ -128,11 +128,13 @@ jobs:
         run: |
           set -euo pipefail
           ASSET_BASE=$(python - <<'PY'
-          import json, pathlib
+          import json, pathlib, sys
           root = pathlib.Path("dist/locai-link")
           manifest = root / "current" / "manifest.json"
           if not manifest.exists():
-              manifest = next(root.glob("versions/*/manifest.json"))
+              manifest = next(iter(root.glob("versions/*/manifest.json")), None)
+              if manifest is None:
+                  sys.exit(f"::error::No manifest.json under {root} (checked current/ and versions/*)")
           print(json.load(manifest.open())["asset_name"])
           PY
           )
