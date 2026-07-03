@@ -404,7 +404,7 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
     let _ = fs::remove_file(&tmp);
     if make_symlink(&target, &tmp).is_ok() {
         fs::rename(&tmp, &symlink_path).map_err(|e| format!("rename bootstrap symlink: {e}"))?;
-        let _ = fs::remove_file(install_root.join(CURRENT_POINTER_FILE));
+        remove_if_regular_file(&install_root.join(CURRENT_POINTER_FILE));
         return Ok(());
     }
     let _ = fs::remove_file(&tmp);
@@ -412,8 +412,32 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
     let tmp = install_root.join(format!("{CURRENT_POINTER_FILE}.bootstrap.tmp"));
     fs::write(&tmp, format!("{version}\n")).map_err(|e| format!("write bootstrap pointer: {e}"))?;
     fs::rename(&tmp, &pointer).map_err(|e| format!("rename bootstrap pointer: {e}"))?;
-    let _ = fs::remove_file(&symlink_path);
+    remove_if_symlink(&symlink_path);
     Ok(())
+}
+
+/// Remove `path` iff it's a plain file (not a symlink) — used to clean
+/// up a stale text pointer after writing a symlink. On case-insensitive
+/// filesystems (macOS APFS/HFS+ default) the pointer path and the
+/// symlink path resolve to the same inode; a naked remove_file would
+/// delete the symlink we just wrote.
+fn remove_if_regular_file(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if !meta.file_type().is_symlink() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Symmetric guard for the reverse case — remove `path` iff it's
+/// actually a symlink. See [`remove_if_regular_file`] for the case-
+/// insensitive-filesystem rationale.
+fn remove_if_symlink(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -545,7 +569,17 @@ mod tests {
             let cur = dir.path().join("current");
             let target = fs::read_link(&cur).unwrap();
             assert_eq!(target.file_name().unwrap(), "1.0.16");
-            assert!(!dir.path().join("CURRENT").exists());
+            // On case-insensitive filesystems (macOS APFS/HFS+ default),
+            // `CURRENT` and `current` share the same inode — so the path
+            // exists via the symlink. Assert only that no *stale text
+            // pointer file* is present: if the name resolves at all, it
+            // must be the symlink we just wrote.
+            if let Ok(meta) = fs::symlink_metadata(dir.path().join("CURRENT")) {
+                assert!(
+                    meta.file_type().is_symlink(),
+                    "stale CURRENT text pointer left behind next to the symlink",
+                );
+            }
         }
     }
 
