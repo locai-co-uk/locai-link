@@ -21,6 +21,8 @@ binaries and binds no real ports.
 from __future__ import annotations
 
 import socket
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -28,8 +30,8 @@ try:
     from . import swap_manager as sm_mod
     from .swap_manager import SwapManager
 except ImportError:  # flat layout (pytest prepend import mode)
-    import swap_manager as sm_mod  # type: ignore
-    from swap_manager import SwapManager  # type: ignore
+    import swap_manager as sm_mod
+    from swap_manager import SwapManager
 
 
 def _free_base_port() -> int:
@@ -42,7 +44,7 @@ def _free_base_port() -> int:
 class _FakeProxy:
     """Records start/stop without binding a real socket."""
 
-    def __init__(self, events: list, public_port: int, upstream_port: int, **_kw) -> None:
+    def __init__(self, events: list[Any], public_port: int, upstream_port: int, **_kw) -> None:
         self.events = events
         self.public_port = public_port
         self.upstream_port = upstream_port
@@ -70,7 +72,7 @@ class _FakeProc:
     # Deterministic PIDs across the test suite so pidfile assertions are stable.
     _next_pid = 90000
 
-    def __init__(self, events: list) -> None:
+    def __init__(self, events: list[Any]) -> None:
         self.events = events
         self.returncode = None
         self._alive = True
@@ -96,10 +98,18 @@ class _FakeProc:
         pass
 
 
-def _make_manager(tmp_path, monkeypatch, *, allowed_origins: list[str] | None) -> SwapManager:
+class _TestSwapManager(SwapManager):
+    """SwapManager subclass carrying a test-only event log for assertions."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._events: list[Any] = []
+
+
+def _make_manager(tmp_path, monkeypatch, *, allowed_origins: list[str] | None) -> _TestSwapManager:
     """A SwapManager wired to fakes, on a free port, with configs in tmp_path."""
     monkeypatch.chdir(tmp_path)
-    events: list = []
+    events: list[Any] = []
 
     # No real binary, no real sleep, deterministic reload path (stop+start).
     monkeypatch.setattr(sm_mod.time, "sleep", lambda *_a, **_k: None)
@@ -111,7 +121,7 @@ def _make_manager(tmp_path, monkeypatch, *, allowed_origins: list[str] | None) -
 
     monkeypatch.setattr(sm_mod.subprocess, "Popen", _fake_popen)
 
-    sm = SwapManager(_free_base_port(), "127.0.0.1", tmp_path, allowed_origins=allowed_origins)
+    sm = _TestSwapManager(_free_base_port(), "127.0.0.1", tmp_path, allowed_origins=allowed_origins)
     # Create the binary path so _start's existence check passes. Real file
     # rather than a monkeypatch on Path.exists — patching the class globally
     # makes every other Path.exists() in the process return True too, which
@@ -232,7 +242,7 @@ def test_no_cors_remove_still_tears_down_proxy(manager_no_cors):
 class _FakePsutilProcess:
     """Stand-in for psutil.Process — controllable name/cmdline and termination."""
 
-    def __init__(self, events: list, pid: int, name: str, cmdline: list[str], alive: bool = True) -> None:
+    def __init__(self, events: list[Any], pid: int, name: str, cmdline: list[str], alive: bool = True) -> None:
         self.events = events
         self.pid = pid
         self._name = name
@@ -284,12 +294,13 @@ def _install_fake_psutil(monkeypatch, events, *, alive_processes: dict[int, _Fak
             raise _NoSuchProcess(pid)
         return alive_processes[pid]
 
-    fake = type("FakePsutil", (), {})()
-    fake.Process = _process
-    fake.NoSuchProcess = _NoSuchProcess
-    fake.AccessDenied = _AccessDenied
-    fake.TimeoutExpired = _TimeoutExpired
-    fake.Error = _PsutilError
+    fake = SimpleNamespace(
+        Process=_process,
+        NoSuchProcess=_NoSuchProcess,
+        AccessDenied=_AccessDenied,
+        TimeoutExpired=_TimeoutExpired,
+        Error=_PsutilError,
+    )
     monkeypatch.setattr(sm_mod, "psutil", fake)
     return fake
 
@@ -338,6 +349,7 @@ def test_reclaim_kills_orphan_with_matching_cmdline(tmp_path, monkeypatch):
     sm.add_model("m1", "/models/m1.gguf")
     assert ("reclaim_terminate", 4242) in sm._events
     assert sm._pid_path.exists()  # new pid written
+    assert sm._proc is not None
     assert int(sm._pid_path.read_text()) == sm._proc.pid
 
 
@@ -354,6 +366,7 @@ def test_reclaim_dead_pid_just_clears_pidfile(tmp_path, monkeypatch):
     assert not any(e[0] == "reclaim_terminate" for e in sm._events)
     # But the new run wrote its own pidfile.
     assert sm._pid_path.exists()
+    assert sm._proc is not None
     assert int(sm._pid_path.read_text()) == sm._proc.pid
 
 
@@ -403,7 +416,7 @@ def test_foreign_port_holder_raises_without_pidfile(tmp_path, monkeypatch):
 def test_registered_callback_receives_fanned_out_record(tmp_path, monkeypatch):
     """The fanout the proxy receives invokes every registered callback."""
     sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
-    received: list[dict] = []
+    received: list[dict[str, Any]] = []
     sm.add_telemetry_callback(received.append)
     sm.add_model("m1", "/models/m1.gguf")
 
@@ -419,14 +432,14 @@ def test_multi_model_fanout_lets_each_adapter_filter(tmp_path, monkeypatch):
     sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
 
     # Simulate two adapters' callbacks: each one keeps only its own model's records.
-    a_records: list[dict] = []
-    b_records: list[dict] = []
+    a_records: list[dict[str, Any]] = []
+    b_records: list[dict[str, Any]] = []
 
-    def adapter_a(record: dict) -> None:
+    def adapter_a(record: dict[str, Any]) -> None:
         if record.get("model") == "model-a":
             a_records.append(record)
 
-    def adapter_b(record: dict) -> None:
+    def adapter_b(record: dict[str, Any]) -> None:
         if record.get("model") == "model-b":
             b_records.append(record)
 
@@ -444,7 +457,7 @@ def test_multi_model_fanout_lets_each_adapter_filter(tmp_path, monkeypatch):
 def test_add_telemetry_callback_is_idempotent(tmp_path, monkeypatch):
     """Re-registering the same callback doesn't double-fire."""
     sm = _make_manager(tmp_path, monkeypatch, allowed_origins=None)
-    received: list[dict] = []
+    received: list[dict[str, Any]] = []
     sm.add_telemetry_callback(received.append)
     sm.add_telemetry_callback(received.append)  # duplicate
     sm._fanout_telemetry({"model": "m1"})

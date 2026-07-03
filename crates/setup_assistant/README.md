@@ -1,6 +1,7 @@
-# Tauri + SvelteKit + TypeScript
+# Tauri + Svelte + TypeScript
 
-This template should help get you started developing with Tauri, SvelteKit and TypeScript in Vite.
+Loc.ai Link Setup Assistant. Bare Svelte + Vite frontend, Tauri (Rust)
+backend. Wizard walks the user through post-install first-run setup.
 
 ## Recommended IDE Setup
 

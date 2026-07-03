@@ -19,7 +19,7 @@ from typing import Any
 _TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def resolve_templates(obj: Any, context: dict) -> Any:
+def resolve_templates(obj: Any, context: dict[str, Any]) -> Any:
     """Recursively substitute `${path.to.key}` placeholders using dotted lookups.
 
     Args:
@@ -41,7 +41,7 @@ def resolve_templates(obj: Any, context: dict) -> Any:
     return obj
 
 
-def _lookup(context: dict, path: str) -> str:
+def _lookup(context: dict[str, Any], path: str) -> str:
     """Resolve `a.b.c` from `context['a']['b']['c']` — or return the literal placeholder."""
     node: Any = context
     for part in path.split("."):

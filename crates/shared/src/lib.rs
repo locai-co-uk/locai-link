@@ -2,123 +2,41 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Helpers consumed by the launcher, the Setup Assistant, and the
-//! menu-bar app. Three responsibilities:
+//! menu-bar app.
 //!
-//! * [`agent_health`] — query Link's `/healthz` endpoint and return a
-//!   typed snapshot of its state. The menu-bar app polls this to drive
-//!   the green/grey indicator; the Setup Assistant calls it once on
-//!   Finish to confirm the agent came up.
-//! * [`read_boot_json`] — parse the `boot.json` config that the launcher
-//!   reads on startup. Mirrored here so the Setup Assistant + menu-bar
-//!   can read the same canonical record without re-implementing the
-//!   schema.
-//! * [`installed_version`] — resolve which version directory the
-//!   `current` symlink points at under an `install_root`. Used by the
-//!   menu-bar app's "About" surface and by the Setup Assistant's
-//!   existing-install check.
+//! Grouped by responsibility:
 //!
-//! All three currently return non-panicking interim values
-//! (`HealthStatus::Down`, `Err(NotFound)`, `None`) so consumers can
-//! depend on the signatures today. Real implementations land with the
-//! menu-bar app's polling loop and the Setup Assistant's
-//! existing-install check.
+//! * [`health`] — probe Link's `/healthz` endpoint. Real HTTP call with
+//!   a short timeout; drives the menu-bar tray indicator.
+//! * [`install`] — read the on-disk install state (boot.json + current
+//!   version pointer). Still stubbed (`Err(NotFound)`, `None`); real
+//!   parser lands with the Setup Assistant's existing-install check.
+//! * [`autostart`] — register a GUI app to launch at login.
+//!   Cross-platform surface with a real macOS implementation and
+//!   Windows/Linux stubs.
 
-use std::path::Path;
+pub mod autostart;
+pub mod health;
+pub mod install;
 
-use serde::{Deserialize, Serialize};
-
-/// Snapshot of the local agent's health, as reported by `/healthz`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentHealth {
-    pub version: String,
-    pub uptime_seconds: u64,
-    pub currently_serving: bool,
-    pub model_id: Option<String>,
-}
-
-/// Outcome of a single `/healthz` probe.
-#[derive(Debug, Clone)]
-pub enum HealthStatus {
-    /// Agent responded successfully with a payload.
-    Up(AgentHealth),
-    /// Agent didn't respond (connection refused, timeout, etc.).
-    Down,
-    /// Agent responded but the payload didn't deserialise. Carries the raw error.
-    Malformed(String),
-}
-
-/// Schema of the `boot.json` config the launcher reads on startup.
-///
-/// Mirrored from `launcher/src/boot.rs::BootConfig` — kept here so the
-/// other Rust surfaces (Setup Assistant, menu-bar) can read the same
-/// record without depending on the launcher crate directly. Field
-/// optionality matches the launcher exactly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootConfig {
-    pub host_app: String,
-    #[serde(default)]
-    pub plugin_set: Vec<String>,
-    #[serde(default = "default_channel")]
-    pub channel: String,
-    pub asset_repo: String,
-    #[serde(default)]
-    pub asset_url: Option<String>,
-}
-
-fn default_channel() -> String {
-    "stable".to_string()
-}
-
-/// Resolved currently-installed version of Link, as the launcher would see it.
-#[derive(Debug, Clone)]
-pub struct InstalledVersion {
-    pub version: String,
-    pub path: std::path::PathBuf,
-}
-
-/// Probe Link's `/healthz` endpoint. Default URL is
-/// `http://127.0.0.1:8101/healthz`; callers can override for testing.
-///
-/// Interim implementation returns `HealthStatus::Down` — real ureq
-/// probe lands with the menu-bar app's polling loop. Kept
-/// non-panicking so callers can already depend on the signature
-/// without crashing on scaffolding.
-pub fn agent_health(_url: &str) -> HealthStatus {
-    HealthStatus::Down
-}
-
-/// Parse a `boot.json` from disk.
-///
-/// Interim implementation returns `NotFound`; the real parser lands
-/// with the Setup Assistant's existing-install check. Non-panicking
-/// so callers can depend on the signature today.
-pub fn read_boot_json(_path: &Path) -> Result<BootConfig, std::io::Error> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "read_boot_json not yet implemented",
-    ))
-}
-
-/// Resolve `<install_root>/current` to the version it points at.
-///
-/// Interim implementation returns `None` — real symlink+pointer-file
-/// resolution lands with the menu-bar app's version display.
-pub fn installed_version(_install_root: &Path) -> Option<InstalledVersion> {
-    None
-}
+// Flat re-exports keep the public surface identical to the pre-split
+// crate, so downstream callers (`companion`, `setup_assistant`,
+// `launcher`) don't need to update their imports for the reorganisation.
+pub use health::{
+    agent_health, list_models, toggle_serving, AgentHealth, HealthStatus, ModelInfo, ModelsStatus, ServingAction,
+    DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
+};
+pub use autostart::{AGENT_APP_ID, COMPANION_APP_ID};
+pub use install::{read_boot_json, BootConfig, InstalledVersion, installed_version};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Smoke tests live here once the stubs become real implementations.
-    // For the scaffolding step, we just assert the types exist and have
-    // the expected shape so consumers can write against them.
-
     #[test]
     fn types_compile() {
-        // If this builds, the three public types + the three function
-        // signatures are stable enough for the Setup Assistant and
+        // Signature stability check — if this builds, the public
+        // surface is stable enough for the Setup Assistant and
         // menu-bar app to depend on.
         fn _accepts_health(_: HealthStatus) {}
         fn _accepts_boot(_: BootConfig) {}

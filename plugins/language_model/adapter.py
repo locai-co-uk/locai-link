@@ -294,10 +294,11 @@ class LanguageModel:
         payload = {"model": self.model_id, "messages": self.messages, **self.parameters}
 
         try:
-            resp = requests.post(url, json=payload, stream=self.parameters["stream"], timeout=600)
+            stream = bool(self.parameters["stream"])
+            resp = requests.post(url, json=payload, stream=stream, timeout=600)
             resp.raise_for_status()
 
-            if self.parameters["stream"]:
+            if stream:
                 for line in resp.iter_lines():
                     if line:
                         decoded = line.decode("utf-8").replace("data: ", "")

@@ -174,6 +174,7 @@ def test_mac_user_scope_writes_to_home(mock_mac_env, tmp_path):
         command="/opt/locai/locai-link run",
         description="Loc.ai Agent",
     )
+    assert isinstance(manager, MacOSBackend)
     manager.install(start_now=False)
     assert manager.plist_path == tmp_path / "Users/test/Library/LaunchAgents/io.locai.agent.plist"
     assert manager.plist_path.exists()
@@ -187,6 +188,7 @@ def test_mac_system_scope_writes_to_library(mock_mac_env):
         description="Loc.ai Agent",
         scope="system",
     )
+    assert isinstance(manager, MacOSBackend)
     # Don't actually write — write would need /Library/ root.
     assert manager.plist_path == Path("/Library/LaunchAgents/io.locai.agent.plist")
 
@@ -199,6 +201,7 @@ def test_mac_label_prefix_threads_into_plist(mock_mac_env, tmp_path):
         description="Loc.ai Agent",
         label_prefix="uk.co.locai.link",
     )
+    assert isinstance(manager, MacOSBackend)
     manager.install(start_now=False)
 
     expected_plist = tmp_path / "Users/test/Library/LaunchAgents/uk.co.locai.link.agent.plist"
@@ -223,9 +226,11 @@ def test_install_all_registers_two_services_in_lockstep(mock_mac_env, tmp_path):
     b = ServiceManager(
         service_name="menubar",
         command="/Applications/Locai\\ Link.app/Contents/MacOS/menubar",
-        description="Menu-bar",
+        description="GUI",
         label_prefix="uk.co.locai.link",
     )
+    assert isinstance(a, MacOSBackend)
+    assert isinstance(b, MacOSBackend)
     install_all([a, b], start_now=True)
     assert a.plist_path.exists()
     assert b.plist_path.exists()
@@ -244,9 +249,10 @@ def test_install_all_rolls_back_on_failure(mock_mac_env, tmp_path, mocker):
     b = ServiceManager(
         service_name="menubar",
         command="/Applications/Locai/menubar",
-        description="Menu-bar",
+        description="GUI",
         label_prefix="uk.co.locai.link",
     )
+    assert isinstance(a, MacOSBackend)
     # Make the second install raise.
     mocker.patch.object(b, "install", side_effect=OSError("disk full"))
 

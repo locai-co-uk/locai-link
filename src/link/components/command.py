@@ -6,6 +6,9 @@
 import collections
 import logging
 from collections import deque
+from typing import Any
+
+from typing_extensions import override
 
 from link.components.registry import ComponentRegistry, Sink
 
@@ -34,16 +37,20 @@ class AgentCommand(Sink):
         self.callback = callback
         self._seen: deque[str] = collections.deque(maxlen=dedup_window)
 
-    def __call__(self, data: dict | list[dict]) -> bool:
+    @override
+    def __call__(self, data: dict[str, Any] | list[dict[str, Any]]) -> bool:
         """Dispatches one or more commands to the runtime callback."""
         if not data:
             return True
         cmds = data if isinstance(data, list) else [data]
         return all(self._dispatch(cmd) for cmd in cmds)
 
-    def _dispatch(self, cmd: dict) -> bool:
+    def _dispatch(self, cmd: dict[str, Any]) -> bool:
         cmd_id = cmd.get("id")
-        if cmd_id is not None and cmd_id in self._seen:
+        # Truthy check on both branches — matches mark_seen() so an
+        # empty-string id (which isn't a useful dedup key anyway)
+        # doesn't get treated differently by the two entry points.
+        if cmd_id and cmd_id in self._seen:
             return True  # duplicate, silently ack
         try:
             self.callback(cmd)
@@ -51,11 +58,11 @@ class AgentCommand(Sink):
             logger.error(f"Command execution failed: {e}")
             # Don't record cmd_id in _seen — a retry should be allowed to try again.
             return False
-        if cmd_id is not None:
+        if cmd_id:
             self._seen.append(cmd_id)
         return True
 
     def mark_seen(self, cmd_id: str) -> None:
         """Pre-populate dedup before the consumer starts (used by runtime reconcile)."""
-        if cmd_id is not None:
+        if cmd_id:
             self._seen.append(cmd_id)

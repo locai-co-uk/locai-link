@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+from typing_extensions import override
+
 from link.adapters.http_client import HttpClient, HttpError
 from link.components.registry import ComponentRegistry, Sink, Source
 
@@ -36,6 +38,7 @@ class HttpPoller(Source):
         self.interval = float(interval)
         self.last_poll = 0.0
 
+    @override
     def __call__(self) -> Any | None:
         """Polls the configured URL.
 
@@ -81,6 +84,7 @@ class HttpPublisher(Sink):
         # 2. Init Client with Headers
         self.client = HttpClient(base_url=url, default_headers=headers, timeout=timeout)
 
+    @override
     def __call__(self, payload: Any) -> bool | None:
         """Posts the payload to the configured URL.
 

@@ -1,4 +1,4 @@
-"""CLI entry point — dispatches setup, run, install, reset, stop, TUI subcommands."""
+"""CLI entry point — dispatches setup, run, install, reset, stop subcommands."""
 
 import argparse
 import logging
@@ -40,8 +40,6 @@ def setup(args: argparse.Namespace):
     """
     logger.info("Setting up Loc.ai Python Environment")
     install_targets = []
-    if args.tui:
-        install_targets.append("tui")
     if args.dev:
         install_targets.append("dev")
 
@@ -491,7 +489,11 @@ def reset(hard: bool = False):
         pass
 
     # Configuration
-    exclude_dirs = {".git", ".vscode", ".github", "docs"}
+    # Do NOT descend into these — third-party dependency trees whose
+    # own `dist/`/`build/` subdirs are load-bearing (Vite's compiled
+    # entrypoint, Cargo's cached artifacts, etc.). Walking them just
+    # wastes time and breaks the Tauri apps.
+    exclude_dirs = {".git", ".vscode", ".github", "docs", "node_modules", "target"}
 
     # Directories to nuke (exact matches)
     target_dirs = {
@@ -552,7 +554,6 @@ def main():
 
     # Setup
     setup_p = subparsers.add_parser("setup", help="Sets up the environment.")
-    setup_p.add_argument("--tui", action="store_true", help="Use the TUI.")
     setup_p.add_argument("--dev", action="store_true", help="Install dev dependencies.")
 
     # Lifecycle
@@ -594,7 +595,6 @@ def main():
         help="Boot to config+transport+plugins and exit 0 if healthy. Used by OTA rollback.",
     )
 
-    subparsers.add_parser("tui", help="Runs the TUI.")
     subparsers.add_parser("install-plugin", help="Installs a plugin.").add_argument("name")
 
     args = parser.parse_args()
@@ -609,13 +609,6 @@ def main():
         run(args)
     elif args.command == "install":
         install(args)
-    elif args.command == "tui":
-        try:
-            from link.ui.tui import start_tui
-
-            start_tui()
-        except ImportError:
-            logger.error("TUI missing.")
     elif args.command == "install-plugin":
         from link.components.registry import ComponentRegistry
 

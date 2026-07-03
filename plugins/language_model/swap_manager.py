@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import psutil
 import requests
@@ -46,7 +47,7 @@ def get_swap_manager(
     host: str,
     bin_dir: Path,
     allowed_origins: list[str] | None = None,
-    on_telemetry: Callable[[dict], None] | None = None,
+    on_telemetry: Callable[[dict[str, Any]], None] | None = None,
 ) -> "SwapManager":
     """Return the SwapManager for (host, port). ``allowed_origins`` is first-call only;
     ``on_telemetry`` accumulates so multi-model servings each get their callback registered.
@@ -90,21 +91,21 @@ class SwapManager:
         self._config_path = Path("configs") / f"swap_config_{port}.json"
         self._log_path = Path("logs") / f"llama-swap_{port}.log"
         self._pid_path = Path("state") / f"swap_{port}.pid"
-        self._models: dict[str, dict] = {}
-        self._proc: subprocess.Popen | None = None
+        self._models: dict[str, dict[str, Any]] = {}
+        self._proc: subprocess.Popen[bytes] | None = None
         self._proxy: ServingProxy | None = None
         # One callback per adapter; each filters by record["model"] so two
         # adapters sharing one port don't mis-attribute each other's inferences.
-        self._on_telemetry_callbacks: list[Callable[[dict], None]] = []
+        self._on_telemetry_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._lock = threading.RLock()
 
-    def add_telemetry_callback(self, cb: Callable[[dict], None]) -> None:
+    def add_telemetry_callback(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """Register an inference-telemetry sink. Idempotent."""
         with self._lock:
             if cb not in self._on_telemetry_callbacks:
                 self._on_telemetry_callbacks.append(cb)
 
-    def remove_telemetry_callback(self, cb: Callable[[dict], None]) -> None:
+    def remove_telemetry_callback(self, cb: Callable[[dict[str, Any]], None]) -> None:
         """Unregister a previously-added telemetry sink.
 
         Adapters MUST call this on stop. Otherwise the SwapManager (a
@@ -119,7 +120,7 @@ class SwapManager:
                 # Already removed (or never added) — idempotent.
                 pass
 
-    def _fanout_telemetry(self, record: dict) -> None:
+    def _fanout_telemetry(self, record: dict[str, Any]) -> None:
         """ServingProxy hands each inference record here; we fan out to every
         registered adapter. Adapters filter by record["model"] internally."""
         with self._lock:
@@ -409,12 +410,12 @@ class SwapManager:
     def _write_config(self) -> None:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
 
-        model_entries: dict = {}
+        model_entries: dict[str, Any] = {}
         for i, (model_id, m) in enumerate(self._models.items()):
             internal_port = self._listen_port + self._INTERNAL_PORT_OFFSET + i
             args = [str(self._server_bin), "--model", m["path"], "--port", str(internal_port)] + m["args"]
             cmd = subprocess.list2cmdline(args) if platform.system() == "Windows" else shlex.join(args)
-            entry: dict = {
+            entry: dict[str, Any] = {
                 "cmd": cmd,
                 "proxy": f"http://127.0.0.1:{internal_port}",
                 "ttl": self._MODEL_TTL,

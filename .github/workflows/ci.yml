@@ -114,7 +114,43 @@ jobs:
       - name: Check Code
         run: uv run ruff check .
 
-  # 3. Integration Tests (Plugins — downloads models and binaries)
+  # 3. Rust crate check + unit tests (shared crate only)
+  #
+  # Scoped to `locai-link-shared` deliberately: `companion` and
+  # `setup_assistant` are Tauri apps that need webkit2gtk / gtk3 /
+  # libsoup on Linux runners to `cargo check`. Adding those OS deps
+  # here doubles the job surface for near-zero incremental value — the
+  # Rust logic worth guarding lives in `shared` (autostart, health
+  # probing, install-state reading). Add the Tauri crates here when
+  # they gain non-trivial Rust logic that needs its own CI safety net.
+  rust-check:
+    name: Rust Check (shared)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Rust job doesn't push or fetch other repos — drop the token
+          # so later steps can't inadvertently reach GitHub with write
+          # access if a dependency script goes rogue.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates -> target"
+
+      - name: Cargo check
+        working-directory: crates
+        run: cargo check -p locai-link-shared
+
+      - name: Cargo test
+        working-directory: crates
+        run: cargo test -p locai-link-shared --lib
+
+  # 4. Integration Tests (Plugins — downloads models and binaries)
   integration-test:
     name: Integration Test on ${{ matrix.os }}
     needs: [unit-test]

@@ -69,18 +69,10 @@ def get_platform_arch() -> str:
     raise RuntimeError(f"Unsupported platform: System={system}, Machine={machine}")
 
 
-# ---------------------------------------------------------------------------
-# Machine identity
-# Privacy: the raw OS machine-id is never sent over the wire. Only its
-# SHA-256 hex-digest is transmitted so the control plane can recognise the
-# same physical machine without holding a value that could fingerprint it.
-#
-# Resolution order:
-#   1. Linux   : /etc/machine-id
-#   2. Windows : HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
-#   3. macOS   : IOPlatformUUID via ioreg
-#   4. Fallback: persistent UUID in <CWD>/configs/.machine_id
-# ---------------------------------------------------------------------------
+# Machine identity — only the SHA-256 of the raw OS machine-id is sent over
+# the wire, never the id itself. Resolution order: Linux /etc/machine-id →
+# Windows HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid → macOS ioreg
+# IOPlatformUUID → fallback UUID persisted in <CWD>/configs/.machine_id.
 
 # Fallback file lives next to session state so a `reset --hard` clears it.
 _FALLBACK_FILE = Path("configs") / ".machine_id"
@@ -132,7 +124,7 @@ def _read_linux() -> str:
 
 
 def _read_windows() -> str:
-    import winreg  # stdlib on Windows; guarded by the platform check in _read_raw_id
+    import winreg
 
     key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
     try:

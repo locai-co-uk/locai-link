@@ -3,7 +3,7 @@
 
 """Typed command schema — the control-plane → agent contract."""
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
@@ -121,19 +121,17 @@ class UpdateAgentConfigCommand(_CommandBase):
 
 
 Command = Annotated[
-    Union[
-        DeployModelCommand,
-        StartModelCommand,
-        StartModelInferenceCommand,
-        StopModelInferenceCommand,
-        StartServingCommand,
-        StopServingCommand,
-        UninstallModelCommand,
-        UpdatePipelineCommand,
-        StatusCommand,
-        UpdateAgentCommand,
-        UpdateAgentConfigCommand,
-    ],
+    DeployModelCommand
+    | StartModelCommand
+    | StartModelInferenceCommand
+    | StopModelInferenceCommand
+    | StartServingCommand
+    | StopServingCommand
+    | UninstallModelCommand
+    | UpdatePipelineCommand
+    | StatusCommand
+    | UpdateAgentCommand
+    | UpdateAgentConfigCommand,
     Field(discriminator="type"),
 ]
 
@@ -141,7 +139,7 @@ Command = Annotated[
 _COMMAND_ADAPTER: TypeAdapter[Command] = TypeAdapter(Command)
 
 
-def parse_command(raw: dict) -> Command:
+def parse_command(raw: dict[str, Any]) -> Command:
     """Validate a raw command dict against the `Command` union.
 
     Any shape or type mismatch raises `pydantic.ValidationError` with a

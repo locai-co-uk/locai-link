@@ -50,14 +50,23 @@ import tempfile
 import time
 import tomllib
 import zipfile
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Protocol
 
 import requests
 
 from link.config.models import AgentConfig
 
 logger = logging.getLogger(__name__)
+
+
+class _HttpGetter(Protocol):
+    """Minimal .get() surface — accepts a real ``requests.Session``, the
+    ``requests`` module itself, or a test stub. All three are called with
+    the same keyword arguments."""
+
+    def get(self, url: str, **kwargs: Any) -> Any: ...
 
 
 # ===========================================================================
@@ -349,7 +358,7 @@ class Manifest:
     version: str  # e.g. "1.0.15"
     git_sha: str
     built_at: str
-    plugins: list[dict]
+    plugins: list[dict[str, Any]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -492,7 +501,7 @@ def latest_release_for(
     *,
     repo: str = DEFAULT_RELEASES_REPO,
     api_base: str = "https://api.github.com",
-    session: requests.Session | None = None,
+    session: _HttpGetter | None = None,
 ) -> ReleaseInfo:
     """Find the latest release that publishes an asset matching ``asset_stem``.
 
@@ -514,7 +523,7 @@ def latest_release_for(
         raise ReleaseNotFound(f"Release at {url} has no tag_name")
     version = tag.lstrip("v")
 
-    assets: Iterable[dict] = payload.get("assets") or []
+    assets: Iterable[dict[str, Any]] = payload.get("assets") or []
     asset_match, sha_match = _pick_assets(assets, asset_stem, version)
     if asset_match is None:
         raise ReleaseNotFound(f"No asset matching '{asset_stem}-v{version}.(tar.gz|zip)' on release {tag}")
@@ -527,11 +536,13 @@ def latest_release_for(
     )
 
 
-def _pick_assets(assets: Iterable[dict], stem: str, version: str) -> tuple[dict | None, dict | None]:
+def _pick_assets(
+    assets: Iterable[dict[str, Any]], stem: str, version: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     bundle_re = re.compile(rf"^{re.escape(stem)}-v{re.escape(version)}\.(tar\.gz|zip)$")
     sha_re = re.compile(rf"^{re.escape(stem)}-v{re.escape(version)}\.(tar\.gz|zip)\.sha256$")
-    bundle_match: dict | None = None
-    sha_match: dict | None = None
+    bundle_match: dict[str, Any] | None = None
+    sha_match: dict[str, Any] | None = None
     for a in assets:
         name = a.get("name") or ""
         if bundle_re.match(name) and bundle_match is None:
@@ -551,7 +562,7 @@ def download(
     dest: Path,
     *,
     progress: ProgressFn | None = None,
-    session: requests.Session | None = None,
+    session: _HttpGetter | None = None,
     max_retries: int = 3,
 ) -> Path:
     """Stream ``url`` into ``dest`` via a ``.partial`` sidecar; rename on completion.
@@ -606,7 +617,7 @@ def verify(
     expected_sha256: str | None = None,
     expected_sha256_url: str | None = None,
     platform: str | None = None,
-    session: requests.Session | None = None,
+    session: _HttpGetter | None = None,
 ) -> None:
     """Verify a downloaded bundle. Raises ``VerifyFailed`` on mismatch.
 
@@ -662,7 +673,7 @@ def verify_extracted_macos(extracted_dir: Path) -> None:
         raise VerifyFailed(f"codesign rejected {runtime}: {exc.stderr.decode(errors='replace')[:400]}") from exc
 
 
-def _fetch_sha256(url: str, *, session: requests.Session | None = None) -> str:
+def _fetch_sha256(url: str, *, session: _HttpGetter | None = None) -> str:
     http = session or requests
     try:
         resp = http.get(url, timeout=_GH_API_TIMEOUT)
@@ -789,8 +800,8 @@ def _resolve_current(root: Path) -> Path | None:
     return _resolve_pointer(root, CURRENT_LINK, CURRENT_POINTER_FILE)
 
 
-def _resolve_previous(root: Path) -> Path | None:
-    return _resolve_pointer(root, PREVIOUS_LINK, PREVIOUS_POINTER_FILE)
+# def _resolve_previous(root: Path) -> Path | None:
+#     return _resolve_pointer(root, PREVIOUS_LINK, PREVIOUS_POINTER_FILE)
 
 
 def _resolve_pointer(root: Path, link_name: str, file_name: str) -> Path | None:

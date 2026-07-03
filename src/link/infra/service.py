@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
 
+from typing_extensions import override
+
 logger = logging.getLogger(__name__)
 
 # Default reverse-DNS prefix used for service labels. The new
@@ -100,12 +102,15 @@ class LinuxBackend(ServiceBackend):
         super().__init__(*args, **kwargs)
         self.unit_path = self.home / ".config/systemd/user" / f"{self.service_name}.service"
 
+    @override
     def is_installed(self) -> bool:
         return self.unit_path.exists()
 
+    @override
     def is_running(self) -> bool:
         return _run_quiet(["systemctl", "--user", "is-active", self.service_name])
 
+    @override
     def install(self, start_now: bool):
         self.prepare_logs()
         self.unit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,12 +144,15 @@ WantedBy=default.target
         if start_now:
             self.start()
 
+    @override
     def start(self):
         _run_cmd(f"systemctl --user start {self.service_name}")
 
+    @override
     def stop(self):
         _run_cmd(f"systemctl --user stop {self.service_name}", ignore_errors=True)
 
+    @override
     def uninstall(self):
         if self.is_installed():
             self.stop()
@@ -178,9 +186,11 @@ class MacOSBackend(ServiceBackend):
         )
         self.plist_path = launchagents_root / f"{self.label}.plist"
 
+    @override
     def is_installed(self) -> bool:
         return self.plist_path.exists()
 
+    @override
     def is_running(self) -> bool:
         # `launchctl list` prints one row per loaded label ("PID STATUS
         # LABEL"). Match in Python instead of shelling out to grep —
@@ -196,6 +206,7 @@ class MacOSBackend(ServiceBackend):
                 return True
         return False
 
+    @override
     def install(self, start_now: bool):
         self.prepare_logs()
         parts = self.command.split()
@@ -233,12 +244,15 @@ class MacOSBackend(ServiceBackend):
         if start_now:
             self.start()
 
+    @override
     def start(self):
         _run_cmd(f"launchctl load {self.plist_path}")
 
+    @override
     def stop(self):
         _run_cmd(f"launchctl unload {self.plist_path}", ignore_errors=True)
 
+    @override
     def uninstall(self):
         if self.is_installed():
             self.stop()
@@ -249,14 +263,17 @@ class MacOSBackend(ServiceBackend):
 class WindowsBackend(ServiceBackend):
     """Windows Service Implementation (Requires Admin)."""
 
+    @override
     def is_installed(self) -> bool:
         return _run_quiet(["sc", "query", self.service_name])
 
+    @override
     def is_running(self) -> bool:
         # 'sc query' returns 0 if service exists, but we need to check STATE
         res = subprocess.run(["sc", "query", self.service_name], capture_output=True, text=True)
         return "RUNNING" in res.stdout
 
+    @override
     def install(self, start_now: bool):
         self.prepare_logs()
         if not _is_admin():
@@ -302,14 +319,17 @@ class WindowsBackend(ServiceBackend):
         except OSError as e:
             logger.warning(f"Could not set service environment for {self.service_name}: {e}")
 
+    @override
     def start(self):
         if _is_admin():
             _run_cmd(f"sc start {self.service_name}")
 
+    @override
     def stop(self):
         if _is_admin():
             _run_cmd(f"sc stop {self.service_name}", ignore_errors=True)
 
+    @override
     def uninstall(self):
         if _is_admin():
             self.stop()
@@ -396,14 +416,20 @@ def ServiceManager(
         NotImplementedError: If the OS is not supported.
     """
     system = platform.system().lower()
-    kwargs = {"scope": scope, "label_prefix": label_prefix}
-
+    # Pass scope/label_prefix as explicit kwargs so type checkers keep
+    # the `ServiceScope` Literal — a dict widens it to str.
     if system == "linux":
-        return LinuxBackend(service_name, command, description, working_dir, env_vars, **kwargs)
+        return LinuxBackend(
+            service_name, command, description, working_dir, env_vars, scope=scope, label_prefix=label_prefix
+        )
     elif system == "darwin":
-        return MacOSBackend(service_name, command, description, working_dir, env_vars, **kwargs)
+        return MacOSBackend(
+            service_name, command, description, working_dir, env_vars, scope=scope, label_prefix=label_prefix
+        )
     elif system == "windows":
-        return WindowsBackend(service_name, command, description, working_dir, env_vars, **kwargs)
+        return WindowsBackend(
+            service_name, command, description, working_dir, env_vars, scope=scope, label_prefix=label_prefix
+        )
     else:
         raise NotImplementedError(f"OS '{system}' is not supported.")
 
@@ -411,11 +437,11 @@ def ServiceManager(
 def install_all(services: list[ServiceBackend], start_now: bool) -> None:
     """Install several services in lockstep.
 
-    Used by the Setup Assistant's Finish step to register the agent and
-    menu-bar LaunchAgents together — both come up under the same
-    "Run at login" toggle. If any install raises, every service
-    already installed in this batch is rolled back so the caller doesn't
-    end up with half a system registered.
+    Batch-installer for flows that need the agent and any GUI-app
+    LaunchAgents to come up together under one "Run at login" toggle.
+    If any install raises, every service already installed in this
+    batch is rolled back so the caller doesn't end up with half a
+    system registered.
 
     Args:
         services: ServiceBackend instances to register. Each is

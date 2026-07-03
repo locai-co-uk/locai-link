@@ -1,0 +1,62 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DetachHead/basedpyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+
+  "extraPaths": ["src", "bundling"],
+  "include": ["src", "bundling", "tests", "plugins"],
+  "pythonPlatform": "All",
+  "exclude": ["**/node_modules", "**/__pycache__", "**/.venv", "**/target", "bundling/_artifacts", "bench"],
+  "executionEnvironments": [
+    {
+      "root": "plugins/audio_transcriber",
+      "extraPaths": ["plugins/audio_transcriber", "src", "bundling"],
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "plugins/audio_classifier",
+      "extraPaths": ["plugins/audio_classifier", "src", "bundling"],
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "plugins/image_classifier",
+      "extraPaths": ["plugins/image_classifier", "src", "bundling"],
+      "reportMissingImports": "none"
+    },
+    {
+      "root": "plugins/language_model",
+      "extraPaths": ["plugins/language_model", "src", "bundling"],
+      "reportMissingImports": "none"
+    }
+  ],
+
+  "reportUnknownMemberType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownLambdaType": "none",
+  "reportMissingParameterType": "none",
+  "reportMissingTypeStubs": "none",
+  "reportAny": "none",
+  "reportExplicitAny": "none",
+  "reportUnannotatedClassAttribute": "none",
+  "reportUnusedCallResult": "none",
+  "reportImplicitOverride": "warning",
+  "reportImplicitStringConcatenation": "none",
+  "reportImplicitAbstractClass": "error",
+  "reportPrivateUsage": "none",
+  "reportUnusedParameter": "none",
+  "reportUnusedFunction": "warning",
+  "reportUntypedFunctionDecorator": "warning",
+  "reportUntypedClassDecorator": "warning",
+  "reportUntypedBaseClass": "warning",
+  "reportUntypedNamedTuple": "warning",
+  "reportCallInDefaultInitializer": "error",
+  "reportPrivateLocalImportUsage": "none",
+  "reportUninitializedInstanceVariable": "none",
+  "reportUnnecessaryIsInstance": "warning",
+  "reportUnnecessaryComparison": "warning",
+  "reportUnreachable": "warning",
+  "reportImportCycles": "none",
+  "reportUnusedImport": "warning",
+  "reportUnusedVariable": "warning",
+  "reportDeprecated": "warning"
+}
