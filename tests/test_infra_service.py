@@ -226,7 +226,7 @@ def test_install_all_registers_two_services_in_lockstep(mock_mac_env, tmp_path):
     b = ServiceManager(
         service_name="menubar",
         command="/Applications/Locai\\ Link.app/Contents/MacOS/menubar",
-        description="Menu-bar",
+        description="GUI",
         label_prefix="uk.co.locai.link",
     )
     assert isinstance(a, MacOSBackend)
@@ -249,7 +249,7 @@ def test_install_all_rolls_back_on_failure(mock_mac_env, tmp_path, mocker):
     b = ServiceManager(
         service_name="menubar",
         command="/Applications/Locai/menubar",
-        description="Menu-bar",
+        description="GUI",
         label_prefix="uk.co.locai.link",
     )
     assert isinstance(a, MacOSBackend)

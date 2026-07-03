@@ -3,7 +3,35 @@
 
 """Tests for `link.main.reset` — specifically its traversal excludes."""
 
+import pytest
+
 from link.main import reset
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_reset_side_effects(  # pyright: ignore[reportUnusedFunction]
+    monkeypatch,
+):
+    """`reset()` calls `stop()` and `ServiceManager(...).uninstall()`
+    before its filesystem cleanup — both are wrapped in try/except and
+    happen to no-op in the test env today, but leaving them un-mocked
+    means a future edit to reset() could silently reach into the host
+    (systemd, launchctl, Windows Services). Stub them so these tests
+    only exercise the filesystem-walk logic they're actually asserting
+    on."""
+    monkeypatch.setattr("link.main.stop", lambda *a, **kw: None)
+
+    class _NoopSM:
+        def __init__(self, *_a, **_kw) -> None:
+            pass
+
+        def uninstall(self, *_a, **_kw) -> None:
+            pass
+
+        def is_running(self, *_a, **_kw) -> bool:
+            return False
+
+    monkeypatch.setattr("link.main.ServiceManager", _NoopSM)
 
 
 def test_reset_does_not_descend_into_node_modules(tmp_path, monkeypatch):

@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Tiny loopback HTTP server exposing the agent's live state.
-
-Polled by the menu-bar companion app every few seconds to drive the
-green/grey indicator and report which model (if any) is being served.
-
-Deliberately separate from `ServingProxy`:
-    * `ServingProxy` only exists while a model is being served — it
-      can't answer "is the agent up" when no model is loaded.
-    * The agent state machine and the proxy live in different layers
-      (agent runtime vs. language_model plugin); coupling them would
-      drag plugin state into the runtime or vice versa.
-
-Bound to ``127.0.0.1`` only. The companion app runs as the same user
-and reaches the loopback interface; nothing off-host has any business
-hitting this endpoint.
-"""
+"""Tiny loopback HTTP server exposing the agent's live state."""
 
 from __future__ import annotations
 
@@ -86,6 +71,21 @@ class HealthState:
             return []
         return self._models_provider()
 
+    def has_command_handler(self) -> bool:
+        """Whether a runtime command handler is wired. `False` in test
+        harnesses that construct HealthState without dispatch."""
+        return self._command_handler is not None
+
+    def dispatch(self, command: dict[str, Any]) -> None:
+        """Route ``command`` to the wired runtime handler.
+
+        Precondition: `has_command_handler()` is True. Callers gate on
+        it so the 503 "not wired" vs 500 "handler raised" distinction
+        in `do_POST` stays clean.
+        """
+        assert self._command_handler is not None, "dispatch called without a wired handler"
+        self._command_handler(command)
+
     def set_serving(self, model_id: str | None) -> None:
         """Mark the agent as serving ``model_id``, or idle when ``None``."""
         if model_id is None:
@@ -117,7 +117,8 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
             try:
                 self.wfile.write(payload)
             except (BrokenPipeError, ConnectionResetError):
-                # Companion polled and closed its socket — fine, ignore.
+                # Client closed the socket mid-write (common for a poller
+                # that reads the response and moves on) — ignore.
                 pass
 
         def do_POST(self) -> None:  # noqa: N802
@@ -125,16 +126,16 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
             if not match:
                 self.send_error(404, "Not Found")
                 return
-            if state._command_handler is None:
+            if not state.has_command_handler():
                 self.send_error(503, "Command handler not wired")
                 return
             pipeline_id, action = match.group(1), match.group(2)
             # We read the pipeline's current args from the models
             # snapshot instead of accepting overrides in the POST
-            # body. Rationale: the companion's toggle intent is
+            # body. Rationale: the intent of a loopback toggle is
             # "resume serving this thing with its existing config" —
             # a port/host change is a structural config edit that
-            # belongs in Control, not a menu-bar click.
+            # belongs in Control, not a one-shot local POST.
             model = next((m for m in state.models() if m["id"] == pipeline_id), None)
             if model is None:
                 self.send_error(404, f"Unknown pipeline: {pipeline_id}")
@@ -143,7 +144,7 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
             command: dict[str, Any]
             if action == "serve":
                 command = {
-                    "id": f"companion-{uuid.uuid4().hex[:8]}",
+                    "id": f"loopback-{uuid.uuid4().hex[:8]}",
                     "type": "START_SERVING",
                     "pipeline_id": pipeline_id,
                     # Fall back to the StartServingCommand defaults if
@@ -155,13 +156,13 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 }
             else:  # stop-serving
                 command = {
-                    "id": f"companion-{uuid.uuid4().hex[:8]}",
+                    "id": f"loopback-{uuid.uuid4().hex[:8]}",
                     "type": "STOP_SERVING",
                     "pipeline_id": pipeline_id,
                 }
 
             try:
-                state._command_handler(command)
+                state.dispatch(command)
             except Exception as exc:
                 logger.warning(f"Command handler raised on POST {self.path}: {exc}")
                 self.send_error(500, "Command dispatch failed")
@@ -175,10 +176,12 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
 
         @override
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
             # /healthz and /models are polled every few seconds — the
-            # default access log would drown out real events. Errors
-            # still surface via log_error (which we don't override).
+            # default access log would drown out real events. Only
+            # log_request (successful access lines) is silenced; errors
+            # still flow through log_error → log_message → stderr, so
+            # send_error(404/500/...) responses are still surfaced.
             pass
 
     return HealthHandler

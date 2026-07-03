@@ -70,11 +70,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// system browser handles it — the companion never renders the
 /// Control SPA itself.
 ///
-/// TODO(env-config): hardcoded to the dev deployment for now — this
-/// is where day-to-day iteration lives. When staging/prod need to be
+/// TODO(env-config): hardcoded to prod. When dev/staging need to be
 /// selectable at build time, replace with a `TAURI_ENV`- or
-/// `CARGO_LOCAI_ENV`-driven `env!()` lookup and a small match. The
-/// prod URL is `https://control.locai.co.uk`.
+/// `CARGO_LOCAI_ENV`-driven `env!()` lookup and a small match. Dev
+/// URL is `https://dev.control.locai.co.uk`.
 const CONTROL_URL: &str = "https://control.locai.co.uk";
 
 /// Menu item IDs. Kept as const so the string is defined in exactly
@@ -135,6 +134,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // macOS: mark this as an accessory (menu-bar) app so it
+            // doesn't take a Dock slot, doesn't appear in Cmd-Tab, and
+            // doesn't steal focus at launch. `visible: false` +
+            // `skipTaskbar: true` in tauri.conf.json aren't enough on
+            // macOS — the AppKit activation policy is the load-bearing
+            // switch.
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let (menu, status_item) = build_tray_menu(app.handle(), &[], STATUS_INITIAL)?;
 
             let icon = Image::from_bytes(TRAY_ICON_UP)?;

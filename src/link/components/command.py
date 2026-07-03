@@ -47,7 +47,10 @@ class AgentCommand(Sink):
 
     def _dispatch(self, cmd: dict[str, Any]) -> bool:
         cmd_id = cmd.get("id")
-        if cmd_id is not None and cmd_id in self._seen:
+        # Truthy check on both branches — matches mark_seen() so an
+        # empty-string id (which isn't a useful dedup key anyway)
+        # doesn't get treated differently by the two entry points.
+        if cmd_id and cmd_id in self._seen:
             return True  # duplicate, silently ack
         try:
             self.callback(cmd)
@@ -55,7 +58,7 @@ class AgentCommand(Sink):
             logger.error(f"Command execution failed: {e}")
             # Don't record cmd_id in _seen — a retry should be allowed to try again.
             return False
-        if cmd_id is not None:
+        if cmd_id:
             self._seen.append(cmd_id)
         return True
 

@@ -437,11 +437,11 @@ def ServiceManager(
 def install_all(services: list[ServiceBackend], start_now: bool) -> None:
     """Install several services in lockstep.
 
-    Used by the Setup Assistant's Finish step to register the agent and
-    menu-bar LaunchAgents together — both come up under the same
-    "Run at login" toggle. If any install raises, every service
-    already installed in this batch is rolled back so the caller doesn't
-    end up with half a system registered.
+    Batch-installer for flows that need the agent and any GUI-app
+    LaunchAgents to come up together under one "Run at login" toggle.
+    If any install raises, every service already installed in this
+    batch is rolled back so the caller doesn't end up with half a
+    system registered.
 
     Args:
         services: ServiceBackend instances to register. Each is

@@ -5,6 +5,7 @@
 //! polling loop and by the Setup Assistant's "did the agent come up"
 //! confirmation on Finish.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -18,13 +19,22 @@ pub const DEFAULT_HEALTH_URL: &str = "http://127.0.0.1:8101/healthz";
 pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:8101/models";
 
 /// Base URL for per-model action endpoints. Combined with
-/// `/{pipeline_id}/{serve,stop-serving}` by [`toggle_serving`].
-pub const DEFAULT_MODEL_ACTION_BASE: &str = "http://127.0.0.1:8101/models";
+/// `/{pipeline_id}/{serve,stop-serving}` by [`toggle_serving`]. Same
+/// string as [`DEFAULT_MODELS_URL`] — kept as a distinct name so call
+/// sites read as intent (list vs act on a model) rather than
+/// coincidence.
+pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 
 /// How long to wait for the agent to respond before treating it as Down.
 /// Short — the menu-bar app polls on a UI cadence, and any real /healthz
 /// call answers in milliseconds because it just returns a struct field.
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// Shared HTTP client so back-to-back `/healthz` and `/models` polls
+/// reuse the same connection pool. `ureq::Agent` is `Send + Sync` and
+/// cheap to clone; building a new one per call throws away keep-alive.
+static HTTP_AGENT: LazyLock<ureq::Agent> =
+    LazyLock::new(|| ureq::AgentBuilder::new().timeout(HEALTH_TIMEOUT).build());
 
 /// Snapshot of the local agent's health, as reported by `/healthz`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +102,7 @@ pub enum ModelsStatus {
 /// discipline as [`agent_health`] — nothing bubbles as `Result`; the
 /// caller (polling loop) treats all failure modes the same way.
 pub fn list_models(url: &str) -> ModelsStatus {
-    let agent = ureq::AgentBuilder::new().timeout(HEALTH_TIMEOUT).build();
-    match agent.get(url).call() {
+    match HTTP_AGENT.get(url).call() {
         Ok(resp) => match resp.into_json::<ModelsResponse>() {
             Ok(body) => ModelsStatus::Ok(body.models),
             Err(e) => ModelsStatus::Malformed(e.to_string()),
@@ -130,11 +139,10 @@ impl ServingAction {
 /// [`DEFAULT_MODEL_ACTION_BASE`] as the base in production.
 pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) -> Result<(), String> {
     let url = format!("{base_url}/{pipeline_id}/{}", action.path());
-    let agent = ureq::AgentBuilder::new().timeout(HEALTH_TIMEOUT).build();
     // POST with an empty body — the endpoint doesn't take one; the
     // pipeline's current args (port, host, alias) are read server-side
     // from its stored config.
-    match agent.post(&url).send_bytes(&[]) {
+    match HTTP_AGENT.post(&url).send_bytes(&[]) {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
         Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
         Err(e) => Err(format!("POST {url} failed: {e}")),
@@ -149,8 +157,7 @@ pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) 
 /// — never panics or bubbles up an error type, because the polling
 /// loop on the tray icon just wants a snapshot.
 pub fn agent_health(url: &str) -> HealthStatus {
-    let agent = ureq::AgentBuilder::new().timeout(HEALTH_TIMEOUT).build();
-    match agent.get(url).call() {
+    match HTTP_AGENT.get(url).call() {
         Ok(resp) => match resp.into_json::<AgentHealth>() {
             Ok(payload) => HealthStatus::Up(payload),
             Err(e) => HealthStatus::Malformed(e.to_string()),

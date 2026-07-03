@@ -5,7 +5,7 @@
   "identifier": "uk.co.locai.link.companion",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1421",
+    "devUrl": "http://localhost:1422",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },

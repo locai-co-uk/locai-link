@@ -392,7 +392,7 @@ def test_read_boot_config_present(tmp_path):
     (tmp_path / updater.BOOT_NAME).write_text(
         json.dumps(
             {
-                "host_app": "Meetily",
+                "host_app": "host-app",
                 "plugin_set": ["llm"],
                 "channel": "stable",
                 "asset_repo": "locai-co-uk/locai-link",
@@ -401,7 +401,7 @@ def test_read_boot_config_present(tmp_path):
     )
     cfg = updater.read_boot_config(tmp_path)
     assert cfg is not None
-    assert cfg.host_app == "Meetily"
+    assert cfg.host_app == "host-app"
 
 
 def test_read_boot_config_absent(tmp_path):

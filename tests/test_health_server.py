@@ -165,19 +165,36 @@ def test_models_calls_provider_on_every_request():
 # --- POST /models/{id}/serve and /stop-serving -------------------------------
 
 
-def _server_with_handlers(models: list[dict[str, Any]]):
-    """Boot a HealthServer with a provider that returns `models` and a
-    dispatch handler that records the last command received."""
+_DEFAULT_HANDLER = object()
+
+
+def _server_with_handlers(
+    models: list[dict[str, Any]],
+    command_handler: Any = _DEFAULT_HANDLER,
+):
+    """Boot a HealthServer with a provider that returns `models` and,
+    by default, a dispatch handler that records commands.
+
+    Pass ``command_handler=None`` to skip wiring a dispatcher (503
+    case), or a callable to inject a specific handler (e.g. one that
+    raises). The third tuple element is the received-commands list —
+    empty when a non-default handler is provided."""
     port = _free_port()
     received: list[dict[str, Any]] = []
 
-    def dispatch(cmd: dict[str, Any]) -> None:
-        received.append(cmd)
+    if command_handler is _DEFAULT_HANDLER:
+
+        def dispatch(cmd: dict[str, Any]) -> None:
+            received.append(cmd)
+
+        wired = dispatch
+    else:
+        wired = command_handler
 
     state = HealthState(
         version="1.0.18-test",
         models_provider=lambda: models,
-        command_handler=dispatch,
+        command_handler=wired,
     )
     srv = HealthServer(state, port=port)
     srv.start()
@@ -211,7 +228,7 @@ def test_post_serve_dispatches_start_serving_command():
     assert cmd["model_display_name"] == "smollm-135m"
     # Every dispatched command carries a unique id so the runtime's
     # dedup doesn't collapse repeated toggles.
-    assert cmd["id"].startswith("companion-")
+    assert cmd["id"].startswith("loopback-")
 
 
 def test_post_stop_serving_dispatches_stop_serving_command():
@@ -275,10 +292,7 @@ def test_post_serve_falls_back_to_defaults_when_config_is_bare():
 def test_post_returns_503_when_no_command_handler():
     """If the runtime hasn't wired a command_handler, the POST path
     must degrade rather than crash — GET /models still works."""
-    port = _free_port()
-    state = HealthState(version="1", models_provider=lambda: [])
-    srv = HealthServer(state, port=port)
-    srv.start()
+    srv, port, _ = _server_with_handlers([], command_handler=None)
     try:
         with pytest.raises(urllib.error.HTTPError) as exc:
             _post_no_body(port, "/models/anything/serve")
@@ -290,18 +304,14 @@ def test_post_returns_503_when_no_command_handler():
 def test_post_500_when_handler_raises():
     """A handler that blows up shouldn't bring the whole server down —
     the POST returns 500 and subsequent requests still work."""
-    port = _free_port()
 
     def bad_dispatch(_cmd: dict[str, Any]) -> None:
         raise RuntimeError("boom")
 
-    state = HealthState(
-        version="1",
-        models_provider=lambda: [{"id": "x", "alias": "x", "port": 8080, "host": "127.0.0.1", "is_serving": False}],
+    srv, port, _ = _server_with_handlers(
+        [{"id": "x", "alias": "x", "port": 8080, "host": "127.0.0.1", "is_serving": False}],
         command_handler=bad_dispatch,
     )
-    srv = HealthServer(state, port=port)
-    srv.start()
     try:
         with pytest.raises(urllib.error.HTTPError) as exc:
             _post_no_body(port, "/models/x/serve")

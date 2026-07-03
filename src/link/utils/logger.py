@@ -225,11 +225,11 @@ class AsyncHandler(logging.Handler):
                 sys.stderr.write(f"Link Logger Error ({route_key}) [drain]: {e}\n")
             self.queue.task_done()
 
-    def _transport_emit(self, target, payload, raw_payload, route_key):
+    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str) -> None:
         pass
 
     @override
-    def close(self):
+    def close(self) -> None:
         self._stop_event.set()
         if self._worker.is_alive():
             self._worker.join(timeout=2.0)
@@ -251,7 +251,7 @@ class AsyncZenohHandler(AsyncHandler):
         super().__init__(templates)
 
     @override
-    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str):
+    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str) -> None:
         """Emits the log payload to Zenoh.
 
         Args:
@@ -291,7 +291,7 @@ class AsyncHTTPHandler(AsyncHandler):
         super().__init__(templates)
 
     @override
-    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str):
+    def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str) -> None:
         """Emits the log payload via HTTP POST/PUT with bounded retry.
 
         Retries timeouts, connection errors, and 5xx responses with exponential
@@ -329,7 +329,7 @@ class CleanFormatter(logging.Formatter):
     """Formatter for machine-readable transports — serialises dict records as JSON."""
 
     @override
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         """Render the record, converting dict messages to JSON strings first."""
         if isinstance(record.msg, dict):
             record.msg = json.dumps(record.msg, default=str)
@@ -342,7 +342,7 @@ class PrettyFormatter(logging.Formatter):
     ICONS = {logging.INFO: "ℹ️", logging.WARNING: "⚠️", logging.ERROR: "⛔️", logging.CRITICAL: "📛"}
 
     @override
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         """Render the record with icon prefix (text) or 📡 emoji (dict payloads)."""
         original_msg = record.msg
         if isinstance(record.msg, dict):

@@ -71,16 +71,17 @@ class AgentRuntime:
         self.update_requested = False
         self.config_restart_requested = False
 
-        # Health server for the menu-bar companion. Daemon thread on
-        # 127.0.0.1:8101; mutated from command dispatch when a serve
-        # starts/stops. Started lazily in run() so unit tests that
-        # construct an AgentRuntime don't accidentally bind the port.
+        # Health server for local clients that need a fresh view of
+        # agent state. Daemon thread on 127.0.0.1:8101; mutated from
+        # command dispatch when a serve starts/stops. Started lazily
+        # in run() so unit tests that construct an AgentRuntime don't
+        # accidentally bind the port.
         # `models_provider` is a callable so /models always reflects
         # the current pipeline set without pushed updates.
-        # `command_handler` is our own `handle_command` — the companion
-        # menu-bar app POSTs START_SERVING / STOP_SERVING commands
-        # through here so the loopback API and the Zenoh command
-        # channel share one dispatch path.
+        # `command_handler` is our own `handle_command` — loopback
+        # callers POST START_SERVING / STOP_SERVING through here so
+        # the local HTTP API and the Zenoh command channel share one
+        # dispatch path.
         self.health_state = HealthState(
             version=resolve_agent_version(),
             models_provider=self._snapshot_models,
@@ -554,30 +555,41 @@ class AgentRuntime:
         `model_path` — the pragmatic marker for LLM / plugin pipelines
         that participate in llama-swap serving. Extend the filter here
         when we onboard other model types (audio transcription, image
-        classification) into the tray menu.
+        classification) into the response.
 
         `is_serving` mirrors the live runtime: the pipeline must be in
         `self.pipelines` (actually running) AND have `mode=serve` on
         its source, because a pipeline can run in inference or serve
-        modes and only the second one is what the companion menu
-        toggles.
+        modes and only the second one is what a loopback toggle acts
+        on.
+
+        Holds `self.lock` for the whole iteration — called from the
+        `/models` HTTP handler thread while start/stop/deploy paths
+        mutate `pipeline_configs` and `pipelines` under the same lock,
+        so a naked iteration races and can raise
+        ``dictionary changed size during iteration``.
+
+        Returns:
+            list[dict[str, Any]]: One entry per servable pipeline with
+                keys ``id``, ``alias``, ``port``, ``host``, ``is_serving``.
         """
         out: list[dict[str, Any]] = []
-        for pid, cfg in self.pipeline_configs.items():
-            args = cfg.source.args or {}
-            if "model_path" not in args:
-                continue
-            active = pid in self.pipelines
-            is_serving = active and args.get("mode") == "serve"
-            out.append(
-                {
-                    "id": pid,
-                    "alias": args.get("alias") or pid,
-                    "port": args.get("port"),
-                    "host": args.get("host", "127.0.0.1"),
-                    "is_serving": is_serving,
-                }
-            )
+        with self.lock:
+            for pid, cfg in self.pipeline_configs.items():
+                args = cfg.source.args or {}
+                if "model_path" not in args:
+                    continue
+                active = pid in self.pipelines
+                is_serving = active and args.get("mode") == "serve"
+                out.append(
+                    {
+                        "id": pid,
+                        "alias": args.get("alias") or pid,
+                        "port": args.get("port"),
+                        "host": args.get("host", "127.0.0.1"),
+                        "is_serving": is_serving,
+                    }
+                )
         return out
 
     def _uninstall_model(
