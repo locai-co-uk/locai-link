@@ -37,104 +37,6 @@ smallest possible frontend footprint.
   backend rather than via a `**kwargs` dict, so type checkers keep the
   `ServiceScope` `Literal` instead of widening it to `str`.
 
-## [1.0.16] - 2026-06-25
-
-Restores serve-state reporting after an unclean shutdown, tightens command
-input validation and the request-path security perimeter, hardens
-`llama-swap` reclaim, and bumps `llama.cpp` to `b9789`.
-
-### Added — Resume status reporting
-
-- `AgentRuntime.run()` now re-announces model state to Control after
-  recovering active pipelines from the session file. Previously a
-  serving (or inference) model auto-resumed on restart would never tell
-  Control it was back up, leaving the UI stuck on "not serving" until
-  the user issued a fresh command. The recovery branch now emits the
-  same `report_model(serving=True, …)` / `report_model(running=True, …)`
-  that the `StartServingCommand` / `StartModelInferenceCommand`
-  handlers emit, gated by `source.args["mode"] == "serve"` and
-  `source.args["model_path"]` so telemetry/poller pipelines stay
-  silent. Three new tests in `tests/test_runtime.py` pin the happy
-  path, the negative case, and the failed-resume safety case.
-
-### Changed — Plugin binaries
-
-- `LLAMA_CPP_RELEASE`: `b9222` → `b9789`. Windows CUDA-13 prebuilt tag
-  follows the upstream rename to `cuda-13.3` (was `cuda-13.1`);
-  `cuda-12.4` branch unchanged. macOS/Linux URL patterns unchanged.
-
-### Fixed — Security & input validation
-
-- `UninstallModelCommand`: `filename_on_server` and `file_extension`
-  validated as plain basenames before they flow into a filesystem
-  delete. Same basename check on `model_name` in `DeployModelCommand`.
-  Closes a path-traversal vector when malformed input would have
-  composed the artifact path.
-- `DeployModelCommand` / `UpdatePipelineCommand`: reject payloads whose
-  `pipeline_id` doesn't match `config.id`. Previously the agent would
-  silently persist under one key while restarts/lookups used the other.
-- `ValidationError` detail no longer echoes through `report_command`.
-  A generic "Invalid command payload" goes to telemetry; the full
-  pydantic repr (which can include rejected field values) stays in
-  local logs only.
-- `serving_proxy.py`: new `_sanitize_header_value` helper used inside
-  `_resolve_echo_origin` strips CR/LF from incoming `Origin` headers
-  at the input boundary. The allowlist was already the load-bearing
-  defense; this rules out HTTP response splitting by construction.
-- `state.py`: `_tighten_permissions` runs **before** the
-  version-equality check, so a session file with a stale schema
-  doesn't keep loose perms while users resolve the schema drift.
-- `infra/utils.py`: `_read_raw_id` rejects empty/whitespace results
-  from native machine-id readers. An empty `/etc/machine-id` would
-  otherwise hash identically across devices, collapsing enrolment
-  dedup.
-
-### Fixed — llama-swap reclaim
-
-- `_looks_like_our_llama_swap` now also matches the cmdline against
-  *this* manager's resolved config path or listen address. A stale
-  pidfile whose PID had been reused by an unrelated llama-swap on a
-  different port no longer gets killed. The test fixture was updated
-  to use the resolved config path the production codepath actually
-  passes to `Popen`.
-- `SwapManager.is_healthy()` returns `False` when `_proc is None`,
-  closing the hole where another process bound to the same loopback
-  port could have tricked this manager into reporting healthy.
-- New `SwapManager.remove_telemetry_callback()`; `LanguageModel.stop()`
-  unregisters its callback before `remove_model`, plugging the
-  fanout-to-dead-adapter leak.
-
-### Fixed — Robustness
-
-- `serving_proxy.py` SSE parser accepts both `\n\n` and `\r\n\r\n`
-  event delimiters (the spec allows either; llama-server emits LF,
-  other OpenAI-compatible servers emit CRLF).
-- `ServingProxy.start()` raises on port-in-use instead of returning
-  silently. Readiness probes against the upstream port would otherwise
-  pass even with no public proxy actually listening.
-- `LanguageModel` queue insertion uses `put_nowait` + `Full` rather
-  than the racy `full()` → `put()` pair.
-- `AgentCommand` dedup records `cmd.id` only after the callback
-  succeeds. Failed callbacks no longer poison the dedup window;
-  legitimate retries can proceed.
-
-### Fixed — Reproducibility
-
-- `bundling/manifest.py`: `plugins[]` in `manifest.json` is now sorted
-  by the canonical `PLUGIN_ORDER` (matching the asset-name builder),
-  so two CI runs that pass `--plugins` in different orders produce
-  byte-identical manifests.
-- `.github/workflows/release.yml`: workflow-level `contents: write`
-  removed; per-job grants only (release-create + asset-attach).
-
-### Changed — Docs
-
-- `bundling/README.md`: stale `v1.0.14` examples replaced with
-  `v<version>` placeholders.
-- `plugins/language_model/README.md`: port-table row for `8100` now
-  reads "configured host; default `127.0.0.1`" instead of the
-  misleading "all interfaces".
-
 ## [1.0.17] - 2026-07-01
 
 Lays down the over-the-air update path for bundled installs, adds a
@@ -356,6 +258,104 @@ bundle itself before anything inside the bundle exists.
 - **Bundled update telemetry to backend.** `bootstrap_*` and
   `update_*` events are specified in the design doc but not yet
   emitted; they ride the existing event publisher when wired up.
+
+## [1.0.16] - 2026-06-25
+
+Restores serve-state reporting after an unclean shutdown, tightens command
+input validation and the request-path security perimeter, hardens
+`llama-swap` reclaim, and bumps `llama.cpp` to `b9789`.
+
+### Added — Resume status reporting
+
+- `AgentRuntime.run()` now re-announces model state to Control after
+  recovering active pipelines from the session file. Previously a
+  serving (or inference) model auto-resumed on restart would never tell
+  Control it was back up, leaving the UI stuck on "not serving" until
+  the user issued a fresh command. The recovery branch now emits the
+  same `report_model(serving=True, …)` / `report_model(running=True, …)`
+  that the `StartServingCommand` / `StartModelInferenceCommand`
+  handlers emit, gated by `source.args["mode"] == "serve"` and
+  `source.args["model_path"]` so telemetry/poller pipelines stay
+  silent. Three new tests in `tests/test_runtime.py` pin the happy
+  path, the negative case, and the failed-resume safety case.
+
+### Changed — Plugin binaries
+
+- `LLAMA_CPP_RELEASE`: `b9222` → `b9789`. Windows CUDA-13 prebuilt tag
+  follows the upstream rename to `cuda-13.3` (was `cuda-13.1`);
+  `cuda-12.4` branch unchanged. macOS/Linux URL patterns unchanged.
+
+### Fixed — Security & input validation
+
+- `UninstallModelCommand`: `filename_on_server` and `file_extension`
+  validated as plain basenames before they flow into a filesystem
+  delete. Same basename check on `model_name` in `DeployModelCommand`.
+  Closes a path-traversal vector when malformed input would have
+  composed the artifact path.
+- `DeployModelCommand` / `UpdatePipelineCommand`: reject payloads whose
+  `pipeline_id` doesn't match `config.id`. Previously the agent would
+  silently persist under one key while restarts/lookups used the other.
+- `ValidationError` detail no longer echoes through `report_command`.
+  A generic "Invalid command payload" goes to telemetry; the full
+  pydantic repr (which can include rejected field values) stays in
+  local logs only.
+- `serving_proxy.py`: new `_sanitize_header_value` helper used inside
+  `_resolve_echo_origin` strips CR/LF from incoming `Origin` headers
+  at the input boundary. The allowlist was already the load-bearing
+  defense; this rules out HTTP response splitting by construction.
+- `state.py`: `_tighten_permissions` runs **before** the
+  version-equality check, so a session file with a stale schema
+  doesn't keep loose perms while users resolve the schema drift.
+- `infra/utils.py`: `_read_raw_id` rejects empty/whitespace results
+  from native machine-id readers. An empty `/etc/machine-id` would
+  otherwise hash identically across devices, collapsing enrolment
+  dedup.
+
+### Fixed — llama-swap reclaim
+
+- `_looks_like_our_llama_swap` now also matches the cmdline against
+  *this* manager's resolved config path or listen address. A stale
+  pidfile whose PID had been reused by an unrelated llama-swap on a
+  different port no longer gets killed. The test fixture was updated
+  to use the resolved config path the production codepath actually
+  passes to `Popen`.
+- `SwapManager.is_healthy()` returns `False` when `_proc is None`,
+  closing the hole where another process bound to the same loopback
+  port could have tricked this manager into reporting healthy.
+- New `SwapManager.remove_telemetry_callback()`; `LanguageModel.stop()`
+  unregisters its callback before `remove_model`, plugging the
+  fanout-to-dead-adapter leak.
+
+### Fixed — Robustness
+
+- `serving_proxy.py` SSE parser accepts both `\n\n` and `\r\n\r\n`
+  event delimiters (the spec allows either; llama-server emits LF,
+  other OpenAI-compatible servers emit CRLF).
+- `ServingProxy.start()` raises on port-in-use instead of returning
+  silently. Readiness probes against the upstream port would otherwise
+  pass even with no public proxy actually listening.
+- `LanguageModel` queue insertion uses `put_nowait` + `Full` rather
+  than the racy `full()` → `put()` pair.
+- `AgentCommand` dedup records `cmd.id` only after the callback
+  succeeds. Failed callbacks no longer poison the dedup window;
+  legitimate retries can proceed.
+
+### Fixed — Reproducibility
+
+- `bundling/manifest.py`: `plugins[]` in `manifest.json` is now sorted
+  by the canonical `PLUGIN_ORDER` (matching the asset-name builder),
+  so two CI runs that pass `--plugins` in different orders produce
+  byte-identical manifests.
+- `.github/workflows/release.yml`: workflow-level `contents: write`
+  removed; per-job grants only (release-create + asset-attach).
+
+### Changed — Docs
+
+- `bundling/README.md`: stale `v1.0.14` examples replaced with
+  `v<version>` placeholders.
+- `plugins/language_model/README.md`: port-table row for `8100` now
+  reads "configured host; default `127.0.0.1`" instead of the
+  misleading "all interfaces".
 
 ## [1.0.15] - 2026-06-18
 
