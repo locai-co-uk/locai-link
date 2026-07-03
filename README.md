@@ -134,7 +134,7 @@ flowchart TB
             Zenoh[Zenoh Client]
             Service[Service Manager]
             Provision[Provisioner]
-            Health[Health Server<br/>127.0.0.1:8101]
+            Health[Health Server]
             Updater[Updater / OTA]
         end
 
