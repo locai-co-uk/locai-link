@@ -242,6 +242,10 @@ jobs:
   attach:
     name: Attach assets to release
     needs: [release, bundle]
+    # Run even if one bundle matrix leg failed — the surviving legs
+    # still produced usable artifacts and shouldn't be held hostage.
+    # `release` still has to succeed (no tag = nothing to attach to).
+    if: always() && needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -255,7 +259,7 @@ jobs:
 
       - name: List collected assets
         shell: bash
-        run: ls -lah release-assets/
+        run: ls -lah release-assets/ 2>/dev/null || echo "(no assets collected — all bundle legs failed)"
 
       - name: Attach bundles to release
         uses: softprops/action-gh-release@v2
@@ -265,4 +269,7 @@ jobs:
             release-assets/*.tar.gz
             release-assets/*.zip
             release-assets/*.sha256
-          fail_on_unmatched_files: true
+          # Don't abort the whole release when one platform's leg
+          # failed to produce its artifact; the other platforms are
+          # still worth publishing.
+          fail_on_unmatched_files: false
