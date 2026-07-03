@@ -454,8 +454,12 @@ def install_all(services: list[ServiceBackend], start_now: bool) -> None:
     installed: list[ServiceBackend] = []
     try:
         for svc in services:
-            svc.install(start_now=start_now)
+            # Track BEFORE install so a mid-install failure (plist
+            # written but not loaded, etc.) still gets rolled back.
+            # ``uninstall`` is idempotent — safe on a service that
+            # never fully installed.
             installed.append(svc)
+            svc.install(start_now=start_now)
     except Exception:
         for svc in installed:
             try:

@@ -10,6 +10,7 @@ import logging
 import re
 import threading
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,9 +100,44 @@ class HealthState:
 _MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving)$")
 
 
+_LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
+
+
 def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
     class HealthHandler(BaseHTTPRequestHandler):
+        def _check_loopback(self) -> bool:
+            """Reject cross-origin browser calls and DNS-rebinding attempts.
+
+            The server binds to 127.0.0.1 so it can't be reached from the
+            network, but a malicious page loaded in the local user's
+            browser can still POST to loopback with a "simple request"
+            (no preflight). Without an Origin/Host guard, such a page
+            could trigger START_SERVING / STOP_SERVING remotely.
+
+            Two guards:
+              * Host must be a loopback name. Blocks DNS-rebinding, where
+                an attacker's hostname briefly resolves to 127.0.0.1.
+              * Origin, when present, must also be loopback. Native
+                clients (Tauri, curl) omit Origin and are accepted.
+            """
+            host = (self.headers.get("Host") or "").lower().split(":")[0]
+            if host not in _LOOPBACK_HOSTS:
+                self.send_error(403, "Non-loopback Host header")
+                return False
+            origin = self.headers.get("Origin")
+            if origin is not None:
+                try:
+                    origin_host = (urllib.parse.urlparse(origin).hostname or "").lower()
+                except ValueError:
+                    origin_host = ""
+                if origin_host not in _LOOPBACK_HOSTS:
+                    self.send_error(403, "Non-loopback Origin")
+                    return False
+            return True
+
         def do_GET(self) -> None:  # noqa: N802
+            if not self._check_loopback():
+                return
             if self.path == "/healthz":
                 body = state.snapshot()
             elif self.path == "/models":
@@ -122,6 +158,8 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 pass
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._check_loopback():
+                return
             match = _MODEL_ACTION_RE.match(self.path)
             if not match:
                 self.send_error(404, "Not Found")
