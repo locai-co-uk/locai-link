@@ -7,6 +7,8 @@ import logging
 import random
 import time
 
+from typing_extensions import override
+
 from link.components.registry import ComponentRegistry, Sink, Source
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ class ClockTick(Source):
         self.interval = 1.0 / float(interval)
         self.next_tick = time.time()
 
+    @override
     def __call__(self) -> dict[str, float] | None:
         """Returns a tick if the interval has passed, otherwise None.
 
@@ -56,6 +59,7 @@ class RandomGenerator(Source):
         self.interval = 1.0 / float(interval)
         self.next_tick = time.time()
 
+    @override
     def __call__(self) -> dict[str, float] | None:
         """Generates a random number if interval has passed.
 
@@ -83,6 +87,7 @@ class ConsolePublisher(Sink):
         """
         self.prefix = prefix
 
+    @override
     def __call__(self, data) -> bool | None:
         """Publish data to the console.
 

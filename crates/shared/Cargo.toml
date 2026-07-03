@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
+[package]
+name = "locai-link-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Shared helpers consumed by the launcher, Setup Assistant, and menu-bar app."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

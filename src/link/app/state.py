@@ -6,6 +6,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from link.config.models import AgentConfig, PipelineConfig
 
@@ -24,13 +25,13 @@ class StateManager:
     def __init__(self):
         """Initialises the StateManager."""
         # We store the raw dicts to avoid constant Pydantic validation overhead during IO
-        self._cache: dict | None = None
+        self._cache: dict[str, Any] | None = None
         self.current_session_path: Path | None = None
 
         # Ensure directory exists (it likely does for default_config.json)
         self.STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def load_state(self, explicit_path: Path | None = None) -> dict | None:
+    def load_state(self, explicit_path: Path | None = None) -> dict[str, Any] | None:
         """Loads state from disk.
 
         1. If explicit_path is provided, tries to load that specific file.

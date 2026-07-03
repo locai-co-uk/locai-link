@@ -1,0 +1,6 @@
+{
+  "host_app": "standalone",
+  "plugin_set": ["llm"],
+  "channel": "stable",
+  "asset_repo": "locai-co-uk/locai-link"
+}

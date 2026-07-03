@@ -67,7 +67,7 @@ def test_audio_callback_architecture(mocker, caplog):
 
     classifier = AudioClassifier(model_path=MODEL_PATH, confidence_threshold=0.01, min_duration=0.0, min_interval=0.0)
 
-    args, kwargs = mock_stream_cls.call_args
+    _args, kwargs = mock_stream_cls.call_args
     audio_callback = kwargs.get("callback")
     assert audio_callback is not None, "Adapter did not register a callback!"
 

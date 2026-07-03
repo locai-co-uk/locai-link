@@ -69,11 +69,15 @@ class HttpClient:
             logger.warning(f"HTTP GET Connection Failed ({url})")
             return None
         except requests.HTTPError as e:
-            status = e.response.status_code
+            resp = e.response
+            if resp is None:
+                logger.warning(f"HTTP GET Failed with no response ({url})")
+                return None
+            status = resp.status_code
             if status >= 500:
                 logger.warning(f"HTTP GET Server Error ({url}): {status}")
                 return None
-            raise HttpError(status, e.response.text, retryable=False) from e
+            raise HttpError(status, resp.text, retryable=False) from e
         except requests.JSONDecodeError:
             logger.warning(f"HTTP GET Invalid JSON ({url})")
             return None
@@ -103,11 +107,15 @@ class HttpClient:
             logger.warning(f"HTTP POST Connection Failed ({url})")
             return False
         except requests.HTTPError as e:
-            status = e.response.status_code
+            resp = e.response
+            if resp is None:
+                logger.warning(f"HTTP POST Failed with no response ({url})")
+                return False
+            status = resp.status_code
             if status >= 500:
                 logger.warning(f"HTTP POST Server Error ({url}): {status}")
                 return False
-            raise HttpError(status, e.response.text, retryable=False) from e
+            raise HttpError(status, resp.text, retryable=False) from e
 
     def close(self):
         """Closes the underlying session."""

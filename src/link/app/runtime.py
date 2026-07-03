@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 import requests
 from pydantic import ValidationError
 
-import link.components  # noqa: F401
 from link.app.state import StateManager
 from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
@@ -26,13 +25,14 @@ from link.config.commands import (
     StopServingCommand,
     UninstallModelCommand,
     UpdateAgentCommand,
-    UpdateAgentConfigCommand,
     UpdatePipelineCommand,
     parse_command,
 )
 from link.config.models import AgentConfig, GenericConfig, PipelineConfig
 from link.config.templating import resolve_templates
+from link.infra.health_server import HealthServer, HealthState
 from link.utils.logger import LinkReporter
+from link.utils.version import resolve_agent_version
 
 if TYPE_CHECKING:
     import zenoh
@@ -71,6 +71,24 @@ class AgentRuntime:
         self.update_requested = False
         self.config_restart_requested = False
 
+        # Health server for local clients that need a fresh view of
+        # agent state. Daemon thread on 127.0.0.1:8101; mutated from
+        # command dispatch when a serve starts/stops. Started lazily
+        # in run() so unit tests that construct an AgentRuntime don't
+        # accidentally bind the port.
+        # `models_provider` is a callable so /models always reflects
+        # the current pipeline set without pushed updates.
+        # `command_handler` is our own `handle_command` — loopback
+        # callers POST START_SERVING / STOP_SERVING through here so
+        # the local HTTP API and the Zenoh command channel share one
+        # dispatch path.
+        self.health_state = HealthState(
+            version=resolve_agent_version(),
+            models_provider=self._snapshot_models,
+            command_handler=self.handle_command,
+        )
+        self.health_server = HealthServer(self.health_state)
+
         if threading.current_thread() is threading.main_thread():
             try:
                 signal.signal(signal.SIGINT, self._signal_handler)
@@ -78,7 +96,7 @@ class AgentRuntime:
             except ValueError:
                 logger.debug("Signal handlers skipped (not main thread).")
 
-    def handle_command(self, data: dict):
+    def handle_command(self, data: dict[str, Any]):
         """Validate an incoming command against the shared contract and dispatch it.
 
         Commands arrive clean and flat, so there is nothing to parse: resolve our
@@ -86,10 +104,6 @@ class AgentRuntime:
         the typed object. A command that fails validation is reported `failed`
         (when it carries an id) so it stops being retried.
         """
-        if not isinstance(data, dict):
-            logger.warning(f"Invalid command format: expected dict, got {type(data)}")
-            return
-
         # Resolve ${identity.*} placeholders (e.g. a sink topic) before validating.
         ident = self.agent_config.identity
         context = {
@@ -179,6 +193,7 @@ class AgentRuntime:
                     self.status_logger.report_model(
                         cmd.pipeline_id, running=False, pid=0, serving=True, serving_pid=1, serving_port=cmd.port
                     )
+                    self.health_state.set_serving(cmd.pipeline_id)
                 else:
                     self.status_logger.report_command(cmd.id, "failed", f"Failed to start serving {cmd.pipeline_id}")
 
@@ -189,6 +204,12 @@ class AgentRuntime:
                     self.status_logger.report_model(
                         cmd.pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
                     )
+                    # Only clear health state if THIS was the serving
+                    # pipeline. Multi-model serving in a single agent is
+                    # rare today but the explicit guard avoids reporting
+                    # idle while a different model is still serving.
+                    if self.health_state.model_id == cmd.pipeline_id:
+                        self.health_state.set_serving(None)
                 else:
                     self.status_logger.report_command(cmd.id, "failed", f"Failed to stop {cmd.pipeline_id}")
 
@@ -232,7 +253,7 @@ class AgentRuntime:
                 self.running = False
                 self.shutdown_event.set()
 
-            elif isinstance(cmd, UpdateAgentConfigCommand):
+            else:  # UpdateAgentConfigCommand — last remaining variant in the Command union
                 from link.app.reconfigure import apply_agent_config
 
                 result = apply_agent_config(self, cmd.agent_config.model_dump())
@@ -250,6 +271,9 @@ class AgentRuntime:
         """
         logger.info("Agent Runtime active...")
         self.status_logger.report_lifecycle("online")
+        # Lazy-start the health server here (not in __init__) so tests
+        # that construct an AgentRuntime in-process don't race for port 8101.
+        self.health_server.start()
 
         # 1. Try Recovery First
         recovered_any = False
@@ -293,6 +317,7 @@ class AgentRuntime:
                                             serving_pid=1,
                                             serving_port=src_args.get("port", 0),
                                         )
+                                        self.health_state.set_serving(pid)
                                     elif src_args.get("model_path"):
                                         # Inference-mode model pipeline —
                                         # mirror the report that the
@@ -323,7 +348,7 @@ class AgentRuntime:
             self._shutdown()
             self.status_logger.report_lifecycle("offline")
 
-    def _start_pipeline(self, pipeline_id: str, config_data: dict | None = None) -> bool:
+    def _start_pipeline(self, pipeline_id: str, config_data: dict[str, Any] | None = None) -> bool:
         """Starts (or restarts) a pipeline.
 
         Args:
@@ -523,12 +548,56 @@ class AgentRuntime:
         else:
             self.status_logger.report_command(cmd.id, "failed", f"Failed to update pipeline '{pipeline_id}'")
 
+    def _snapshot_models(self) -> list[dict[str, Any]]:
+        """Freshly enumerate servable-model pipelines for `GET /models`.
+
+        A pipeline qualifies as a "model" if its source args carry a
+        `model_path` — the pragmatic marker for LLM / plugin pipelines
+        that participate in llama-swap serving. Extend the filter here
+        when we onboard other model types (audio transcription, image
+        classification) into the response.
+
+        `is_serving` mirrors the live runtime: the pipeline must be in
+        `self.pipelines` (actually running) AND have `mode=serve` on
+        its source, because a pipeline can run in inference or serve
+        modes and only the second one is what a loopback toggle acts
+        on.
+
+        Holds `self.lock` for the whole iteration — called from the
+        `/models` HTTP handler thread while start/stop/deploy paths
+        mutate `pipeline_configs` and `pipelines` under the same lock,
+        so a naked iteration races and can raise
+        ``dictionary changed size during iteration``.
+
+        Returns:
+            list[dict[str, Any]]: One entry per servable pipeline with
+                keys ``id``, ``alias``, ``port``, ``host``, ``is_serving``.
+        """
+        out: list[dict[str, Any]] = []
+        with self.lock:
+            for pid, cfg in self.pipeline_configs.items():
+                args = cfg.source.args or {}
+                if "model_path" not in args:
+                    continue
+                active = pid in self.pipelines
+                is_serving = active and args.get("mode") == "serve"
+                out.append(
+                    {
+                        "id": pid,
+                        "alias": args.get("alias") or pid,
+                        "port": args.get("port"),
+                        "host": args.get("host", "127.0.0.1"),
+                        "is_serving": is_serving,
+                    }
+                )
+        return out
+
     def _uninstall_model(
         self,
         command_id: str,
         pipeline_id: str,
         force_stop: bool = False,
-        payload: dict | None = None,
+        payload: dict[str, Any] | None = None,
     ):
         """Uninstalls a pipeline by removing its configuration and on-disk artifacts.
 
@@ -694,6 +763,11 @@ class AgentRuntime:
                 if pipe.is_alive():
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
+
+        # Tear down the health server last — its daemon thread would
+        # be killed at process exit anyway, but joining cleanly avoids
+        # the "address already in use" race on a fast restart.
+        self.health_server.stop()
 
 
 # ---------------------------------------------------------------------------

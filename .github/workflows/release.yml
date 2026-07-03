@@ -29,7 +29,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -77,7 +77,7 @@ jobs:
             platform_tag: macos-arm64
             archive_ext: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release.outputs.tag }}
 
@@ -89,6 +89,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install Rust toolchain (for launcher)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
 
       - name: Cache prefetched binaries
         uses: actions/cache@v4
@@ -113,7 +127,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ASSET_BASE=$(python -c "import json; print(json.load(open('dist/locai-link/manifest.json'))['asset_name'])")
+          ASSET_BASE=$(python - <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path("dist/locai-link")
+          manifest = root / "current" / "manifest.json"
+          if not manifest.exists():
+              manifest = next(iter(root.glob("versions/*/manifest.json")), None)
+              if manifest is None:
+                  sys.exit(f"::error::No manifest.json under {root} (checked current/ and versions/*)")
+          print(json.load(manifest.open())["asset_name"])
+          PY
+          )
           echo "asset_base=$ASSET_BASE" >> "$GITHUB_OUTPUT"
           echo "Asset basename: $ASSET_BASE"
 
@@ -218,6 +242,10 @@ jobs:
   attach:
     name: Attach assets to release
     needs: [release, bundle]
+    # Run even if one bundle matrix leg failed — the surviving legs
+    # still produced usable artifacts and shouldn't be held hostage.
+    # `release` still has to succeed (no tag = nothing to attach to).
+    if: always() && needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -231,7 +259,7 @@ jobs:
 
       - name: List collected assets
         shell: bash
-        run: ls -lah release-assets/
+        run: ls -lah release-assets/ 2>/dev/null || echo "(no assets collected — all bundle legs failed)"
 
       - name: Attach bundles to release
         uses: softprops/action-gh-release@v2
@@ -241,4 +269,7 @@ jobs:
             release-assets/*.tar.gz
             release-assets/*.zip
             release-assets/*.sha256
-          fail_on_unmatched_files: true
+          # Don't abort the whole release when one platform's leg
+          # failed to produce its artifact; the other platforms are
+          # still worth publishing.
+          fail_on_unmatched_files: false

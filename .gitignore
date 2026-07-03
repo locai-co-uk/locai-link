@@ -31,3 +31,14 @@ configs/.fleet_device
 state
 
 **/*.pem
+
+# Rust workspace + Tauri build artefacts.
+crates/target/
+crates/**/target/
+
+# Tauri / JS frontends.
+crates/*/node_modules/
+crates/*/dist/
+crates/*/.svelte-kit/
+crates/*/.vite/
+

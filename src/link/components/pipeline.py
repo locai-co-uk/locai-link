@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any
 
+from typing_extensions import override
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +32,7 @@ class Pipeline(threading.Thread):
         self.active_event = threading.Event()
         self.active_event.set()
 
+    @override
     def run(self):
         """The threaded loop for this specific pipeline.
 

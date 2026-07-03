@@ -57,7 +57,7 @@ class ComponentRegistry:
     _installed_plugins: set[str] = set()
 
     @classmethod
-    def register(cls, name: str) -> Callable:
+    def register(cls, name: str) -> Callable[[type], type]:
         """Decorator to register a component class.
 
         Args:
@@ -114,7 +114,7 @@ class ComponentRegistry:
         cls._install_plugin_dependencies(name, plugin_dir)
 
     @classmethod
-    def load_plugin(cls, name: str, args: dict) -> Component:
+    def load_plugin(cls, name: str, args: dict[str, Any]) -> Component:
         """Dynamically installs and loads a plugin component.
 
         Args:

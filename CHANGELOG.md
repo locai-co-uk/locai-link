@@ -1,5 +1,264 @@
 # Changelog
 
+## [Unreleased]
+
+Companion menu-bar app groundwork — swaps both Tauri frontends off
+SvelteKit onto bare Svelte + Vite so future GUI work builds on the
+smallest possible frontend footprint.
+
+### Changed — Tauri frontends
+
+- `crates/setup_assistant/` and `crates/companion/`: swapped from
+  SvelteKit onto bare Svelte + Vite. Both Tauri surfaces are single-page
+  windows with no server, no routing, and no adapter — SvelteKit's
+  machinery was dead weight. Standard Vite shape now: `index.html` at
+  root, `src/main.ts` mounts `App.svelte` into `#app`, design tokens
+  imported once in `main.ts`. Output moved from `build/` to `dist/`
+  (Vite default); `tauri.conf.json.frontendDist` follows.
+- Companion Vite dev server runs on port `1421` (setup_assistant on
+  `1420`) so both apps can be run concurrently during dev; companion
+  HMR moved to `1423` to sidestep setup_assistant's HMR port.
+
+### Removed — TUI
+
+- `src/link/ui/` deleted, along with the `tui` subcommand, the
+  `--tui` setup flag, and the `textual>=7.0.0` optional dependency.
+  The GUI installer (setup assistant + menu-bar companion) supersedes
+  the Textual-based agent-management interface, which never made it
+  past a niche developer utility.
+
+### Fixed — Editor-only diagnostics
+
+- `pyproject.toml`: added `[tool.pyright]` with `extraPaths = ["src",
+  "bundling"]` so Pylance can resolve `from link.xxx import ...` under
+  the src/ layout (mirrors the existing pytest `pythonpath`).
+- `src/link/infra/service.py`: `ServiceManager` factory now passes
+  `scope` / `label_prefix` as explicit keyword arguments to each
+  backend rather than via a `**kwargs` dict, so type checkers keep the
+  `ServiceScope` `Literal` instead of widening it to `str`.
+
+## [1.0.17] - 2026-07-01
+
+Lays down the over-the-air update path for bundled installs, adds a
+lightweight `/healthz` endpoint for host-app integrators, and scaffolds
+the Cargo workspace + Tauri surfaces the coming GUI installer will
+build on. Developer (source) installs are unaffected by the OTA
+machinery — they still update by `git pull` as before.
+
+### Why a separate launcher?
+
+Updating a running program while it's still running is the classic
+"changing the wheels on a moving car" problem. On every supported
+platform, a frozen Python process keeps its own executable and bundled
+libraries open for as long as it's alive — you can't safely overwrite
+those files in place, and the process can't replace itself. So the
+agent fundamentally can't update itself on its own.
+
+The launcher solves this by sitting one level up. It's a tiny stable
+binary whose job is to pick which version of the agent to run, exec it,
+and watch its exit code. When the agent wants to update, it just exits
+with a known code (42) and the launcher re-resolves `current` — which
+the update may have flipped to a new version — and starts that one
+instead. The launcher itself is intentionally never auto-updated, which
+makes it the **unchanging entry point** the host app (Meetily, SafeChat,
+systemd, launchd, Windows SCM) talks to. Agent versions can come and go
+behind a fixed `locai-link` binary name and a fixed argv contract,
+without any host integration noticing.
+
+The separation also makes **automatic rollback possible**. The same
+outside-the-bundle process that started the new version can watch it
+crash, decide the crash happened too soon after an update, and respawn
+the previous version instead. The agent can't roll itself back — by
+the time it's the one failing, it's no longer a credible judge of
+itself.
+
+And it's what makes **Pattern B first-launch** work at all. A host that
+ships only the launcher + `boot.json` has nothing else to run on first
+launch; the launcher has to be able to fetch and lay down the first
+bundle itself before anything inside the bundle exists.
+
+### What changes for users and operators
+
+- **Bundled installs update themselves.** When the backend sends the
+  existing `UpdateAgentCommand`, the agent now notices it's running as a
+  frozen bundle and fetches the latest matching release from GitHub
+  instead of trying (and failing) to `git pull`. Download is verified by
+  SHA256 against a sidecar file published alongside the tarball before
+  anything is extracted to disk.
+- **Two versions are kept on disk at any time.** The current one and the
+  one before it. After a successful update the older-still version is
+  garbage-collected on the next round, so disk usage stays bounded at
+  ~2× a bundle.
+- **Automatic rollback if a new version crashes.** A small launcher
+  binary sits in front of the runtime and watches its exit code. If a
+  freshly-installed version exits non-zero within 2 minutes of the
+  swap, the launcher points "current" back at the previous version and
+  respawns. Past that window, crashes are treated as ordinary crashes.
+- **Pre-swap health check.** Before the new version is made live, the
+  runtime is started once with `--self-check` — it boots config + Zenoh
+  + plugins and exits clean. If self-check fails the new version is
+  discarded; the running one keeps serving.
+- **No change for source installs.** If you're running Link from a git
+  checkout, nothing in this release affects you. The frozen-vs-source
+  dispatch picks the old path automatically.
+- **First launch fetches its own bundle.** Partner hosts (Meetily,
+  SafeChat) can ship just the launcher + a tiny `boot.json` describing
+  what to download. On first run, the launcher reads `boot.json`,
+  fetches the latest matching release off GitHub, verifies it the same
+  way OTA does, and starts the agent. No bundle baked into the host
+  installer required — and users always get the *latest* version on
+  first run regardless of how long ago the host shipped. Hosts that
+  prefer to pre-seed an offline-capable bundle can still do that; the
+  launcher branches automatically based on whether a `current` already
+  exists.
+
+### Under the hood
+
+- **A/B install layout.** Bundled installs now live at
+  `<install_root>/versions/<v>/` with a `current` symlink (or `CURRENT`
+  pointer file on hosts where symlinks aren't permitted) selecting the
+  active version. `previous` keeps the immediately prior version for
+  rollback.
+- **Rust launcher binary (`locai-link`).** ~250 lines, ships in every
+  release tarball. Resolves `current`, execs the runtime, restarts on
+  exit code 42 (the runtime's "I updated myself, please respawn"
+  signal), and performs the post-update rollback described above. The
+  launcher itself is intentionally never auto-updated.
+- **`updater.py` covers both paths.** `pull_and_update` /
+  `reinstall_plugin_binaries` for source installs is unchanged.
+  `swap_bundle()` is new: identify-self via `manifest.json`, query the
+  GitHub Releases API for the matching asset, download with retries,
+  verify, extract to a staging path, health-check, atomic-rename
+  `current`, drop a `.update-pending` stamp the launcher reads on next
+  boot, GC the previous-previous version. `running_frozen_bundle()`
+  routes `_apply_update_and_reexec` to the right one.
+- **`.update-pending` stamp.** Two-line plain-text file
+  (`<unix_ts>\n<previous_version>\n`) written immediately after a
+  successful flip. The launcher reads it on every non-zero child exit
+  and, within the 120s health window, rolls back. Stale stamps are
+  cleared on next non-zero exit so they don't linger.
+- **Self-check entry point.** `python -m link self-check` /
+  `locai-link-runtime --self-check` boots config + transport + plugins
+  and exits 0 on success. No telemetry, no side effects — explicitly
+  designed to be safe to run on an unproven version.
+- **Integration tests.** 52 Python tests across the source and bundle
+  paths; 11 Rust integration tests in the launcher covering exec
+  dispatch, exit 42 respawn, and all five rollback conditions
+  (within-window, past-window, exit 0, previous-version missing,
+  pointer-file shape).
+
+### Added — `/healthz` endpoint
+
+- `src/link/infra/health_server.py` — small loopback HTTP server on
+  `127.0.0.1:8101` returning `{version, uptime_seconds,
+  currently_serving, model_id}`. Separate from `ServingProxy` so it
+  answers "is the agent alive" even when no model is loaded. Polled by
+  the menu-bar companion app; also available to host-app integrators
+  (SafeChat, Meetily) that want a lightweight state probe. Owned by
+  `AgentRuntime`, mutated by the `StartServingCommand` /
+  `StopServingCommand` handlers and the resume branch. Started lazily
+  in `run()`, stopped in `_shutdown()`; port-in-use failures degrade
+  gracefully to a warning.
+
+### Added — Cargo workspace + Tauri scaffolding
+
+- `crates/` top-level directory now hosts every native binary:
+  `launcher/` (moved from repo root, history preserved),
+  `shared/` (new helper crate with stubs for agent-status polling,
+  `boot.json` reading, version lookup), and two Tauri app scaffolds
+  (`setup_assistant/` and `companion/`) that the GUI installer flow
+  will grow into. Inert in this release — nothing on the shipping
+  agent path calls them, and CI path filters skip Tauri-only changes.
+- `bundling/build.py`, `.github/workflows/bundle.yml`, and
+  `.github/workflows/release.yml` updated to point at
+  `crates/launcher/` and the workspace target dir.
+- `bundling/pkg/boot.json` — production launcher config (channel,
+  asset repo, plugin set) shipped by the coming `.pkg` postinstall.
+
+### Added — Launcher configurability
+
+- `MacOSBackend` (`src/link/infra/service.py`) gains a
+  `scope: "user" | "system"` parameter — `system` writes the plist to
+  `/Library/LaunchAgents/` (the GUI installer's "install for all
+  users" path); `user` keeps the historical `~/Library/LaunchAgents/`
+  behaviour that existing `main.py deploy` callers get by default.
+- `label_prefix` parameter replaces the hard-coded `io.locai.{name}`
+  so the GUI installer can label plists as `uk.co.locai.link.agent` /
+  `uk.co.locai.link.menubar` to match its bundle identifier. Existing
+  callers keep `io.locai` — no behaviour change without opt-in.
+- `install_all(services, start_now)` helper registers multiple
+  LaunchAgents in lockstep with rollback on partial failure. The Setup
+  Assistant's Finish step will call this so one "Run at login" toggle
+  drives both the agent and menu-bar app.
+- `launchctl list` grep tightened to anchor on the full label — no
+  more false matches when two services share a prefix.
+
+### Added — Onboarding browser handoff
+
+- Device-flow SSO now opens the verification URL in the system
+  browser (`open` / `xdg-open` / `start`) when running detached from a
+  terminal (`sys.stdin.isatty() is False`). The existing stderr banner
+  still prints — the browser call is an additive supplement, not a
+  replacement. Interactive terminals see no behaviour change.
+
+### Added — `.pkg` installer source skeleton
+
+- `bundling/pkg/` now holds the productbuild sources for the coming
+  macOS GUI installer: `Distribution.xml` (system-wide install to
+  `/Library/Locai`, macOS 14 minimum, arm64+x86_64),
+  `welcome.html` / `license.html` / `conclusion.html` for the wizard
+  panes, and `scripts/postinstall` (chown, `/usr/local/bin/locai`
+  symlink, launches Setup Assistant.app as the console user).
+- `bundling/pkg/README.md` documents the pkgbuild + productbuild build
+  sequence for the future release CI.
+- Not built by any workflow yet — waiting on the Developer ID
+  Installer certificate. Lands as sources so subsequent PRs can wire
+  the CI without also having to author the wizard structure.
+
+### Added — Design assets in Tauri apps
+
+- Brand icons (`.icns`, `.ico`, PNG sizes for macOS / Windows / Android
+  / iOS) generated via `tauri icon` from the design hand-off's
+  512×512 `app-icon.png`, replacing the create-tauri-app placeholders
+  under `crates/setup_assistant/src-tauri/icons/` and
+  `crates/companion/src-tauri/icons/`.
+- Design tokens (`tokens.css`, `tokens.json`) and SVG icon set (10
+  glyphs — check, chevron, cloud, disk, download, search, spinner,
+  trash, wifi) copied to each app's `src/lib/tokens/` and
+  `src/lib/icons/`. Not yet consumed by any Svelte component — landed
+  ahead of the Setup Assistant / Companion UI work so those tasks
+  start with the design system already in the tree.
+
+### Under the hood — Pattern B first-install now works
+
+- The launcher's `bootstrap_from_boot()` (`crates/launcher/src/`)
+  reads `boot.json`, fetches the release asset off GitHub, verifies
+  the SHA256 sidecar, extracts to `versions/<v>/`, writes `current`,
+  and execs the runtime — all before any bundle exists on disk. Host
+  installers that ship just the launcher + `boot.json` are now viable
+  (Pattern B) alongside the pre-extracted-bundle path (Pattern A).
+
+### Not in this release
+
+- **Health-window heartbeat from the runtime.** Today the launcher
+  decides rollback eligibility purely by wall-clock age of the stamp
+  (≤ 120s). Hooking the runtime to clear the stamp itself, once it
+  passes its first healthy ping, lands when the runtime grows a
+  periodic backend ping.
+- **macOS `.pkg` GUI installer + Setup Assistant + menu-bar
+  companion.** Scaffolds, sources, and design assets are all in the
+  tree (`crates/setup_assistant/`, `crates/companion/`, `bundling/pkg/`),
+  but nothing is wired into a build pipeline yet and none of the Tauri
+  UI is functional. Coming in the 1.1.x line once the Apple Developer
+  ID Installer certificate is provisioned and the wizard + menu-bar
+  apps are built out.
+- **Windows.** Code paths are in place but unsigned bundles are
+  blocked by Windows SmartScreen — code-signing procurement gates
+  Windows GA. macOS + Linux are not blocked.
+- **Bundled update telemetry to backend.** `bootstrap_*` and
+  `update_*` events are specified in the design doc but not yet
+  emitted; they ride the existing event publisher when wired up.
+
 ## [1.0.16] - 2026-06-25
 
 Restores serve-state reporting after an unclean shutdown, tightens command

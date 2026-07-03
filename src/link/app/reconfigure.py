@@ -87,7 +87,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
 
     # 4. Snapshot current state for revert.
     snapshot_cfg = runtime.agent_config.model_copy(deep=True)
-    snapshot_cache: dict | None = None
+    snapshot_cache: dict[str, Any] | None = None
     if runtime.state_manager is not None and runtime.state_manager._cache is not None:
         snapshot_cache = dict(runtime.state_manager._cache)
 

@@ -23,8 +23,10 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 import requests
+from typing_extensions import override
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,7 @@ class _ChatTelemetry:
         self._perf_start = time.perf_counter()
         self._sse_buf = bytearray()
         self._content_chunks = 0
-        self._usage: dict | None = None
+        self._usage: dict[str, Any] | None = None
         self._model: str | None = None
         self._stream = False
         try:
@@ -144,7 +146,7 @@ class _ChatTelemetry:
     # chat-completions JSON shape we know about.
     # ------------------------------------------------------------------
 
-    def _absorb(self, obj: dict) -> None:
+    def _absorb(self, obj: dict[str, Any]) -> None:
         usage = obj.get("usage")
         if isinstance(usage, dict):
             self._usage = usage
@@ -203,6 +205,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     # Suppress BaseHTTPRequestHandler's default per-request stderr log spam;
     # route through Python logging instead so the proxy respects link's
     # logging config.
+    @override
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         logger.debug("[serving_proxy] %s - %s", self.address_string(), format % args)
 
@@ -405,16 +408,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # never allocate it.
         nonstream_buf: bytearray | None = bytearray() if (recorder and not is_streaming) else None
 
-        # Stream chunks as they arrive. Two non-obvious details:
-        #
-        # 1. iter_content(chunk_size=None) calls urllib3's stream(amt=None)
-        #    which buffers the ENTIRE response before yielding — wrong.
-        #
-        # 2. iter_content(chunk_size=N>0) calls urllib3's stream(amt=N)
-        #    which calls http.client.HTTPResponse.read(N). Per the stdlib
-        #    docs that *should* return up to N bytes immediately, but in
-        #    practice with chunked transfer encoding it can block until
-        #    a full N bytes accumulate.
+        # We use resp.raw.read1() directly rather than iter_content(): the
+        # chunk_size=None variant buffers the whole response, and chunk_size=N
+        # can block until N bytes accumulate under chunked transfer encoding.
         try:
             while True:
                 chunk = resp.raw.read1(8192)
@@ -508,8 +504,13 @@ class ServingProxy:
                 allowed_origins=self._allowed_origins,
                 on_telemetry=self._on_telemetry,
             )
+            # poll_interval bounds shutdown() blocking — tests that
+            # spin proxies up and down eat this per teardown. 50ms is
+            # far below any user-perceptible cost in production and
+            # saves several seconds on the test suite.
+            server = self._server
             self._thread = threading.Thread(
-                target=self._server.serve_forever,
+                target=lambda: server.serve_forever(poll_interval=0.05),
                 daemon=True,
                 name=f"serving-proxy-{self.public_port}",
             )
