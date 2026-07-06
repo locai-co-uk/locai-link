@@ -12,6 +12,11 @@
     <meta charset="utf-8"/>
     <title>Loc.ai Link — Installed</title>
     <style>
+        /* color-scheme lets WebKit (which Installer.app uses to render
+           these panes) respect the OS light/dark setting. Without it,
+           scrollbars and form controls stay in light-mode chrome and
+           any bg colours we set stay light-only. */
+        :root { color-scheme: light dark; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
             font-size: 13px;
@@ -42,6 +47,10 @@
             border-radius: 6px;
             font-size: 12px;
             color: #444;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { color: #f5f5f7; }
+            .hint { background: #2c2c2e; color: #c7c7cc; }
         }
     </style>
 </head>

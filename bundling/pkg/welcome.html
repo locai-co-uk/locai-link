@@ -11,6 +11,7 @@
     <meta charset="utf-8"/>
     <title>Welcome to Loc.ai Link</title>
     <style>
+        :root { color-scheme: light dark; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
             font-size: 13px;
@@ -40,6 +41,9 @@
             text-transform: uppercase;
             color: #00B85A;
             margin-bottom: 6px;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { color: #f5f5f7; }
         }
     </style>
 </head>
