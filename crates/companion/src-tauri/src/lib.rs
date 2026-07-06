@@ -143,6 +143,18 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // If the runtime LaunchAgent is bootstrapped but stopped
+            // (user hard-quit last session), kickstart brings it back.
+            // If it's already running, this is a no-op (`kickstart`
+            // without `-k` doesn't restart a live service). If the
+            // LaunchAgent isn't bootstrapped at all (user opted out of
+            // "Start at login"), the call silently fails and the poll
+            // loop will show "Down" — that's the correct outcome.
+            //
+            // Backgrounded so we don't block the tray icon appearing.
+            #[cfg(target_os = "macos")]
+            thread::spawn(kickstart_runtime_if_installed);
+
             let (menu, status_item) = build_tray_menu(app.handle(), &[], STATUS_INITIAL)?;
 
             let icon = Image::from_bytes(TRAY_ICON_UP)?;
@@ -174,6 +186,31 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Kick the runtime LaunchAgent so the user's "open Loc.ai Link"
+/// gesture (via `/Applications/`, Spotlight, Launchpad) is also
+/// implicitly "start Loc.ai Link if it's down".
+///
+/// `launchctl kickstart` (without `-k`) starts a service if it's not
+/// running and no-ops if it is. If the LaunchAgent isn't bootstrapped
+/// at all (user opted out via System Settings → Login Items), the
+/// call fails silently — the tray poll loop will just show a "Down"
+/// state until the user re-enables the agent.
+///
+/// Runs on macOS only; other platforms don't have launchctl.
+#[cfg(target_os = "macos")]
+fn kickstart_runtime_if_installed() {
+    let uid = match std::process::Command::new("id").arg("-u").output() {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => return,
+    };
+    let service = format!("gui/{uid}/uk.co.locai.link.agent");
+    let _ = std::process::Command::new("launchctl")
+        .args(["kickstart", &service])
+        .output();
 }
 
 /// Assemble the tray menu and return it along with a handle to the

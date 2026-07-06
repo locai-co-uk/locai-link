@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
 
   // Post-install user configuration flow. The .pkg installer has
@@ -265,6 +266,17 @@
         installRoot: DEFAULT_INSTALL_ROOT,
         config: registered.config,
       });
+      // Register + kickstart both LaunchAgents so the runtime + menubar
+      // companion come up now. No-op on Linux dev machines. If this
+      // fails (e.g. write to ~/Library/LaunchAgents denied), we still
+      // count the setup as successful — user can launch "Loc.ai Link"
+      // from Applications later and the companion's own kickstart
+      // logic will bring the runtime up.
+      try {
+        await invoke("install_launchagents", { installRoot: DEFAULT_INSTALL_ROOT });
+      } catch (e) {
+        console.warn("install_launchagents failed:", e);
+      }
     } catch (e) {
       // Register succeeded on Control but we couldn't lay the config
       // down locally — flag it distinctly so the user knows the device
@@ -514,8 +526,18 @@
           {/if}
         {:else if STEPS[current].id === "permissions"}
           <p class="eyebrow">STEP 3 · PERMISSIONS</p>
-          <h1>macOS permissions</h1>
-          <p class="lead">Placeholder — Login Items / Notifications prompts wire in here.</p>
+          <h1>Runs quietly in the background</h1>
+          <p class="lead">
+            After setup, Loc.ai Link runs in the background and appears
+            in your menubar. It will start automatically when you log
+            in.
+          </p>
+          <p class="fine-print">
+            To turn off auto-start later, open <strong>System Settings
+            → General → Login Items &amp; Extensions</strong> and toggle
+            <strong>Loc.ai Link</strong> off. To stop the agent entirely,
+            quit it from the menubar.
+          </p>
         {:else if STEPS[current].id === "finish"}
           <p class="eyebrow">STEP 4 · FINISH</p>
           <h1>Register this device</h1>
@@ -580,6 +602,16 @@
                   this device. The agent will download them on next start.
                 </p>
               {/if}
+              <p class="fine-print">
+                Loc.ai Link is now running in your menubar. You can close
+                this window.
+              </p>
+              <button
+                class="btn btn--primary btn--wide"
+                onclick={() => void getCurrentWindow().close()}
+              >
+                Close
+              </button>
             </div>
           {:else if finish.kind === "error"}
             <div class="signin-block">

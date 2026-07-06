@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+    SPDX-License-Identifier: BUSL-1.1
+
+    LaunchAgent for the Loc.ai Link runtime. Bundled into the .pkg
+    payload; the Setup Assistant bootstraps it into the user's domain
+    on Finish (only if "Start at login" is checked). See
+    src/link/app/onboarding.py for the historical CLI equivalent.
+
+    ProgramArguments points at the launcher — never the runtime binary
+    directly. The launcher follows /Library/Locai/current to find the
+    active version and exec's it, which is what makes OTA swap-in-place
+    work without touching this file.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>uk.co.locai.link.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Locai/locai-link</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Library/Locai</string>
+
+    <!-- Auto-start at login. Companion polls /healthz and kickstarts
+         this LaunchAgent on its own launch if the runtime is down,
+         so this is the "always-on" leg. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive off: a clean shutdown from the runtime (e.g. via
+         `locai stop`, user quit from companion, or self-exit) should
+         stay stopped until re-kickstarted. `true` would make it fight
+         the user. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Locai/logs/agent.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Locai/logs/agent.stderr.log</string>
+</dict>
+</plist>

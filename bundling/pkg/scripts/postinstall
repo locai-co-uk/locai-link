@@ -32,6 +32,8 @@ INSTALL_ROOT="/Library/Locai"
 LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
 SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
+COMPANION_APP="${INSTALL_ROOT}/Loc.ai Link.app"
+COMPANION_SYMLINK="/Applications/Loc.ai Link.app"
 
 log() {
     echo "[postinstall] $*"
@@ -73,7 +75,20 @@ mkdir -p "$(dirname "$CLI_SYMLINK")"
 ln -sf "$LAUNCHER" "$CLI_SYMLINK"
 log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
 
-# --- 3. Launch Setup Assistant ---------------------------------------
+# --- 3. /Applications/Loc.ai Link.app symlink ------------------------
+# The companion menubar app is the user-facing entry point ("open
+# Loc.ai Link" in Applications / Spotlight / Launchpad). Symlink
+# rather than copy so a future OTA update to the .app under
+# /Library/Locai just flips through — no separate /Applications
+# refresh needed. ln -sf overwrites if a previous install left one.
+if [[ -d "$COMPANION_APP" ]]; then
+    ln -sfn "$COMPANION_APP" "$COMPANION_SYMLINK"
+    log "companion symlink: $COMPANION_SYMLINK -> $COMPANION_APP"
+else
+    log "companion app not found at $COMPANION_APP — skipping /Applications symlink"
+fi
+
+# --- 4. Launch Setup Assistant ---------------------------------------
 # The postinstall runs as root; the Setup Assistant must run as the
 # actual user for LaunchAgent registration and Keychain access to work
 # correctly. Resolve the console user (the person driving Installer.app)

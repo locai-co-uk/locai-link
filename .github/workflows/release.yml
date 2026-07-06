@@ -219,13 +219,16 @@ jobs:
           echo "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
           echo "APPLE_NOTARY_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
 
-      - name: Set up Node (macOS, for Setup Assistant build)
+      - name: Set up Node (macOS, for Tauri app builds)
         if: runner.os == 'macOS'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          # Cache both apps' node_modules — both build in this job.
           cache: "npm"
-          cache-dependency-path: crates/setup_assistant/package-lock.json
+          cache-dependency-path: |
+            crates/setup_assistant/package-lock.json
+            crates/companion/package-lock.json
 
       - name: Build Setup Assistant .app (macOS)
         # `tauri build` invokes the frontend build (npm run build)
@@ -250,7 +253,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SA_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -name "*.app" | head -n 1)
+          # Setup Assistant.app is the only .app in the SA crate's
+          # target/bundle/macos — but the companion build below will
+          # add another. Scope this find to just the SA sub-tree by
+          # naming the productName ("setup_assistant" from
+          # crates/setup_assistant/src-tauri/tauri.conf.json).
+          SA_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "setup_assistant.app" | head -n 1)
           if [ -z "$SA_APP" ]; then
             echo "::error::Setup Assistant .app not found after tauri build"
             exit 1
@@ -261,6 +269,43 @@ jobs:
             --entitlements crates/setup_assistant/src-tauri/entitlements.plist \
             --skip-notarise
           echo "SA_APP_PATH=$SA_APP" >> "$GITHUB_ENV"
+
+      - name: Build companion .app (macOS)
+        # Same pattern as the Setup Assistant build above. Companion's
+        # productName is "Loc.ai Link" (with space) so its .app basename
+        # is "Loc.ai Link.app" — that's exactly what we want in
+        # /Applications so it's the user-facing entry point.
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: crates/companion
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --bundles app
+
+      - name: Codesign companion .app (macOS)
+        # Reuses the SA's entitlements.plist — allow-jit is the only
+        # relaxation the WebKit view needs. Same signing chain as the
+        # SA. If the companion needs different entitlements later
+        # (e.g. Login Items via SMAppService), split out to a
+        # companion-specific entitlements file.
+        if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMPANION_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "Loc.ai Link.app" | head -n 1)
+          if [ -z "$COMPANION_APP" ]; then
+            echo "::error::companion .app (Loc.ai Link.app) not found after tauri build"
+            exit 1
+          fi
+          echo "Signing $COMPANION_APP"
+          uv run python bundling/sign_macos.py \
+            --bundle "$COMPANION_APP" \
+            --entitlements crates/setup_assistant/src-tauri/entitlements.plist \
+            --skip-notarise
+          echo "COMPANION_APP_PATH=$COMPANION_APP" >> "$GITHUB_ENV"
 
       - name: Codesign runtime bundle (macOS)
         # Signs the Python runtime tree (dist/locai-link/) but skips
@@ -302,6 +347,19 @@ jobs:
 
           # Setup Assistant .app — path was stashed by the codesign step.
           cp -R "$SA_APP_PATH" "$STAGING/Setup Assistant.app"
+
+          # Companion menubar .app — the user-facing "Loc.ai Link" in
+          # /Applications post-install (postinstall symlinks it there).
+          cp -R "$COMPANION_APP_PATH" "$STAGING/Loc.ai Link.app"
+
+          # LaunchAgent plists — bundled but NOT bootstrapped at
+          # install time. The Setup Assistant registers them on
+          # Finish if the user opted in to "Start at login".
+          mkdir -p "$STAGING/LaunchAgents"
+          cp bundling/pkg/LaunchAgents/uk.co.locai.link.agent.plist \
+             "$STAGING/LaunchAgents/uk.co.locai.link.agent.plist"
+          cp bundling/pkg/LaunchAgents/uk.co.locai.link.companion.plist \
+             "$STAGING/LaunchAgents/uk.co.locai.link.companion.plist"
 
           # 2. Version-stamp Distribution.xml. The skeleton ships
           #    "0.0.0" as a placeholder; productbuild wants the real

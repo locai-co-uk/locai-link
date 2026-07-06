@@ -464,10 +464,31 @@ fn register_device(
 /// preceding `register_device` call still succeeded and the device
 /// is enrolled on Control.
 #[tauri::command]
-fn install_agent_config(install_root: String, config: serde_json::Value) -> Result<String, String> {
+fn install_agent_config(
+    install_root: String,
+    config: serde_json::Value,
+) -> Result<String, String> {
     if config.is_null() {
         return Err("config from register_device was null — nothing to write".to_string());
     }
+
+    // Resolve `${identity.<field>}` placeholders in the same way
+    // `_apply_server_config` does in src/link/app/onboarding.py. The
+    // backend ships topic strings like
+    // "locai/devices/${identity.device_id}/metrics" with the
+    // placeholder unfilled. If we write those verbatim the runtime
+    // publishes/subscribes to literal paths containing "${...}" —
+    // Control never sees telemetry or lifecycle events, and the
+    // device stays "version unknown" forever.
+    //
+    // Uses the identity block that's already resolved in the config
+    // itself as the substitution context, matching the Python
+    // resolve_templates() semantics: unknown placeholders (e.g. the
+    // runtime's `{cid}` / `{mid}` per-emit markers) pass through
+    // untouched.
+    let identity = config.get("identity").cloned().unwrap_or_default();
+    let context = serde_json::json!({ "identity": identity });
+    let config = resolve_config_templates(&config, &context);
 
     let root = PathBuf::from(&install_root);
     let current_dir = root.join("current");
@@ -673,6 +694,179 @@ fn deploy_model(
         .ok_or_else(|| "deployment id missing from response".to_string())
 }
 
+/// Recursively substitute `${path.to.key}` placeholders in a JSON
+/// value using dotted lookups against `context`. Mirrors the semantics
+/// of the runtime's `resolve_templates` in
+/// `src/link/config/templating.py`: dicts and arrays are walked;
+/// strings get placeholders substituted; unknown placeholders are
+/// preserved verbatim so per-emit markers (e.g. `{cid}` / `{mid}` from
+/// the reporting handlers) pass through untouched.
+fn resolve_config_templates(
+    value: &serde_json::Value,
+    context: &serde_json::Value,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(resolve_template_string(s, context))
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| resolve_config_templates(v, context))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), resolve_config_templates(v, context));
+            }
+            serde_json::Value::Object(out)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn resolve_template_string(s: &str, context: &serde_json::Value) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("${") {
+        result.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        match after_open.find('}') {
+            Some(close) => {
+                let path = &after_open[..close];
+                match lookup_context_path(context, path) {
+                    Some(v) => result.push_str(&v),
+                    // Unknown placeholder — preserve verbatim (this
+                    // is how `{cid}` / `{mid}` and any other unknown
+                    // key survive to be substituted later by the
+                    // runtime's per-emit handlers).
+                    None => result.push_str(&rest[open..open + 2 + close + 1]),
+                }
+                rest = &after_open[close + 1..];
+            }
+            None => {
+                // Unclosed "${" — copy the rest verbatim, stop scanning.
+                result.push_str(&rest[open..]);
+                return result;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+fn lookup_context_path(context: &serde_json::Value, path: &str) -> Option<String> {
+    let mut node = context;
+    for part in path.split('.') {
+        node = node.get(part)?;
+    }
+    match node {
+        // Preserve the placeholder rather than emit "null" verbatim.
+        serde_json::Value::Null => None,
+        // String needs .clone() — .to_string() on a JSON string wraps
+        // it in escaped quotes.
+        serde_json::Value::String(s) => Some(s.clone()),
+        // Numbers / bools stringify cleanly via Display.
+        other => Some(other.to_string()),
+    }
+}
+
+// --- LaunchAgent bootstrap (macOS) -------------------------------------------
+
+/// Copy the runtime + companion LaunchAgent plists from
+/// `<install_root>/LaunchAgents/` into the user's
+/// `~/Library/LaunchAgents/`, then bootstrap + kickstart both.
+///
+/// This is the "Loc.ai Link runs at login" step of the SA flow. Users
+/// who want to disable auto-start can do it from System Settings →
+/// General → Login Items (the LaunchAgents show up there as
+/// "background items" the user can toggle).
+///
+/// No-op on non-macOS platforms — `launchctl` doesn't exist elsewhere.
+/// The install path branches on target_os so Linux dev machines don't
+/// error out running through the flow.
+#[tauri::command]
+#[cfg(target_os = "macos")]
+fn install_launchagents(install_root: String) -> Result<(), String> {
+    let root = PathBuf::from(&install_root);
+    let source_dir = root.join("LaunchAgents");
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "LaunchAgents source not found at {}",
+            source_dir.display()
+        ));
+    }
+
+    let home = std::env::var("HOME").map_err(|_| "$HOME not set".to_string())?;
+    let dest_dir = PathBuf::from(home).join("Library").join("LaunchAgents");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| {
+        format!("create {}: {e}", dest_dir.display())
+    })?;
+
+    // Names + labels must match the plists in bundling/pkg/LaunchAgents/.
+    let agents: [(&str, &str); 2] = [
+        (
+            "uk.co.locai.link.agent.plist",
+            "uk.co.locai.link.agent",
+        ),
+        (
+            "uk.co.locai.link.companion.plist",
+            "uk.co.locai.link.companion",
+        ),
+    ];
+
+    for (plist_name, label) in agents {
+        let src = source_dir.join(plist_name);
+        let dst = dest_dir.join(plist_name);
+        std::fs::copy(&src, &dst)
+            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+
+        // Bootstrap into the user's GUI domain (aqua session). If the
+        // agent is already loaded from a prior run, bootstrap returns
+        // an error we can ignore — kickstart below still refreshes
+        // the running process.
+        let uid = current_uid()?;
+        let domain = format!("gui/{uid}");
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootstrap", &domain, dst.to_str().unwrap_or("")])
+            .output();
+
+        // kickstart -k restarts the agent if it was already running,
+        // or starts it fresh if it wasn't. Either way the user sees
+        // it come up now, not on next login.
+        let service = format!("{domain}/{label}");
+        let _ = std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &service])
+            .output();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "macos"))]
+fn install_launchagents(_install_root: String) -> Result<(), String> {
+    // launchctl doesn't exist off macOS. The SA is designed for the
+    // macOS .pkg flow; Linux dev sessions running the wizard just
+    // skip this step so the rest of the flow still exercises.
+    Ok(())
+}
+
+/// Get the current user's UID by shelling out to `id -u`. Avoids
+/// pulling `libc` into an otherwise-libc-free crate. macOS ships
+/// `id` in /usr/bin.
+#[cfg(target_os = "macos")]
+fn current_uid() -> Result<String, String> {
+    let out = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|e| format!("id -u: {e}"))?;
+    if !out.status.success() {
+        return Err("id -u failed".to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// UTC seconds → `YYYYMMDD_HHMMSS` — enough date arithmetic to avoid
 /// bringing chrono into a Tauri app that otherwise doesn't need it.
 fn format_utc_compact(unix_secs: u64) -> String {
@@ -721,6 +915,7 @@ pub fn run() {
             deploy_model,
             register_device,
             install_agent_config,
+            install_launchagents,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
