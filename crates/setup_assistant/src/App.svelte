@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
 
   // Post-install user configuration flow. The .pkg installer has
@@ -8,7 +9,6 @@
   const STEPS = [
     { id: "sign-in", label: "Sign in" },
     { id: "models", label: "Models" },
-    { id: "serving", label: "Serving" },
     { id: "permissions", label: "Permissions" },
     { id: "finish", label: "Finish" },
   ] as const;
@@ -28,10 +28,13 @@
     reason: string | null;
   };
 
-  // Default install root. macOS location — the .pkg lands here.
+  // Default install root. macOS location — the .pkg postinstall
+  // (bundling/pkg/scripts/postinstall) lays the launcher, boot.json,
+  // and Setup Assistant.app here.
+  //
   // TODO(platform-default): swap to a Tauri-side per-OS lookup once
   // @tauri-apps/plugin-os is wired.
-  const DEFAULT_INSTALL_ROOT = "/Library/Application Support/uk.co.locai.link";
+  const DEFAULT_INSTALL_ROOT = "/Library/Locai";
 
   // Bootstrap runs once on mount to verify the .pkg actually
   // installed. Failure surfaces as a full-screen error instead of
@@ -41,9 +44,111 @@
     | { kind: "ready"; install: CheckInstallResult }
     | { kind: "error"; message: string };
 
+  // Wire shapes mirror `DeviceCodeStart` and `SignInPollResult` in
+  // src-tauri/src/lib.rs. Access tokens never cross this boundary —
+  // they live in the Rust `SignInState`.
+  type DeviceCodeStart = {
+    user_code: string;
+    verification_uri: string;
+    verification_uri_complete: string;
+    interval: number;
+    expires_in: number;
+  };
+  type SignInPollResult =
+    | { status: "pending" }
+    | { status: "slow_down" }
+    | { status: "approved"; user_id: string; email: string; username: string }
+    | { status: "denied" }
+    | { status: "expired" }
+    | { status: "error"; message: string };
+
+  type SignIn =
+    | { kind: "idle" }
+    | { kind: "starting" }
+    | { kind: "pending"; start: DeviceCodeStart; interval: number }
+    | { kind: "approved"; email: string; username: string }
+    | { kind: "error"; message: string };
+
+  type RegisteredDevice = {
+    device_id: string;
+    api_key: string;
+    config: unknown; // AgentConfig JSON — passed opaquely back to install_agent_config
+  };
+
+  type ModelSummary = {
+    id: string;
+    display_name: string;
+    model_type: string;
+    framework: string;
+    file_extension: string;
+    size_bytes: number;
+    status: string;
+  };
+
+  type Models =
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "ready"; models: ModelSummary[]; selected: Set<string> }
+    | { kind: "error"; message: string };
+
+  type Finish =
+    | { kind: "idle" }
+    | { kind: "registering" }
+    | { kind: "writing"; registered: RegisteredDevice }
+    | { kind: "deploying"; registered: RegisteredDevice; done: number; total: number }
+    | {
+        kind: "done";
+        device_id: string;
+        config_path: string | null;
+        deployed_count: number;
+      }
+    | { kind: "error"; message: string; registered?: RegisteredDevice };
+
   let bootstrap = $state<Bootstrap>({ kind: "checking" });
   let current = $state(0);
-  let workEmail = $state("");
+  let signIn = $state<SignIn>({ kind: "idle" });
+  let models = $state<Models>({ kind: "idle" });
+  let finish = $state<Finish>({ kind: "idle" });
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Lazy-load the model catalog the first time the user lands on the
+  // Models step (after sign-in, so we have a JWT). Re-navigating back
+  // doesn't refetch — the list is stable enough for a single wizard
+  // pass, and re-running the request would lose any selections.
+  $effect(() => {
+    if (
+      STEPS[current].id === "models" &&
+      signIn.kind === "approved" &&
+      models.kind === "idle"
+    ) {
+      void loadModels();
+    }
+  });
+
+  async function loadModels() {
+    models = { kind: "loading" };
+    try {
+      const list = await invoke<ModelSummary[]>("list_models");
+      models = { kind: "ready", models: list, selected: new Set() };
+    } catch (e) {
+      models = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function toggleModel(id: string) {
+    if (models.kind !== "ready") return;
+    const next = new Set(models.selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    models = { ...models, selected: next };
+  }
+
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
 
   async function runBootstrapCheck() {
     try {
@@ -58,7 +163,164 @@
 
   onMount(() => {
     void runBootstrapCheck();
+    return () => {
+      if (pollTimer !== null) clearTimeout(pollTimer);
+    };
   });
+
+  async function startSignIn() {
+    signIn = { kind: "starting" };
+    try {
+      const start = await invoke<DeviceCodeStart>("sign_in_start");
+      signIn = { kind: "pending", start, interval: start.interval };
+      // Best-effort browser open. If it fails the user can still click
+      // "Open browser again" — the verification URL is always visible.
+      try {
+        await openUrl(start.verification_uri_complete);
+      } catch {
+        // ignored; button in the UI is the fallback
+      }
+      schedulePoll(start.interval);
+    } catch (e) {
+      signIn = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function schedulePoll(intervalSeconds: number) {
+    pollTimer = setTimeout(() => {
+      void runPoll();
+    }, intervalSeconds * 1000);
+  }
+
+  async function runPoll() {
+    if (signIn.kind !== "pending") return;
+    try {
+      const result = await invoke<SignInPollResult>("sign_in_poll");
+      switch (result.status) {
+        case "pending":
+          schedulePoll(signIn.interval);
+          return;
+        case "slow_down":
+          // RFC 8628 §3.5 — bump interval by 5s and keep polling.
+          signIn = { ...signIn, interval: signIn.interval + 5 };
+          schedulePoll(signIn.interval);
+          return;
+        case "approved":
+          signIn = { kind: "approved", email: result.email, username: result.username };
+          return;
+        case "denied":
+          signIn = { kind: "error", message: "Sign-in was denied. You can try again." };
+          return;
+        case "expired":
+          signIn = {
+            kind: "error",
+            message: "The sign-in request expired. Please start again.",
+          };
+          return;
+        case "error":
+          signIn = { kind: "error", message: result.message };
+          return;
+      }
+    } catch (e) {
+      signIn = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  async function completeSetup() {
+    finish = { kind: "registering" };
+    let deviceName: string;
+    try {
+      deviceName = await invoke<string>("suggest_device_name");
+    } catch (e) {
+      finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+      return;
+    }
+    let registered: RegisteredDevice;
+    try {
+      registered = await invoke<RegisteredDevice>("register_device", {
+        deviceName,
+      });
+    } catch (e) {
+      finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+      return;
+    }
+
+    finish = { kind: "writing", registered };
+    let configPath: string | null = null;
+    try {
+      configPath = await invoke<string>("install_agent_config", {
+        installRoot: DEFAULT_INSTALL_ROOT,
+        config: registered.config,
+      });
+    } catch (e) {
+      // Register succeeded on Control but we couldn't lay the config
+      // down locally — flag it distinctly so the user knows the device
+      // exists on the server side either way.
+      finish = {
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+        registered,
+      };
+      return;
+    }
+
+    // Queue deploys for any models the user selected on step 2.
+    // Failures don't roll back the earlier steps — the device is
+    // registered, the config is written, and the user can retry a
+    // failed deploy from the Control UI.
+    const selected =
+      models.kind === "ready" ? Array.from(models.selected) : [];
+    let deployedCount = 0;
+    finish = {
+      kind: "deploying",
+      registered,
+      done: 0,
+      total: selected.length,
+    };
+    for (const modelId of selected) {
+      try {
+        await invoke<string>("deploy_model", {
+          deviceId: registered.device_id,
+          modelId,
+        });
+        deployedCount += 1;
+        finish = {
+          kind: "deploying",
+          registered,
+          done: deployedCount,
+          total: selected.length,
+        };
+      } catch (e) {
+        // Surface the first deploy failure but keep the device in a
+        // finished-with-partial-deploys state — no reason to roll back
+        // the successful deploys.
+        finish = {
+          kind: "error",
+          message: `Deploy failed for one or more models: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          registered,
+        };
+        return;
+      }
+    }
+
+    finish = {
+      kind: "done",
+      device_id: registered.device_id,
+      config_path: configPath,
+      deployed_count: deployedCount,
+    };
+  }
+
+  async function reopenBrowser() {
+    if (signIn.kind !== "pending") return;
+    try {
+      await openUrl(signIn.start.verification_uri_complete);
+    } catch {
+      // no-op; the URL text is on screen for manual copy
+    }
+  }
 
   function next() {
     if (current < STEPS.length - 1) current += 1;
@@ -71,6 +333,13 @@
     if (idx === current) return "current";
     return "pending";
   }
+
+  // The Sign-in step is the only one that gates Continue on external
+  // state. All later steps are placeholders that let Continue through.
+  const canContinue = $derived.by(() => {
+    if (STEPS[current].id === "sign-in") return signIn.kind === "approved";
+    return current < STEPS.length - 1;
+  });
 </script>
 
 {#if bootstrap.kind !== "ready"}
@@ -115,42 +384,211 @@
           <p class="eyebrow">STEP 1 · CONNECT</p>
           <h1>Sign in to Locai</h1>
           <p class="lead">
-            Connect this node to your organisation so it can pull the
-            models on your account and register with your Control Plane.
+            We'll open your browser to sign in. Approve this device
+            there, and this window will pick up automatically.
           </p>
 
-          <label class="field">
-            <span class="field__label">WORK EMAIL</span>
-            <input
-              class="field__input"
-              type="email"
-              placeholder="you@company.com"
-              bind:value={workEmail}
-              autocomplete="email"
-            />
-          </label>
-
-          <p class="fine-print">
-            No account on this device? You can also pair with a device
-            code from the Control Plane. Organisation detection will
-            wire up here once the backend endpoint is available.
-          </p>
+          {#if signIn.kind === "idle"}
+            <button class="btn btn--primary btn--wide" onclick={startSignIn}>
+              Sign in with Loc<span class="brand__accent">ai</span>
+            </button>
+          {:else if signIn.kind === "starting"}
+            <div class="signin-block">
+              <div class="spinner"></div>
+              <div class="signin-block__msg">Requesting a sign-in code…</div>
+            </div>
+          {:else if signIn.kind === "pending"}
+            <div class="signin-block">
+              <p class="field__label">YOUR CODE</p>
+              <div class="user-code">{signIn.start.user_code}</div>
+              <p class="fine-print">
+                If the browser didn't open, visit
+                <span class="mono">{signIn.start.verification_uri}</span>
+                and enter the code above.
+              </p>
+              <div class="row">
+                <button class="btn btn--ghost" onclick={reopenBrowser}>
+                  Open browser again
+                </button>
+                <div class="waiting">
+                  <div class="spinner spinner--sm"></div>
+                  <span>Waiting for approval…</span>
+                </div>
+              </div>
+            </div>
+          {:else if signIn.kind === "approved"}
+            <div class="signin-block">
+              <p class="field__label">SIGNED IN</p>
+              <div class="approved">
+                <span class="checkmark">✓</span>
+                <div>
+                  <div class="approved__name">{signIn.username}</div>
+                  <div class="approved__email">{signIn.email}</div>
+                </div>
+              </div>
+            </div>
+          {:else if signIn.kind === "error"}
+            <div class="signin-block">
+              <div class="signin-block__msg signin-block__msg--error">
+                {signIn.message}
+              </div>
+              <button class="btn btn--primary" onclick={startSignIn}>Try again</button>
+            </div>
+          {/if}
         {:else if STEPS[current].id === "models"}
           <p class="eyebrow">STEP 2 · MODELS</p>
           <h1>Choose models to prefetch</h1>
-          <p class="lead">Placeholder — model catalog + selection UI wires in here.</p>
-        {:else if STEPS[current].id === "serving"}
-          <p class="eyebrow">STEP 3 · SERVING</p>
-          <h1>Serving ports</h1>
-          <p class="lead">Placeholder — port + host configuration wires in here.</p>
+          <p class="lead">
+            Pick which models to send to this device. You can change the
+            selection later from Control.
+          </p>
+
+          {#if models.kind === "loading"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Loading your models…</span>
+              </div>
+            </div>
+          {:else if models.kind === "error"}
+            <div class="signin-block">
+              <div class="signin-block__msg signin-block__msg--error">
+                {models.message}
+              </div>
+              <button class="btn btn--ghost" onclick={loadModels}>Retry</button>
+              <p class="fine-print">
+                You can continue without a selection — models can be
+                deployed from Control at any time.
+              </p>
+            </div>
+          {:else if models.kind === "ready"}
+            {#if models.models.length === 0}
+              <div class="signin-block">
+                <div class="signin-block__msg">
+                  You don't have any models on your account yet. Add
+                  models from Control, then come back — or continue and
+                  set them up later.
+                </div>
+              </div>
+            {:else}
+              <ul class="model-list">
+                {#each models.models as m (m.id)}
+                  <li class="model-row">
+                    <label class="model-row__label">
+                      <input
+                        type="checkbox"
+                        checked={models.selected.has(m.id)}
+                        onchange={() => toggleModel(m.id)}
+                      />
+                      <div class="model-row__body">
+                        <div class="model-row__name">{m.display_name}</div>
+                        <div class="model-row__meta">
+                          <span>{m.model_type}</span>
+                          <span>·</span>
+                          <span>{m.framework}</span>
+                          <span>·</span>
+                          <span>{formatBytes(m.size_bytes)}</span>
+                        </div>
+                      </div>
+                    </label>
+                  </li>
+                {/each}
+              </ul>
+              <p class="fine-print">
+                {models.selected.size} of {models.models.length} selected
+              </p>
+            {/if}
+          {/if}
         {:else if STEPS[current].id === "permissions"}
-          <p class="eyebrow">STEP 4 · PERMISSIONS</p>
+          <p class="eyebrow">STEP 3 · PERMISSIONS</p>
           <h1>macOS permissions</h1>
           <p class="lead">Placeholder — Login Items / Notifications prompts wire in here.</p>
         {:else if STEPS[current].id === "finish"}
-          <p class="eyebrow">STEP 5 · FINISH</p>
-          <h1>All set</h1>
-          <p class="lead">Placeholder — success state + Control Plane handoff wires in here.</p>
+          <p class="eyebrow">STEP 4 · FINISH</p>
+          <h1>Register this device</h1>
+          <p class="lead">
+            Enrol this machine on your Loc.ai organisation and drop the
+            initial config in place. The agent picks it up on next start.
+          </p>
+
+          {#if finish.kind === "idle"}
+            <button
+              class="btn btn--primary btn--wide"
+              onclick={completeSetup}
+            >
+              Complete setup
+            </button>
+          {:else if finish.kind === "registering"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Registering with Control…</span>
+              </div>
+            </div>
+          {:else if finish.kind === "writing"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Writing agent config…</span>
+              </div>
+              <p class="fine-print">
+                Device ID <span class="mono">{finish.registered.device_id}</span>
+              </p>
+            </div>
+          {:else if finish.kind === "deploying"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>
+                  Queueing models on this device
+                  ({finish.done} of {finish.total})…
+                </span>
+              </div>
+            </div>
+          {:else if finish.kind === "done"}
+            <div class="signin-block">
+              <div class="approved">
+                <span class="checkmark">✓</span>
+                <div>
+                  <div class="approved__name">All set</div>
+                  <div class="approved__email">
+                    Device <span class="mono">{finish.device_id}</span>
+                  </div>
+                </div>
+              </div>
+              {#if finish.config_path}
+                <p class="fine-print">
+                  Config written to <span class="mono">{finish.config_path}</span>
+                </p>
+              {/if}
+              {#if finish.deployed_count > 0}
+                <p class="fine-print">
+                  Queued {finish.deployed_count} model{finish.deployed_count === 1 ? "" : "s"} for
+                  this device. The agent will download them on next start.
+                </p>
+              {/if}
+            </div>
+          {:else if finish.kind === "error"}
+            <div class="signin-block">
+              <div class="signin-block__msg signin-block__msg--error">
+                {finish.message}
+              </div>
+              {#if finish.registered}
+                <p class="fine-print">
+                  The device was registered on Control
+                  (<span class="mono">{finish.registered.device_id}</span>)
+                  but the local config couldn't be written. You can
+                  re-run this step or hand the config off manually.
+                </p>
+              {/if}
+              <button
+                class="btn btn--primary"
+                onclick={completeSetup}
+              >
+                Try again
+              </button>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -159,7 +597,7 @@
         <button
           class="btn btn--primary"
           onclick={next}
-          disabled={current === STEPS.length - 1}
+          disabled={current === STEPS.length - 1 || !canContinue}
         >
           Continue
         </button>
@@ -365,7 +803,164 @@
     max-width: 46ch;
   }
 
-  /* --- Sign-in form ------------------------------------------------------- */
+  /* --- Sign-in surfaces --------------------------------------------------- */
+
+  .signin-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-12);
+    max-width: 32rem;
+  }
+  .signin-block__msg {
+    font-size: 13px;
+    color: var(--color-text-secondary);
+  }
+  .signin-block__msg--error {
+    color: var(--color-status-conflict);
+  }
+
+  .user-code {
+    font-family: var(--font-mono), monospace;
+    font-size: 28px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.24em;
+    color: var(--color-text-strong);
+    background: var(--color-surface-cream);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    padding: 14px 20px;
+    text-align: center;
+    user-select: all;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-16);
+    flex-wrap: wrap;
+  }
+  .waiting {
+    display: flex;
+    align-items: center;
+    gap: var(--space-8);
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .approved {
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    padding: var(--space-12) var(--space-14);
+    background: var(--color-surface-tint-green-2);
+    border: 1px solid var(--color-border-green-tint);
+    border-radius: var(--radius-md);
+  }
+  .checkmark {
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-primary-bright);
+    color: var(--color-ink);
+    border-radius: var(--radius-pill);
+    font-weight: var(--weight-bold);
+  }
+  .approved__name {
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-strong);
+  }
+  .approved__email {
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--color-border-strong);
+    border-top-color: var(--color-primary);
+    border-radius: var(--radius-pill);
+    animation: locaiSpin 0.9s linear infinite;
+  }
+  .spinner--sm {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+  }
+
+  .mono {
+    font-family: var(--font-mono), monospace;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    word-break: break-all;
+  }
+
+  .btn--wide {
+    align-self: flex-start;
+    padding: 10px 22px;
+    font-size: 14px;
+  }
+
+  /* --- Model catalog ------------------------------------------------------ */
+
+  .model-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    max-width: 40rem;
+  }
+  .model-row {
+    border: 1px solid var(--color-border-hairline);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-cream-alt);
+  }
+  .model-row:hover {
+    border-color: var(--color-border-strong);
+  }
+  .model-row__label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    padding: var(--space-10) var(--space-12);
+    cursor: pointer;
+    width: 100%;
+  }
+  .model-row__label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--color-primary);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .model-row__body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .model-row__name {
+    font-size: 13px;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-strong);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-row__meta {
+    display: flex;
+    gap: var(--space-6);
+    font-family: var(--font-mono), monospace;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  /* --- Sign-in form (legacy) --------------------------------------------- */
 
   .field {
     display: flex;

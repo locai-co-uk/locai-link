@@ -2,10 +2,84 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::Serialize;
+use tauri::State;
 
 use locai_link_shared::{installed_version, read_boot_json, BootConfig};
+
+/// Prod Control API base. RFC 8628 device-flow endpoints hang off
+/// `/auth/device/{code,token}` and device registration off `/devices/`.
+///
+/// TODO(env-config): swap to a build-time env selector so dev / staging
+/// can point at `https://dev.api.locai.co.uk/api/v1` etc. Companion has
+/// the same TODO on its `CONTROL_URL` const.
+const CONTROL_API_URL: &str = "https://api.locai.co.uk/api/v1";
+
+/// Timeout for both device-code initiation and each poll of the token
+/// endpoint. Kept generous because the backend hits Firestore
+/// synchronously on both paths.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// User-Agent for outbound Control API calls. Google-fronted endpoints
+/// have been observed to stall on requests without an explicit UA;
+/// mirrors what the launcher does for GitHub Releases fetches.
+const USER_AGENT: &str = "locai-link-setup-assistant/0.1.0";
+
+/// Build an HTTP agent with the timeout + user-agent policy every
+/// device-flow call needs. Cheap to construct; called per-command
+/// rather than held in State to keep the module free of ureq types.
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(HTTP_TIMEOUT)
+        .user_agent(USER_AGENT)
+        .build()
+}
+
+/// Returns a device name derived from the machine's hostname. Matches
+/// what Control shows for fleet-enrolled devices (which pass
+/// `platform.node()` from the runtime) whenever the hostname alone is
+/// usable; short hostnames like `"pc"` get suffixed with the OS name
+/// because Control requires `Device.name` to be at least 3 chars.
+fn machine_hostname() -> String {
+    let raw = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if !out.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
+
+    match raw {
+        // Long enough to satisfy Control's `min_length=3` — use verbatim.
+        Some(h) if h.chars().count() >= 3 => h,
+        // Short but non-empty hostname (e.g. `pc`). Append the OS name
+        // so the user still recognises their machine.
+        Some(h) => format!("{h}-{}", std::env::consts::OS),
+        // No hostname reported at all — fall back to a stable default
+        // that still names the OS so the user has a hint.
+        None => format!("locai-link-{}", std::env::consts::OS),
+    }
+}
+
+/// Tauri command: get the hostname the SA should use when registering
+/// this device. Called from the Finish step so the label matches what
+/// fleet enrollment would produce for the same box.
+#[tauri::command]
+fn suggest_device_name() -> String {
+    machine_hostname()
+}
+
+// --- Check Install -----------------------------------------------------------
 
 /// Wire-format result for the Setup Assistant's "Check Install" step.
 ///
@@ -77,11 +151,566 @@ fn check_install(install_root: String) -> CheckInstallResult {
     }
 }
 
+// --- Sign in (RFC 8628 device authorization) --------------------------------
+
+/// Response to the front-end's `sign_in_start` invocation. Mirrors the
+/// backend's `DeviceCodeResponse` (see platform_backend
+/// `user_routes.py::DeviceCodeResponse`) minus the `device_code` — the
+/// front-end never needs the raw device code, it lives in `SignInState`
+/// and the poll command reads it from there.
+#[derive(Serialize)]
+pub struct DeviceCodeStart {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub interval: u64,
+    pub expires_in: u64,
+}
+
+/// Wire result of a single poll. Every RFC §3.5 error case becomes a
+/// distinct variant so the front-end doesn't have to inspect strings.
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SignInPollResult {
+    Pending,
+    SlowDown,
+    Approved {
+        user_id: String,
+        email: String,
+        username: String,
+    },
+    Denied,
+    Expired,
+    /// Anything the front-end can't recover from — network failure,
+    /// unexpected status, missing fields. Message is for display.
+    Error {
+        message: String,
+    },
+}
+
+/// Backend-issued session held server-side (i.e. in the Rust process).
+/// The JWT never crosses the Tauri IPC boundary — the front-end can
+/// only ask "am I signed in" and "please make an authenticated call".
+struct Session {
+    device_code: String,
+    access_token: Option<String>,
+    #[allow(dead_code)] // consumed later by register-with-key wiring
+    refresh_token: Option<String>,
+    user_id: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Default)]
+pub struct SignInState {
+    inner: Mutex<Option<Session>>,
+}
+
+/// Kick off RFC 8628 device authorization. Stores the device_code
+/// server-side so subsequent polls don't require it as an arg.
+#[tauri::command]
+fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
+    let payload = serde_json::json!({
+        "client_metadata": {
+            "os": std::env::consts::OS,
+            "source": "setup_assistant",
+        }
+    });
+
+    let resp = http_agent()
+        .post(&format!("{CONTROL_API_URL}/auth/device/code"))
+        .set("Accept", "application/json")
+        .send_json(payload)
+        .map_err(|e| format!("device code request failed: {e}"))?;
+
+    let body: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("device code response malformed: {e}"))?;
+
+    let device_code = body
+        .get("device_code")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "device_code missing from response".to_string())?
+        .to_string();
+    let user_code = body
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "user_code missing from response".to_string())?
+        .to_string();
+    let verification_uri = body
+        .get("verification_uri")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "verification_uri missing from response".to_string())?
+        .to_string();
+    let verification_uri_complete = body
+        .get("verification_uri_complete")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&verification_uri)
+        .to_string();
+    let interval = body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
+    let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(600);
+
+    *state.inner.lock().expect("SignInState poisoned") = Some(Session {
+        device_code,
+        access_token: None,
+        refresh_token: None,
+        user_id: None,
+        email: None,
+    });
+
+    Ok(DeviceCodeStart {
+        user_code,
+        verification_uri,
+        verification_uri_complete,
+        interval,
+        expires_in,
+    })
+}
+
+/// Poll the token endpoint once. The Svelte side is expected to space
+/// polls by the `interval` returned from `sign_in_start` (and bump it on
+/// `SlowDown`).
+#[tauri::command]
+fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
+    let device_code = match state.inner.lock().expect("SignInState poisoned").as_ref() {
+        Some(s) => s.device_code.clone(),
+        None => {
+            return SignInPollResult::Error {
+                message: "sign_in_start was not called".to_string(),
+            }
+        }
+    };
+
+    let payload = serde_json::json!({
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    });
+
+    match http_agent()
+        .post(&format!("{CONTROL_API_URL}/auth/device/token"))
+        .set("Accept", "application/json")
+        .send_json(payload)
+    {
+        Ok(resp) => {
+            let body: serde_json::Value = match resp.into_json() {
+                Ok(v) => v,
+                Err(e) => {
+                    return SignInPollResult::Error {
+                        message: format!("token response malformed: {e}"),
+                    }
+                }
+            };
+            let access_token = body
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let refresh_token = body
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let user = body.get("user").cloned().unwrap_or_default();
+            let user_id = user
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let email = user
+                .get("email")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let username = user
+                .get("username")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Some(session) = state.inner.lock().expect("SignInState poisoned").as_mut() {
+                session.access_token = Some(access_token);
+                session.refresh_token = refresh_token;
+                session.user_id = Some(user_id.clone());
+                session.email = Some(email.clone());
+            }
+
+            SignInPollResult::Approved {
+                user_id,
+                email,
+                username,
+            }
+        }
+        // RFC §3.5 non-success codes: HTTP 400 with `detail.error` set.
+        Err(ureq::Error::Status(400, resp)) => {
+            let body: serde_json::Value = resp.into_json().unwrap_or_default();
+            let err = body
+                .get("detail")
+                .and_then(|d| d.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match err {
+                "authorization_pending" => SignInPollResult::Pending,
+                "slow_down" => SignInPollResult::SlowDown,
+                "access_denied" => SignInPollResult::Denied,
+                "expired_token" => SignInPollResult::Expired,
+                other => SignInPollResult::Error {
+                    message: format!("unexpected device-flow error: {other}"),
+                },
+            }
+        }
+        // Control-plane 429 (rate-limit), not RFC slow_down. Treat as
+        // slow_down so the front-end backs off the same way.
+        Err(ureq::Error::Status(429, _)) => SignInPollResult::SlowDown,
+        Err(e) => SignInPollResult::Error {
+            message: format!("token poll failed: {e}"),
+        },
+    }
+}
+
+// --- Register device against Control -----------------------------------------
+
+/// Wire result of registering the device with Control. Mirrors
+/// `RegisterWithKeyResponse` on the backend
+/// (`platform_backend/.../device_routes.py::RegisterWithKeyResponse`).
+/// `config` is the AgentConfig blob the runtime expects to see on
+/// disk; we hand it back to the front-end so the Finish step can pass
+/// it to `install_agent_config` verbatim.
+#[derive(Serialize)]
+pub struct RegisteredDevice {
+    pub device_id: String,
+    pub api_key: String,
+    pub config: serde_json::Value,
+}
+
+/// Mints a fresh single-use registration key using the stored JWT,
+/// then registers `device_name` against it. Returns the device id +
+/// api_key + AgentConfig. Errors are `String` so they surface to the
+/// UI as toasts.
+///
+/// Fails fast if the user never signed in — the JWT is required to
+/// authenticate both calls.
+#[tauri::command]
+fn register_device(
+    state: State<'_, SignInState>,
+    device_name: String,
+) -> Result<RegisteredDevice, String> {
+    let token = require_token(&state)?;
+
+    // 1) Mint a registration key. `registration_source=onboarding_wizard`
+    //    threads through to Control's activation-funnel analytics.
+    let mint_body = serde_json::json!({
+        "ttl_hours": 1,
+        "registration_source": "onboarding_wizard",
+    });
+    let key_resp = http_agent()
+        .post(&format!("{CONTROL_API_URL}/devices/registration-keys"))
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .send_json(mint_body)
+        .map_err(|e| describe_ureq_err("registration-keys mint", e))?;
+    let key_body: serde_json::Value = key_resp
+        .into_json()
+        .map_err(|e| format!("registration-keys response malformed: {e}"))?;
+    let registration_key = key_body
+        .get("registration_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "registration_key missing from response".to_string())?
+        .to_string();
+
+    // 2) Redeem the key for a device_id + api_key + AgentConfig.
+    let register_body = serde_json::json!({
+        "registration_key": registration_key,
+        "name": device_name,
+        "device_type": "other",
+        "metadata": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "source": "setup_assistant",
+        },
+    });
+    let reg_resp = http_agent()
+        .post(&format!("{CONTROL_API_URL}/devices/register-with-key"))
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .send_json(register_body)
+        .map_err(|e| describe_ureq_err("register-with-key", e))?;
+    let reg_body: serde_json::Value = reg_resp
+        .into_json()
+        .map_err(|e| format!("register-with-key response malformed: {e}"))?;
+
+    let device_id = reg_body
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "device_id missing from response".to_string())?
+        .to_string();
+    let api_key = reg_body
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "api_key missing from response".to_string())?
+        .to_string();
+    let config = reg_body.get("config").cloned().unwrap_or(serde_json::Value::Null);
+
+    Ok(RegisteredDevice {
+        device_id,
+        api_key,
+        config,
+    })
+}
+
+/// Write `config` into `<install_root>/current/configs/session_YYYYMMDD_HHMMSS.json`
+/// — the location the runtime's `StateManager` picks up on next start
+/// (`src/link/app/state.py`). Returns the path written for UI display.
+///
+/// Errors if `install_root/current/configs/` doesn't exist. On Linux
+/// dev machines with no .pkg install, expect this to fail — the
+/// preceding `register_device` call still succeeded and the device
+/// is enrolled on Control.
+#[tauri::command]
+fn install_agent_config(install_root: String, config: serde_json::Value) -> Result<String, String> {
+    if config.is_null() {
+        return Err("config from register_device was null — nothing to write".to_string());
+    }
+
+    let root = PathBuf::from(&install_root);
+    let configs_dir = root.join("current").join("configs");
+    if !configs_dir.exists() {
+        return Err(format!(
+            "configs directory not found at {}. Is Loc.ai Link installed?",
+            configs_dir.display()
+        ));
+    }
+
+    // Filename mirrors StateManager.bootstrap()'s format: session_<UTC>.json.
+    // Uses UTC so two SA runs on different machines produce sortable names.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system clock: {e}"))?;
+    let secs = now.as_secs();
+    // Minimal YYYYMMDD_HHMMSS formatter — no chrono dep needed.
+    let ts = format_utc_compact(secs);
+    let session_path = configs_dir.join(format!("session_{ts}.json"));
+
+    let serialized = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("serialise config: {e}"))?;
+    std::fs::write(&session_path, serialized)
+        .map_err(|e| format!("write {}: {e}", session_path.display()))?;
+
+    // Match StateManager._tighten_permissions on Unix — the session
+    // file contains the device api_key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&session_path)
+            .map_err(|e| format!("stat {}: {e}", session_path.display()))?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&session_path, perms)
+            .map_err(|e| format!("chmod {}: {e}", session_path.display()))?;
+    }
+
+    Ok(session_path.to_string_lossy().into_owned())
+}
+
+// --- Model catalog (list + deploy) ------------------------------------------
+
+/// Wire-format subset of the backend's `ModelResponse` — only the
+/// fields the wizard actually renders. Skips the heavyweight layer /
+/// summary blobs that `/models/list_without_layers_info` already
+/// omits.
+#[derive(Serialize)]
+pub struct ModelSummary {
+    pub id: String,
+    pub display_name: String,
+    pub model_type: String,
+    pub framework: String,
+    pub file_extension: String,
+    pub size_bytes: u64,
+    pub status: String,
+}
+
+/// Turns a ureq error into a `String` suitable for `Result<T, String>`
+/// return to the front-end, preserving the server's `detail` field on
+/// non-2xx. Without this, ureq's default Display just prints
+/// `"<url>: status code <n>"` and swallows the JSON body — which
+/// is exactly the field Control uses to say *why* it rejected the
+/// call (e.g. `"detail": "device name too long"`).
+fn describe_ureq_err(op: &str, err: ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(code, resp) => {
+            let url = resp.get_url().to_string();
+            // .into_string() consumes the response body. Take a best-
+            // effort look; on failure we still return a useful
+            // status-only message.
+            match resp.into_string() {
+                Ok(body) if !body.is_empty() => {
+                    format!("{op} failed: HTTP {code} from {url} — {body}")
+                }
+                _ => format!("{op} failed: HTTP {code} from {url}"),
+            }
+        }
+        ureq::Error::Transport(t) => format!("{op} failed (transport): {t}"),
+    }
+}
+
+/// Reads the JWT out of `SignInState`. Every JWT-authed command shares
+/// this failure mode ("call sign_in first"), so having one helper
+/// avoids repeating the lock/unwrap dance and gives the front-end a
+/// consistent error string.
+fn require_token(state: &State<'_, SignInState>) -> Result<String, String> {
+    state
+        .inner
+        .lock()
+        .expect("SignInState poisoned")
+        .as_ref()
+        .and_then(|s| s.access_token.clone())
+        .ok_or_else(|| "not signed in — sign in first".to_string())
+}
+
+/// Lists the models available to the signed-in user (including
+/// shared/org-visible ones). Hits `/models/list_without_layers_info`
+/// so we skip the ~MB of per-layer detail the SA has no use for.
+#[tauri::command]
+fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, String> {
+    let token = require_token(&state)?;
+
+    let resp = http_agent()
+        .get(&format!("{CONTROL_API_URL}/models/list_without_layers_info"))
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(|e| describe_ureq_err("list_models", e))?;
+
+    let body: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("list_models response malformed: {e}"))?;
+
+    let arr = body
+        .as_array()
+        .ok_or_else(|| "list_models: expected JSON array".to_string())?;
+
+    // Skip any entry missing an id or display_name — the UI has no
+    // sensible way to render them and Control shouldn't be sending
+    // them, so silent drop is fine.
+    let models = arr
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            let display_name = m.get("display_name")?.as_str()?.to_string();
+            let model_type = m
+                .get("model_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("other")
+                .to_string();
+            let framework = m
+                .get("framework")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Other")
+                .to_string();
+            let file_extension = m
+                .get("file_extension")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let size_bytes = m.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let status = m
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            Some(ModelSummary {
+                id,
+                display_name,
+                model_type,
+                framework,
+                file_extension,
+                size_bytes,
+                status,
+            })
+        })
+        .collect();
+
+    Ok(models)
+}
+
+/// Queue a deploy of `model_id` onto `device_id`. Returns the
+/// deployment id. This just enqueues a command server-side (Control
+/// dispatches it via Zenoh); the runtime does the actual download when
+/// it receives it, so this call returns fast regardless of model size.
+#[tauri::command]
+fn deploy_model(
+    state: State<'_, SignInState>,
+    device_id: String,
+    model_id: String,
+) -> Result<String, String> {
+    let token = require_token(&state)?;
+
+    let resp = http_agent()
+        .post(&format!(
+            "{CONTROL_API_URL}/models/{model_id}/deploy/{device_id}"
+        ))
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {token}"))
+        // Endpoint takes no body — path params only.
+        .call()
+        .map_err(|e| describe_ureq_err("deploy_model", e))?;
+
+    let body: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("deploy_model response malformed: {e}"))?;
+
+    body.get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "deployment id missing from response".to_string())
+}
+
+/// UTC seconds → `YYYYMMDD_HHMMSS` — enough date arithmetic to avoid
+/// bringing chrono into a Tauri app that otherwise doesn't need it.
+fn format_utc_compact(unix_secs: u64) -> String {
+    // Days since 1970-01-01, remainder is time-of-day.
+    let days = unix_secs / 86_400;
+    let tod = unix_secs % 86_400;
+    let h = tod / 3600;
+    let m = (tod % 3600) / 60;
+    let s = tod % 60;
+
+    // Civil-from-days (Howard Hinnant). Handles 1970..∞ without pulling
+    // a date library. See http://howardhinnant.github.io/date_algorithms.html.
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!(
+        "{year:04}{month:02}{d:02}_{h:02}{m:02}{s:02}",
+        year = year,
+        month = month,
+        d = d,
+        h = h,
+        m = m,
+        s = s
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![check_install])
+        .manage(SignInState::default())
+        .invoke_handler(tauri::generate_handler![
+            check_install,
+            sign_in_start,
+            sign_in_poll,
+            suggest_device_name,
+            list_models,
+            deploy_model,
+            register_device,
+            install_agent_config,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
