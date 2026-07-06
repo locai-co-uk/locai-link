@@ -227,22 +227,35 @@
   }
 
   async function completeSetup() {
-    finish = { kind: "registering" };
-    let deviceName: string;
-    try {
-      deviceName = await invoke<string>("suggest_device_name");
-    } catch (e) {
-      finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
-      return;
-    }
+    // Idempotency guard for the retry path. `register_device` is not
+    // safe to call twice — each call creates a new device on Control,
+    // and re-clicking Try Again after a config-write failure would
+    // push the account over its device cap. If we already have a
+    // registered device from a prior attempt, resume from the
+    // install_agent_config phase instead of starting over.
+    const already: RegisteredDevice | undefined =
+      finish.kind === "error" ? finish.registered : undefined;
+
     let registered: RegisteredDevice;
-    try {
-      registered = await invoke<RegisteredDevice>("register_device", {
-        deviceName,
-      });
-    } catch (e) {
-      finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
-      return;
+    if (already) {
+      registered = already;
+    } else {
+      finish = { kind: "registering" };
+      let deviceName: string;
+      try {
+        deviceName = await invoke<string>("suggest_device_name");
+      } catch (e) {
+        finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+        return;
+      }
+      try {
+        registered = await invoke<RegisteredDevice>("register_device", {
+          deviceName,
+        });
+      } catch (e) {
+        finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+        return;
+      }
     }
 
     finish = { kind: "writing", registered };

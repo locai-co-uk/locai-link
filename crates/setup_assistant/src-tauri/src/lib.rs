@@ -470,13 +470,24 @@ fn install_agent_config(install_root: String, config: serde_json::Value) -> Resu
     }
 
     let root = PathBuf::from(&install_root);
-    let configs_dir = root.join("current").join("configs");
-    if !configs_dir.exists() {
+    let current_dir = root.join("current");
+    if !current_dir.exists() {
         return Err(format!(
-            "configs directory not found at {}. Is Loc.ai Link installed?",
-            configs_dir.display()
+            "install root not found at {}. Is Loc.ai Link installed?",
+            current_dir.display()
         ));
     }
+    // configs/ is normally created by the runtime on first start
+    // (see StateManager.__init__ in src/link/app/state.py). On a
+    // fresh .pkg install the runtime hasn't run yet, so the dir
+    // won't exist — create it ourselves rather than error out.
+    let configs_dir = current_dir.join("configs");
+    std::fs::create_dir_all(&configs_dir).map_err(|e| {
+        format!(
+            "create configs dir {}: {e}",
+            configs_dir.display()
+        )
+    })?;
 
     // Filename mirrors StateManager.bootstrap()'s format: session_<UTC>.json.
     // Uses UTC so two SA runs on different machines produce sortable names.
