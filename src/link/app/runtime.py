@@ -106,6 +106,9 @@ class AgentRuntime:
         identity placeholders, validate against the `Command` schema, then act on
         the typed object. A command that fails validation is reported `failed`
         (when it carries an id) so it stops being retried.
+
+        Args:
+            data: Raw command dict as decoded from the wire.
         """
         # Resolve ${identity.*} placeholders (e.g. a sink topic) before validating.
         ident = self.agent_config.identity
@@ -419,7 +422,11 @@ class AgentRuntime:
                 return True
 
     def _deploy_model(self, cmd: DeployModelCommand):
-        """Validate a DEPLOY_MODEL and dispatch the download to a worker thread."""
+        """Validate a DEPLOY_MODEL and dispatch the download to a worker thread.
+
+        Args:
+            cmd: The DEPLOY_MODEL command to validate and dispatch.
+        """
         command_id = cmd.id
         pipeline_id = cmd.pipeline_id
         model_name = cmd.model_name
@@ -458,7 +465,12 @@ class AgentRuntime:
         thread.start()
 
     def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event):
-        """Run the actual download + config registration for a DEPLOY_MODEL."""
+        """Run the actual download + config registration for a DEPLOY_MODEL.
+
+        Args:
+            cmd: The DEPLOY_MODEL command being executed.
+            cancel_event: Set by `_cancel_deploy` to break the chunk loop.
+        """
         command_id = cmd.id
         pipeline_id = cmd.pipeline_id
         model_name = cmd.model_name
@@ -554,7 +566,11 @@ class AgentRuntime:
                     del self._agent_workers[pipeline_id]
 
     def _cancel_deploy(self, cmd: CancelDeployCommand):
-        """Signal an in-flight DEPLOY_MODEL for `cmd.pipeline_id` to abort."""
+        """Signal an in-flight DEPLOY_MODEL for `cmd.pipeline_id` to abort.
+
+        Args:
+            cmd: The CANCEL_DEPLOY command naming the pipeline to abort.
+        """
         with self.lock:
             worker = self._agent_workers.get(cmd.pipeline_id)
             if worker is None or not worker.thread.is_alive():
@@ -569,7 +585,11 @@ class AgentRuntime:
         self.status_logger.report_command(cmd.id, "completed", f"Cancel signal sent to deploy '{original}'")
 
     def _cleanup_partial(self, partial_path: Path):
-        """Best-effort delete of a `.partial` file; log and continue on failure."""
+        """Best-effort delete of a `.partial` file; log and continue on failure.
+
+        Args:
+            partial_path: The `.partial` file to remove.
+        """
         if partial_path.exists():
             try:
                 partial_path.unlink()
@@ -581,6 +601,9 @@ class AgentRuntime:
 
         If the pipeline is running, it restarts with the new configuration.
         Otherwise, the configuration is saved for the next start.
+
+        Args:
+            cmd: The UPDATE_PIPELINE command carrying the new config.
         """
 
         pipeline_id = cmd.pipeline_id
@@ -646,12 +669,6 @@ class AgentRuntime:
         payload: dict[str, Any] | None = None,
     ):
         """Uninstalls a pipeline by removing its configuration and on-disk artifacts.
-
-        Behavior:
-        - If running, it refuses removal unless `force_stop` is True (which stops it first).
-        - Refuses removal if another pipeline references the same artifact path.
-        - Idempotent: missing configs or already-deleted files report as successful.
-        - Uses the command payload as a fallback to locate and free files if local state has drifted.
 
         Args:
             command_id: The command ID.
@@ -797,10 +814,7 @@ class AgentRuntime:
 
         Stops all pipelines and cleans up resources.
         """
-        # Cancel any in-flight deploy workers before touching pipelines. They
-        # are daemon threads and would die at process exit anyway, but joining
-        # here lets them close the streaming socket and remove their .partial
-        # so an OTA re-exec doesn't leave orphaned bytes on disk.
+        # Cancel any in-flight deploy workers before touching pipelines.
         with self.lock:
             workers = list(self._agent_workers.values())
         for w in workers:
@@ -818,18 +832,8 @@ class AgentRuntime:
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
 
-        # Tear down the health server last — its daemon thread would
-        # be killed at process exit anyway, but joining cleanly avoids
-        # the "address already in use" race on a fast restart.
+        # Tear down the health server last
         self.health_server.stop()
-
-
-# ---------------------------------------------------------------------------
-# Wire input validators — first line of defense against malicious/malformed
-# filenames flowing into filesystem operations. Wire-level pydantic catches
-# missing fields and type errors, but it doesn't see "../etc/passwd" as
-# semantically unsafe — that's our job here.
-# ---------------------------------------------------------------------------
 
 
 def _is_safe_basename(name: str) -> bool:
