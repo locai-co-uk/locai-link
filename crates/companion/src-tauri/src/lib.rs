@@ -82,6 +82,7 @@ const CONTROL_URL: &str = "https://control.locai.co.uk";
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
 const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
+const MENU_ID_UNINSTALL: &str = "uninstall";
 const MENU_ID_QUIT: &str = "quit";
 
 /// Prefix for per-model CheckMenuItem ids. The suffix after the prefix
@@ -213,6 +214,51 @@ fn kickstart_runtime_if_installed() {
         .output();
 }
 
+/// Fire the uninstaller with a two-step consent flow:
+///
+///   1. Native AppleScript "Are you sure?" dialog. Default button is
+///      Cancel so a stray return keystroke doesn't nuke the install.
+///   2. If confirmed, `do shell script … with administrator privileges`
+///      pops the standard macOS admin prompt and runs the payload
+///      script as root.
+///
+/// The script itself boots out both LaunchAgents (which SIGTERMs the
+/// companion) before `rm -rf`ing the install root. That kills this
+/// very process — but osascript is a separate child that survives the
+/// parent's death (macOS reparents orphaned children to launchd), so
+/// the shell script completes cleanly.
+///
+/// Detached to its own thread so the menu-event thread (a UI-adjacent
+/// thread) never blocks on the AppleScript dialog.
+#[cfg(target_os = "macos")]
+fn launch_uninstaller() {
+    thread::spawn(|| {
+        // osascript can take a multi-line script via a single -e
+        // argument. Quoting is fiddly — AppleScript wants \" for
+        // literal double-quotes, and Rust wants us to backslash them
+        // in turn. The script is:
+        //
+        //   set answer to display dialog "..." buttons {"Cancel", "Uninstall"} ...
+        //   if button returned of answer is "Uninstall" then
+        //       do shell script "/Library/Locai/uninstall.sh" with administrator privileges
+        //   end if
+        //
+        // A Cancel click throws an AppleScript error (user cancelled);
+        // wrapping in a `try` block swallows it so osascript returns 0.
+        let script = "\
+try
+    set answer to display dialog \"This will remove Loc.ai Link and stop all background services. Your device will remain registered in Control.\" buttons {\"Cancel\", \"Uninstall\"} default button \"Cancel\" with icon caution with title \"Uninstall Loc.ai Link\"
+    if button returned of answer is \"Uninstall\" then
+        do shell script \"/Library/Locai/uninstall.sh\" with administrator privileges
+    end if
+end try
+";
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", script])
+            .output();
+    });
+}
+
 /// Assemble the tray menu and return it along with a handle to the
 /// freshly-created status header — the poll loop calls `set_text` on
 /// that handle every tick so the header always reflects the latest
@@ -248,8 +294,25 @@ fn build_tray_menu(
     let models_submenu = build_models_submenu(app, models)?;
 
     let sep2 = PredefinedMenuItem::separator(app)?;
+    // Uninstall lives above Quit so it sits in the "destructive"
+    // section. Only shown on macOS — Linux/Windows companion builds
+    // don't have an uninstaller to invoke.
+    #[cfg(target_os = "macos")]
+    let uninstall = MenuItem::with_id(
+        app,
+        MENU_ID_UNINSTALL,
+        "Uninstall Loc.ai Link…",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
 
+    #[cfg(target_os = "macos")]
+    let menu = Menu::with_items(
+        app,
+        &[&status, &sep1, &control, &models_submenu, &sep2, &uninstall, &quit],
+    )?;
+    #[cfg(not(target_os = "macos"))]
     let menu = Menu::with_items(app, &[&status, &sep1, &control, &models_submenu, &sep2, &quit])?;
     Ok((menu, status))
 }
@@ -320,6 +383,12 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             if let Err(e) = app.opener().open_url(CONTROL_URL, None::<&str>) {
                 eprintln!("[companion] failed to open {CONTROL_URL}: {e}");
             }
+        }
+        MENU_ID_UNINSTALL => {
+            // macOS-only; on other platforms this menu id never renders
+            // (see build_tray_menu) and the arm is unreachable.
+            #[cfg(target_os = "macos")]
+            launch_uninstaller();
         }
         MENU_ID_QUIT => {
             // Close the tray only. The agent is a shared service that

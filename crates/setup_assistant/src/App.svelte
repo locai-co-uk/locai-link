@@ -110,6 +110,11 @@
   let signIn = $state<SignIn>({ kind: "idle" });
   let models = $state<Models>({ kind: "idle" });
   let finish = $state<Finish>({ kind: "idle" });
+  // Default on — matches the wording on the Permissions step and the
+  // "quietly in the background" pitch. Users who don't want auto-start
+  // uncheck it; either way we still kickstart both LaunchAgents on
+  // Finish, so setup pays off immediately.
+  let runAtLogin = $state(true);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Lazy-load the model catalog the first time the user lands on the
@@ -273,7 +278,10 @@
       // from Applications later and the companion's own kickstart
       // logic will bring the runtime up.
       try {
-        await invoke("install_launchagents", { installRoot: DEFAULT_INSTALL_ROOT });
+        await invoke("install_launchagents", {
+          installRoot: DEFAULT_INSTALL_ROOT,
+          runAtLogin,
+        });
       } catch (e) {
         console.warn("install_launchagents failed:", e);
       }
@@ -529,14 +537,24 @@
           <h1>Runs quietly in the background</h1>
           <p class="lead">
             After setup, Loc.ai Link runs in the background and appears
-            in your menubar. It will start automatically when you log
-            in.
+            in your menubar.
           </p>
+          <label class="toggle-row">
+            <input
+              type="checkbox"
+              bind:checked={runAtLogin}
+            />
+            <div class="toggle-copy">
+              <span class="toggle-title">Start Loc.ai Link at login</span>
+              <span class="toggle-hint">
+                Auto-start the agent and menubar app when you log in.
+                Uncheck to launch manually from Applications.
+              </span>
+            </div>
+          </label>
           <p class="fine-print">
-            To turn off auto-start later, open <strong>System Settings
-            → General → Login Items &amp; Extensions</strong> and toggle
-            <strong>Loc.ai Link</strong> off. To stop the agent entirely,
-            quit it from the menubar.
+            You can change this later in <strong>System Settings →
+            General → Login Items &amp; Extensions</strong>.
           </p>
         {:else if STEPS[current].id === "finish"}
           <p class="eyebrow">STEP 4 · FINISH</p>
@@ -1002,6 +1020,44 @@
     gap: var(--space-6);
     font-family: var(--font-mono), monospace;
     font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-12);
+    padding: var(--space-10) var(--space-12);
+    border: 1px solid var(--color-border-hairline);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-cream-alt);
+    max-width: 40rem;
+    cursor: pointer;
+    margin: var(--space-8) 0 var(--space-12);
+  }
+  .toggle-row:hover {
+    border-color: var(--color-border-strong);
+  }
+  .toggle-row input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--color-primary);
+    cursor: pointer;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .toggle-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .toggle-title {
+    font-size: 13px;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-strong);
+  }
+  .toggle-hint {
+    font-size: 12px;
     color: var(--color-text-muted);
   }
 

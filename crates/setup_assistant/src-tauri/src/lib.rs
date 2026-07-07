@@ -207,6 +207,15 @@ pub struct SignInState {
 
 /// Kick off RFC 8628 device authorization. Stores the device_code
 /// server-side so subsequent polls don't require it as an arg.
+///
+/// Retries once on transport errors (timeout / connection refused).
+/// The first hit to `/auth/device/code` after boot has been observed
+/// to time out on macOS — likely DNS/TLS cold start on the fresh
+/// process's network stack — while an immediate retry succeeds. A
+/// single-shot retry with a short pause covers that without pushing
+/// the wizard's total wait past a reasonable budget. Status errors
+/// (4xx/5xx from Control) skip the retry — those are the server
+/// saying "no" and won't change on repeat.
 #[tauri::command]
 fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
     let payload = serde_json::json!({
@@ -216,11 +225,24 @@ fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, Strin
         }
     });
 
-    let resp = http_agent()
-        .post(&format!("{CONTROL_API_URL}/auth/device/code"))
-        .set("Accept", "application/json")
-        .send_json(payload)
-        .map_err(|e| format!("device code request failed: {e}"))?;
+    let send = || {
+        http_agent()
+            .post(&format!("{CONTROL_API_URL}/auth/device/code"))
+            .set("Accept", "application/json")
+            .send_json(payload.clone())
+    };
+    let resp = match send() {
+        Ok(r) => r,
+        Err(ureq::Error::Transport(t)) => {
+            // Log the first-attempt failure so we can diagnose if the
+            // retry also fails. Tauri routes this to the SA's stderr;
+            // shows up alongside `install_launchagents` logs on macOS.
+            eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying once");
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            send().map_err(|e| describe_ureq_err("device code request", e))?
+        }
+        Err(e) => return Err(describe_ureq_err("device code request", e)),
+    };
 
     let body: serde_json::Value = resp
         .into_json()
@@ -455,14 +477,11 @@ fn register_device(
     })
 }
 
-/// Write `config` into `<install_root>/current/configs/session_YYYYMMDD_HHMMSS.json`
+/// Write `config` into `<install_root>/configs/session_YYYYMMDD_HHMMSS.json`
 /// — the location the runtime's `StateManager` picks up on next start
-/// (`src/link/app/state.py`). Returns the path written for UI display.
-///
-/// Errors if `install_root/current/configs/` doesn't exist. On Linux
-/// dev machines with no .pkg install, expect this to fail — the
-/// preceding `register_device` call still succeeded and the device
-/// is enrolled on Control.
+/// (`src/link/app/state.py`, `STATE_DIR = Path("configs")` resolved
+/// against the LaunchAgent's WorkingDirectory `/Library/Locai`).
+/// Returns the path written for UI display.
 #[tauri::command]
 fn install_agent_config(
     install_root: String,
@@ -491,18 +510,19 @@ fn install_agent_config(
     let config = resolve_config_templates(&config, &context);
 
     let root = PathBuf::from(&install_root);
-    let current_dir = root.join("current");
-    if !current_dir.exists() {
+    if !root.exists() {
         return Err(format!(
             "install root not found at {}. Is Loc.ai Link installed?",
-            current_dir.display()
+            root.display()
         ));
     }
     // configs/ is normally created by the runtime on first start
     // (see StateManager.__init__ in src/link/app/state.py). On a
     // fresh .pkg install the runtime hasn't run yet, so the dir
-    // won't exist — create it ourselves rather than error out.
-    let configs_dir = current_dir.join("configs");
+    // won't exist — create it ourselves rather than error out. Not
+    // inside `current/`: `current/` is the versioned code symlink
+    // and OTA flips it; session state must survive version updates.
+    let configs_dir = root.join("configs");
     std::fs::create_dir_all(&configs_dir).map_err(|e| {
         format!(
             "create configs dir {}: {e}",
@@ -680,8 +700,12 @@ fn deploy_model(
         ))
         .set("Accept", "application/json")
         .set("Authorization", &format!("Bearer {token}"))
-        // Endpoint takes no body — path params only.
-        .call()
+        // Endpoint takes no body — path params only. Send an explicit
+        // empty payload rather than `.call()`: `.call()` on a POST
+        // doesn't set `Content-Length`, and Google's L7 load balancer
+        // in front of Control rejects headerless POSTs with `HTTP 411
+        // Length Required` before the request ever reaches the API.
+        .send_bytes(&[])
         .map_err(|e| describe_ureq_err("deploy_model", e))?;
 
     let body: serde_json::Value = resp
@@ -777,17 +801,24 @@ fn lookup_context_path(context: &serde_json::Value, path: &str) -> Option<String
 /// `<install_root>/LaunchAgents/` into the user's
 /// `~/Library/LaunchAgents/`, then bootstrap + kickstart both.
 ///
-/// This is the "Loc.ai Link runs at login" step of the SA flow. Users
-/// who want to disable auto-start can do it from System Settings →
-/// General → Login Items (the LaunchAgents show up there as
-/// "background items" the user can toggle).
+/// `run_at_login` controls only the plist's `RunAtLoad` key. Both
+/// plists are always installed and bootstrapped so `launchctl kickstart`
+/// from the companion works either way. When the toggle is off:
+///   * `RunAtLoad` in each plist is patched to `false` before bootstrap
+///   * both agents are still kickstarted now (so the user sees the tray
+///     icon + runtime come up right after Finish — the setup they just
+///     completed pays off immediately)
+///   * next login, launchd sees RunAtLoad=false and leaves them alone
+///
+/// Users can also flip this later from System Settings → General →
+/// Login Items (the LaunchAgents appear there as "background items").
 ///
 /// No-op on non-macOS platforms — `launchctl` doesn't exist elsewhere.
 /// The install path branches on target_os so Linux dev machines don't
 /// error out running through the flow.
 #[tauri::command]
 #[cfg(target_os = "macos")]
-fn install_launchagents(install_root: String) -> Result<(), String> {
+fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
     let root = PathBuf::from(&install_root);
     let source_dir = root.join("LaunchAgents");
     if !source_dir.is_dir() {
@@ -821,6 +852,24 @@ fn install_launchagents(install_root: String) -> Result<(), String> {
         std::fs::copy(&src, &dst)
             .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
 
+        // Toggle RunAtLoad via PlistBuddy — macOS-native, handles
+        // xml/binary plists equally, and doesn't depend on the exact
+        // whitespace of the source file the way a string replace would.
+        // Source plists ship with RunAtLoad=true; only touch when the
+        // user opted out.
+        if !run_at_login {
+            let status = std::process::Command::new("/usr/libexec/PlistBuddy")
+                .args(["-c", "Set :RunAtLoad false", dst.to_str().unwrap_or("")])
+                .status()
+                .map_err(|e| format!("PlistBuddy: {e}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "PlistBuddy failed to set RunAtLoad=false on {}",
+                    dst.display()
+                ));
+            }
+        }
+
         // Bootstrap into the user's GUI domain (aqua session). If the
         // agent is already loaded from a prior run, bootstrap returns
         // an error we can ignore — kickstart below still refreshes
@@ -845,7 +894,7 @@ fn install_launchagents(install_root: String) -> Result<(), String> {
 
 #[tauri::command]
 #[cfg(not(target_os = "macos"))]
-fn install_launchagents(_install_root: String) -> Result<(), String> {
+fn install_launchagents(_install_root: String, _run_at_login: bool) -> Result<(), String> {
     // launchctl doesn't exist off macOS. The SA is designed for the
     // macOS .pkg flow; Linux dev sessions running the wizard just
     // skip this step so the rest of the flow still exercises.

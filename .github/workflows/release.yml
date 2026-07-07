@@ -354,12 +354,20 @@ jobs:
 
           # LaunchAgent plists — bundled but NOT bootstrapped at
           # install time. The Setup Assistant registers them on
-          # Finish if the user opted in to "Start at login".
+          # Finish (always) and toggles RunAtLoad based on the
+          # "Start at login" checkbox on the Permissions step.
           mkdir -p "$STAGING/LaunchAgents"
           cp bundling/pkg/LaunchAgents/uk.co.locai.link.agent.plist \
              "$STAGING/LaunchAgents/uk.co.locai.link.agent.plist"
           cp bundling/pkg/LaunchAgents/uk.co.locai.link.companion.plist \
              "$STAGING/LaunchAgents/uk.co.locai.link.companion.plist"
+
+          # Uninstaller script — invoked from the companion tray menu
+          # ("Uninstall Loc.ai Link…") via osascript with admin
+          # privileges, and by any user with `sudo /Library/Locai/uninstall.sh`
+          # from Terminal. postinstall re-chmods 755 defensively.
+          cp bundling/pkg/uninstall.sh "$STAGING/uninstall.sh"
+          chmod 755 "$STAGING/uninstall.sh"
 
           # 2. Version-stamp Distribution.xml. The skeleton ships
           #    "0.0.0" as a placeholder; productbuild wants the real
