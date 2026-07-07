@@ -16,6 +16,7 @@ from link.app.state import StateManager
 from link.components.pipeline import Pipeline
 from link.components.registry import Component, ComponentRegistry
 from link.config.commands import (
+    CancelDeployCommand,
     DeployModelCommand,
     StartModelCommand,
     StartModelInferenceCommand,
@@ -41,6 +42,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _AgentWorker:
+    """Handle for a long-running background command worker."""
+
+    __slots__ = ("cancel_event", "thread", "command_id")
+
+    def __init__(self, cancel_event: threading.Event, thread: threading.Thread, command_id: str):
+        self.cancel_event = cancel_event
+        self.thread = thread
+        self.command_id = command_id
+
+
 class AgentRuntime:
     """Manages the lifecycle of device inference pipelines."""
 
@@ -64,6 +76,7 @@ class AgentRuntime:
 
         self.pipeline_configs = {p.id: p for p in agent_config.pipelines}
         self.pipelines = {}
+        self._agent_workers: dict[str, _AgentWorker] = {}
 
         self.lock = threading.RLock()
         self.running = True
@@ -71,17 +84,7 @@ class AgentRuntime:
         self.update_requested = False
         self.config_restart_requested = False
 
-        # Health server for local clients that need a fresh view of
-        # agent state. Daemon thread on 127.0.0.1:8101; mutated from
-        # command dispatch when a serve starts/stops. Started lazily
-        # in run() so unit tests that construct an AgentRuntime don't
-        # accidentally bind the port.
-        # `models_provider` is a callable so /models always reflects
-        # the current pipeline set without pushed updates.
-        # `command_handler` is our own `handle_command` — loopback
-        # callers POST START_SERVING / STOP_SERVING through here so
-        # the local HTTP API and the Zenoh command channel share one
-        # dispatch path.
+        # Health server for local clients that need a fresh view of agent state.
         self.health_state = HealthState(
             version=resolve_agent_version(),
             models_provider=self._snapshot_models,
@@ -121,10 +124,7 @@ class AgentRuntime:
             cmd = parse_command(resolved)
         except ValidationError as e:
             cmd_id = data.get("id")
-            # Keep the full validation detail in local logs; tell the backend
-            # only that the command was malformed. Pydantic ValidationError
-            # repr can include payload field values, which we don't want
-            # echoing back through the command-status telemetry channel.
+
             logger.warning(f"Command rejected (schema validation failed): {e}")
             if isinstance(cmd_id, str) and cmd_id:
                 self.status_logger.report_command(cmd_id, "failed", "Invalid command payload")
@@ -135,6 +135,9 @@ class AgentRuntime:
         try:
             if isinstance(cmd, DeployModelCommand):
                 self._deploy_model(cmd)
+
+            elif isinstance(cmd, CancelDeployCommand):
+                self._cancel_deploy(cmd)
 
             elif isinstance(cmd, StartModelCommand):
                 success = self._start_pipeline(cmd.pipeline_id, cmd.config.model_dump())
@@ -171,9 +174,7 @@ class AgentRuntime:
                         logger.error(msg)
                         self.status_logger.report_command(cmd.id, "failed", msg)
                         return
-                    # llama-swap routes by display_name (human-readable); backend
-                    # attribution is independent — it uses pipeline_id via the
-                    # Zenoh topic key set in this pipeline's sink config.
+
                     config.source.args.update(
                         {
                             "mode": "serve",
@@ -204,19 +205,13 @@ class AgentRuntime:
                     self.status_logger.report_model(
                         cmd.pipeline_id, running=False, pid=0, serving=False, serving_pid=0, serving_port=0
                     )
-                    # Only clear health state if THIS was the serving
-                    # pipeline. Multi-model serving in a single agent is
-                    # rare today but the explicit guard avoids reporting
-                    # idle while a different model is still serving.
+
                     if self.health_state.model_id == cmd.pipeline_id:
                         self.health_state.set_serving(None)
                 else:
                     self.status_logger.report_command(cmd.id, "failed", f"Failed to stop {cmd.pipeline_id}")
 
             elif isinstance(cmd, UninstallModelCommand):
-                # filename_on_server / file_extension flow into a filesystem
-                # delete below — reject anything that isn't a plain basename
-                # before _uninstall_model gets a chance to compose a path.
                 safe_payload: dict[str, str] = {}
                 if cmd.filename_on_server:
                     if not _is_safe_basename(cmd.filename_on_server):
@@ -300,10 +295,7 @@ class AgentRuntime:
                         if is_active and pid in self.pipeline_configs:
                             started = self._start_pipeline(pid)
                             recovered_any = True
-                            # Re-announce serving state to Control. Reporter
-                            # failures must NOT abort startup — they'd skip
-                            # the try/finally below that owns _shutdown() and
-                            # the offline lifecycle report.
+                            # Re-announce serving state to Control.
                             if started:
                                 p_conf = self.pipeline_configs[pid]
                                 src_args = p_conf.source.args if p_conf.source else {}
@@ -319,12 +311,7 @@ class AgentRuntime:
                                         )
                                         self.health_state.set_serving(pid)
                                     elif src_args.get("model_path"):
-                                        # Inference-mode model pipeline —
-                                        # mirror the report that the
-                                        # StartModelInferenceCommand handler
-                                        # emits, gated on model_path so
-                                        # telemetry/poller pipelines stay
-                                        # silent.
+                                        # Inference-mode model pipeline
                                         self.status_logger.report_model(
                                             pid,
                                             running=True,
@@ -432,18 +419,11 @@ class AgentRuntime:
                 return True
 
     def _deploy_model(self, cmd: DeployModelCommand):
-        """Download the model artifact and register the provided pipeline.
-
-        The pipeline definition arrives ready-made; the agent stores `cmd.config`
-        verbatim, with no mapping.
-        """
+        """Validate a DEPLOY_MODEL and dispatch the download to a worker thread."""
         command_id = cmd.id
         pipeline_id = cmd.pipeline_id
         model_name = cmd.model_name
 
-        # pipeline_id and config.id are independently set on the wire; if they
-        # diverge, the bundle was malformed by the producer and we'd silently
-        # persist under one key while restarts/lookups use the other.
         if cmd.config.id != pipeline_id:
             msg = f"Refusing deploy: pipeline_id {pipeline_id!r} != config.id {cmd.config.id!r}"
             logger.error(msg)
@@ -455,62 +435,146 @@ class AgentRuntime:
             self.status_logger.report_command(command_id, "failed", "Invalid model_name")
             return
 
-        logger.info(f"Initiating deployment for command '{command_id}'...")
-        models_dir = Path.cwd().joinpath("models")
-        models_dir.mkdir(parents=True, exist_ok=True)
-
-        download_url = (
-            f"{self.agent_config.identity.api_url}/models/{pipeline_id}/download/"
-            + self.agent_config.identity.device_id
-            + "/agent"
-        )
-        target_path = models_dir / model_name
-
-        if not target_path.exists():
-            logger.info(f"Downloading {model_name} from {download_url}...")
-            try:
-                headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
-                with requests.get(download_url, headers=headers, stream=True, timeout=600) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get("content-length", 0))
-                    done = 0
-                    last_reported = -1
-                    self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
-                    with open(target_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                            done += len(chunk)
-                            if total:
-                                pct = int((done / total) * 100)
-                                # Throttle to 5%-step deltas — keeps frontend SSE
-                                # smooth without flooding the Zenoh fanout.
-                                if pct >= last_reported + 5:
-                                    self.status_logger.report_deployment_progress(
-                                        pipeline_id, "downloading", float(pct), done, total
-                                    )
-                                    last_reported = pct
-                logger.info(f"Model saved to {target_path}")
-            except Exception as e:
-                msg = f"Failed to download model: {e}"
-                logger.error(msg)
+        with self.lock:
+            existing = self._agent_workers.get(pipeline_id)
+            if existing is not None and existing.thread.is_alive():
+                msg = (
+                    f"Deploy already in progress for pipeline '{pipeline_id}' "
+                    f"(command '{existing.command_id}'). Send CANCEL_DEPLOY first."
+                )
+                logger.warning(msg)
                 self.status_logger.report_command(command_id, "failed", msg)
                 return
-        else:
-            logger.info(f"Model {model_name} already exists. Using cached file.")
+            cancel_event = threading.Event()
+            thread = threading.Thread(
+                target=self._deploy_worker,
+                name=f"deploy-{pipeline_id}",
+                args=(cmd, cancel_event),
+                daemon=True,
+            )
+            self._agent_workers[pipeline_id] = _AgentWorker(cancel_event, thread, command_id)
 
-        self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
+        logger.info(f"Initiating deployment for command '{command_id}'...")
+        thread.start()
 
-        with self.lock:
-            self.pipeline_configs[pipeline_id] = cmd.config
-            if self.state_manager:
+    def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event):
+        """Run the actual download + config registration for a DEPLOY_MODEL."""
+        command_id = cmd.id
+        pipeline_id = cmd.pipeline_id
+        model_name = cmd.model_name
+
+        try:
+            models_dir = Path.cwd().joinpath("models")
+            models_dir.mkdir(parents=True, exist_ok=True)
+
+            download_url = (
+                f"{self.agent_config.identity.api_url}/models/{pipeline_id}/download/"
+                + self.agent_config.identity.device_id
+                + "/agent"
+            )
+            target_path = models_dir / model_name
+
+            partial_path = target_path.with_name(target_path.name + ".partial")
+            cancelled = False
+
+            if not target_path.exists():
+                if partial_path.exists():
+                    try:
+                        partial_path.unlink()
+                    except OSError as e:
+                        logger.warning(f"Failed to remove stale partial {partial_path}: {e}")
+
+                logger.info(f"Downloading {model_name} from {download_url}...")
                 try:
-                    self.state_manager.update_pipeline_config(cmd.config)
+                    headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
+                    with requests.get(download_url, headers=headers, stream=True, timeout=600) as r:
+                        r.raise_for_status()
+                        total = int(r.headers.get("content-length", 0))
+                        done = 0
+                        last_reported = -1
+                        self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
+                        with open(partial_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if cancel_event.is_set():
+                                    cancelled = True
+                                    break
+                                f.write(chunk)
+                                done += len(chunk)
+                                if total:
+                                    pct = int((done / total) * 100)
+                                    if pct >= last_reported + 5:
+                                        self.status_logger.report_deployment_progress(
+                                            pipeline_id, "downloading", float(pct), done, total
+                                        )
+                                        last_reported = pct
                 except Exception as e:
-                    logger.warning(f"Failed to persist state: {e}")
+                    self._cleanup_partial(partial_path)
+                    msg = f"Failed to download model: {e}"
+                    logger.error(msg)
+                    self.status_logger.report_command(command_id, "failed", msg)
+                    return
 
-        logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
-        self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
-        self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
+                if cancelled:
+                    self._cleanup_partial(partial_path)
+                    logger.info(f"Deploy '{pipeline_id}' cancelled during download.")
+                    self.status_logger.report_deployment_progress(pipeline_id, "cancelled", 0.0, 0, 0)
+                    self.status_logger.report_command(command_id, "failed", "cancelled")
+                    return
+
+                partial_path.replace(target_path)
+                logger.info(f"Model saved to {target_path}")
+            else:
+                logger.info(f"Model {model_name} already exists. Using cached file.")
+
+            # Re-check cancel between download completion and config commit
+            # so a cancel arriving at the tail of the download still counts.
+            if cancel_event.is_set():
+                logger.info(f"Deploy '{pipeline_id}' cancelled before configuring.")
+                self.status_logger.report_deployment_progress(pipeline_id, "cancelled", 0.0, 0, 0)
+                self.status_logger.report_command(command_id, "failed", "cancelled")
+                return
+
+            self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
+
+            with self.lock:
+                self.pipeline_configs[pipeline_id] = cmd.config
+                if self.state_manager:
+                    try:
+                        self.state_manager.update_pipeline_config(cmd.config)
+                    except Exception as e:
+                        logger.warning(f"Failed to persist state: {e}")
+
+            logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
+            self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
+            self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
+        finally:
+            with self.lock:
+                worker = self._agent_workers.get(pipeline_id)
+                if worker is not None and worker.command_id == command_id:
+                    del self._agent_workers[pipeline_id]
+
+    def _cancel_deploy(self, cmd: CancelDeployCommand):
+        """Signal an in-flight DEPLOY_MODEL for `cmd.pipeline_id` to abort."""
+        with self.lock:
+            worker = self._agent_workers.get(cmd.pipeline_id)
+            if worker is None or not worker.thread.is_alive():
+                self.status_logger.report_command(
+                    cmd.id, "completed", f"No active deploy for pipeline '{cmd.pipeline_id}'"
+                )
+                return
+            worker.cancel_event.set()
+            original = worker.command_id
+
+        logger.info(f"Cancelling deploy for '{cmd.pipeline_id}' (deploy command '{original}')")
+        self.status_logger.report_command(cmd.id, "completed", f"Cancel signal sent to deploy '{original}'")
+
+    def _cleanup_partial(self, partial_path: Path):
+        """Best-effort delete of a `.partial` file; log and continue on failure."""
+        if partial_path.exists():
+            try:
+                partial_path.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to delete partial {partial_path}: {e}")
 
     def _update_pipeline(self, cmd: UpdatePipelineCommand):
         """Updates a deployed pipeline's configuration, preserving its running state.
@@ -550,24 +614,6 @@ class AgentRuntime:
 
     def _snapshot_models(self) -> list[dict[str, Any]]:
         """Freshly enumerate servable-model pipelines for `GET /models`.
-
-        A pipeline qualifies as a "model" if its source args carry a
-        `model_path` — the pragmatic marker for LLM / plugin pipelines
-        that participate in llama-swap serving. Extend the filter here
-        when we onboard other model types (audio transcription, image
-        classification) into the response.
-
-        `is_serving` mirrors the live runtime: the pipeline must be in
-        `self.pipelines` (actually running) AND have `mode=serve` on
-        its source, because a pipeline can run in inference or serve
-        modes and only the second one is what a loopback toggle acts
-        on.
-
-        Holds `self.lock` for the whole iteration — called from the
-        `/models` HTTP handler thread while start/stop/deploy paths
-        mutate `pipeline_configs` and `pipelines` under the same lock,
-        so a naked iteration races and can raise
-        ``dictionary changed size during iteration``.
 
         Returns:
             list[dict[str, Any]]: One entry per servable pipeline with
@@ -642,9 +688,6 @@ class AgentRuntime:
                 if model_path:
                     artifact_path = Path(str(model_path))
 
-            # Orphaned-file fallback: no local config (so no model_path), but the
-            # command payload told us the filename — reconstruct the path under the
-            # same models/ dir _deploy_model writes to, so we still free disk.
             if artifact_path is None and payload:
                 filename = payload.get("filename_on_server")
                 if filename:
@@ -754,6 +797,17 @@ class AgentRuntime:
 
         Stops all pipelines and cleans up resources.
         """
+        # Cancel any in-flight deploy workers before touching pipelines. They
+        # are daemon threads and would die at process exit anyway, but joining
+        # here lets them close the streaming socket and remove their .partial
+        # so an OTA re-exec doesn't leave orphaned bytes on disk.
+        with self.lock:
+            workers = list(self._agent_workers.values())
+        for w in workers:
+            w.cancel_event.set()
+        for w in workers:
+            w.thread.join(timeout=5.0)
+
         logger.info("Stopping pipelines...")
         with self.lock:
             for pipe in self.pipelines.values():
