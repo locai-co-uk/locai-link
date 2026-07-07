@@ -402,22 +402,21 @@ pub struct RegisteredDevice {
     pub config: serde_json::Value,
 }
 
-/// Mints a fresh single-use registration key using the stored JWT,
-/// then registers `device_name` against it. Returns the device id +
-/// api_key + AgentConfig. Errors are `String` so they surface to the
-/// UI as toasts.
+/// Mints a fresh single-use registration key using the stored JWT.
+/// Returned string is fed to `register_device` on the next call.
 ///
-/// Fails fast if the user never signed in — the JWT is required to
-/// authenticate both calls.
+/// Split from `register_device` so the UI can render distinct
+/// "Requesting registration key…" and "Registering device…" states —
+/// the register-with-key POST can take 5–10s when Control is cold,
+/// and a single monolithic "registering" phase looks like the wizard
+/// has hung.
+///
+/// `registration_source=onboarding_wizard` threads through to Control's
+/// activation-funnel analytics.
 #[tauri::command]
-fn register_device(
-    state: State<'_, SignInState>,
-    device_name: String,
-) -> Result<RegisteredDevice, String> {
+fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String> {
     let token = require_token(&state)?;
 
-    // 1) Mint a registration key. `registration_source=onboarding_wizard`
-    //    threads through to Control's activation-funnel analytics.
     let mint_body = serde_json::json!({
         "ttl_hours": 1,
         "registration_source": "onboarding_wizard",
@@ -436,8 +435,23 @@ fn register_device(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "registration_key missing from response".to_string())?
         .to_string();
+    Ok(registration_key)
+}
 
-    // 2) Redeem the key for a device_id + api_key + AgentConfig.
+/// Redeems a previously-minted `registration_key` for a
+/// (device_id, api_key, AgentConfig) triple. Errors are `String` so
+/// they surface to the UI as toasts.
+///
+/// Fails fast if the user never signed in — the JWT is required for
+/// this call in addition to the one-shot registration key.
+#[tauri::command]
+fn register_device(
+    state: State<'_, SignInState>,
+    device_name: String,
+    registration_key: String,
+) -> Result<RegisteredDevice, String> {
+    let token = require_token(&state)?;
+
     let register_body = serde_json::json!({
         "registration_key": registration_key,
         "name": device_name,
@@ -512,7 +526,7 @@ fn install_agent_config(
     let root = PathBuf::from(&install_root);
     if !root.exists() {
         return Err(format!(
-            "install root not found at {}. Is Loc.ai Link installed?",
+            "install root not found at {}. Is Locai Link installed?",
             root.display()
         ));
     }
@@ -846,11 +860,45 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         ),
     ];
 
+    // Belt-and-braces: strip the com.apple.quarantine xattr from the
+    // companion .app before we ask launchd to run it. A signed +
+    // notarized .pkg shouldn't attach quarantine to files it installs,
+    // but if it does (some macOS versions, some MDM deployment paths)
+    // launchctl-driven launches sit silently blocked until the user
+    // double-clicks in Finder. `xattr -dr` on a path without the attr
+    // is a no-op — safe to run unconditionally.
+    let companion_app_paths = [
+        "/Applications/Locai Link.app",
+        // Also cover the /Library/Locai bundle (in case a variant
+        // build ever launches from there directly).
+        "/Library/Locai/Locai Link.app",
+    ];
+    for path in companion_app_paths {
+        let _ = std::process::Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine", path])
+            .output();
+    }
+
     for (plist_name, label) in agents {
         let src = source_dir.join(plist_name);
         let dst = dest_dir.join(plist_name);
         std::fs::copy(&src, &dst)
             .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+
+        // macOS 12+ validates plist permissions before load — anything
+        // other than 0644 user-owned makes `launchctl bootstrap` reject
+        // with a cryptic "Bootstrap failed: 5: Input/output error".
+        // Rust's fs::copy carries source mode bits through; force the
+        // canonical mode here so the source's exact perms don't matter.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&dst)
+                .map_err(|e| format!("stat {}: {e}", dst.display()))?
+                .permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&dst, perms)
+                .map_err(|e| format!("chmod 644 {}: {e}", dst.display()))?;
+        }
 
         // Toggle RunAtLoad via PlistBuddy — macOS-native, handles
         // xml/binary plists equally, and doesn't depend on the exact
@@ -870,23 +918,51 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             }
         }
 
-        // Bootstrap into the user's GUI domain (aqua session). If the
-        // agent is already loaded from a prior run, bootstrap returns
-        // an error we can ignore — kickstart below still refreshes
-        // the running process.
         let uid = current_uid()?;
         let domain = format!("gui/{uid}");
+        let service = format!("{domain}/{label}");
+
+        // bootout-then-bootstrap: if the plist was loaded by a prior
+        // install, `launchctl bootstrap` will fail with "service already
+        // loaded" and the fresh plist (with our just-flipped RunAtLoad,
+        // updated ProgramArguments after rename, etc.) never takes
+        // effect. Explicitly bootout first — no-op error on the first
+        // install where it wasn't loaded — then bootstrap the fresh
+        // copy. Ignore stdout on bootout; capture stderr on bootstrap.
         let _ = std::process::Command::new("launchctl")
-            .args(["bootstrap", &domain, dst.to_str().unwrap_or("")])
+            .args(["bootout", &service])
             .output();
 
-        // kickstart -k restarts the agent if it was already running,
-        // or starts it fresh if it wasn't. Either way the user sees
-        // it come up now, not on next login.
-        let service = format!("{domain}/{label}");
-        let _ = std::process::Command::new("launchctl")
+        let bootstrap_out = std::process::Command::new("launchctl")
+            .args(["bootstrap", &domain, dst.to_str().unwrap_or("")])
+            .output()
+            .map_err(|e| format!("launchctl bootstrap: {e}"))?;
+        if !bootstrap_out.status.success() {
+            // Log but keep going — kickstart may still work if the
+            // service was already loaded and bootstrap merely raced.
+            eprintln!(
+                "[install_launchagents] bootstrap {service} failed ({:?}): {} {}",
+                bootstrap_out.status.code(),
+                String::from_utf8_lossy(&bootstrap_out.stdout).trim(),
+                String::from_utf8_lossy(&bootstrap_out.stderr).trim(),
+            );
+        }
+
+        // kickstart -k restarts the service if already running, starts
+        // it fresh if not. Its output is where "no such service"
+        // manifests when the bootstrap didn't take.
+        let kickstart_out = std::process::Command::new("launchctl")
             .args(["kickstart", "-k", &service])
-            .output();
+            .output()
+            .map_err(|e| format!("launchctl kickstart: {e}"))?;
+        if !kickstart_out.status.success() {
+            eprintln!(
+                "[install_launchagents] kickstart {service} failed ({:?}): {} {}",
+                kickstart_out.status.code(),
+                String::from_utf8_lossy(&kickstart_out.stdout).trim(),
+                String::from_utf8_lossy(&kickstart_out.stderr).trim(),
+            );
+        }
     }
 
     Ok(())
@@ -914,6 +990,19 @@ fn current_uid() -> Result<String, String> {
         return Err("id -u failed".to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Terminate the Setup Assistant process. Bound to the "Close" button
+/// on the Finish step's done state.
+///
+/// `getCurrentWindow().close()` on macOS hides the window rather than
+/// exiting the app — Tauri 2 defaults to standard Cocoa "close-hides"
+/// semantics. For a one-shot wizard we actually want the process to
+/// end so the postinstall handoff doesn't leave a stale accessory
+/// process around after Finish.
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 /// UTC seconds → `YYYYMMDD_HHMMSS` — enough date arithmetic to avoid
@@ -962,9 +1051,11 @@ pub fn run() {
             suggest_device_name,
             list_models,
             deploy_model,
+            mint_registration_key,
             register_device,
             install_agent_config,
             install_launchagents,
+            exit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

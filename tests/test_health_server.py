@@ -54,6 +54,36 @@ def test_idle_state_reports_not_serving(server):
     assert body["currently_serving"] is False
     assert body["model_id"] is None
     assert body["uptime_seconds"] >= 0
+    # transport is null until `set_transport` is called (unit tests
+    # construct HealthState standalone without a Zenoh session).
+    assert body["transport"] is None
+
+
+def test_set_transport_surfaces_in_response(server):
+    _, state, port = server
+    state.set_transport(
+        transport_type="zenoh",
+        endpoint="tls/zenoh.example.com:7448",
+        connected=True,
+    )
+    body = _get_health(port)
+    assert body["transport"] == {
+        "type": "zenoh",
+        "endpoint": "tls/zenoh.example.com:7448",
+        "connected": True,
+    }
+
+
+def test_set_transport_disconnect_flips_connected_only(server):
+    _, state, port = server
+    state.set_transport("zenoh", "tls/zenoh.example.com:7448", connected=True)
+    state.set_transport("zenoh", "tls/zenoh.example.com:7448", connected=False)
+    body = _get_health(port)
+    assert body["transport"] == {
+        "type": "zenoh",
+        "endpoint": "tls/zenoh.example.com:7448",
+        "connected": False,
+    }
 
 
 def test_set_serving_surfaces_in_response(server):

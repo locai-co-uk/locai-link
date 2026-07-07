@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 #
-# Removes Loc.ai Link from the machine.
+# Removes Locai Link from the machine.
 #
 # Invoked in two ways:
-#   1. From the companion tray menu: "Uninstall Loc.ai Link…" — the
+#   1. From the companion tray menu: "Uninstall Locai Link…" — the
 #      companion shells out to `osascript` which runs this script via
 #      `do shell script with administrator privileges` (so the script
 #      always executes as root).
@@ -25,7 +25,9 @@ set -uo pipefail
 
 INSTALL_ROOT="/Library/Locai"
 CLI_SYMLINK="/usr/local/bin/locai"
-COMPANION_SYMLINK="/Applications/Loc.ai Link.app"
+# Historically a symlink into $INSTALL_ROOT; now a real `ditto`d copy
+# (see postinstall). Uninstall handles both by using `rm -rf`.
+COMPANION_APP_IN_APPLICATIONS="/Applications/Locai Link.app"
 PKG_RECEIPT="uk.co.locai.link.runtime"
 
 log() {
@@ -60,11 +62,11 @@ fi
 # outside launchd (e.g. `locai run` from a terminal) wouldn't be
 # covered. Match on install path so we don't hit unrelated processes.
 pkill -f "$INSTALL_ROOT/locai-link" 2>/dev/null || true
-pkill -f "Loc.ai Link.app"          2>/dev/null || true
+pkill -f "Locai Link.app"          2>/dev/null || true
 
 # --- 3. Remove payload + symlinks -----------------------------------
 rm -rf "$INSTALL_ROOT"
-rm -f  "$COMPANION_SYMLINK"
+rm -rf "$COMPANION_APP_IN_APPLICATIONS"
 rm -f  "$CLI_SYMLINK"
 log "removed $INSTALL_ROOT + symlinks"
 
@@ -73,5 +75,5 @@ log "removed $INSTALL_ROOT + symlinks"
 # see stale ownership records.
 pkgutil --forget "$PKG_RECEIPT" 2>/dev/null || true
 
-log "Loc.ai Link removed"
+log "Locai Link removed"
 exit 0

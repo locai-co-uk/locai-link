@@ -1,7 +1,7 @@
 {
   "name": "companion",
   "version": "0.1.0",
-  "description": "Loc.ai Link menu-bar companion frontend (bare Svelte + Vite).",
+  "description": "Locai Link menu-bar companion frontend (bare Svelte + Vite).",
   "type": "module",
   "scripts": {
     "dev": "vite",

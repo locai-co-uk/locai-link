@@ -32,8 +32,8 @@ INSTALL_ROOT="/Library/Locai"
 LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
 SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
-COMPANION_APP="${INSTALL_ROOT}/Loc.ai Link.app"
-COMPANION_SYMLINK="/Applications/Loc.ai Link.app"
+COMPANION_APP="${INSTALL_ROOT}/Locai Link.app"
+COMPANION_SYMLINK="/Applications/Locai Link.app"
 UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
 
 log() {
@@ -79,7 +79,7 @@ log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
 # --- 3. Uninstaller script -------------------------------------------
 # uninstall.sh is shipped in the payload but permissions on files
 # copied by pkgbuild aren't guaranteed to be executable. Force 755 so
-# both the tray menu ("Uninstall Loc.ai Link…" via osascript) and
+# both the tray menu ("Uninstall Locai Link…" via osascript) and
 # `sudo /Library/Locai/uninstall.sh` from Terminal can invoke it.
 if [[ -f "$UNINSTALLER" ]]; then
     chmod 755 "$UNINSTALLER"
@@ -89,17 +89,24 @@ else
     log "WARN: uninstaller not found at $UNINSTALLER"
 fi
 
-# --- 4. /Applications/Loc.ai Link.app symlink ------------------------
+# --- 4. /Applications/Locai Link.app ---------------------------------
 # The companion menubar app is the user-facing entry point ("open
-# Loc.ai Link" in Applications / Spotlight / Launchpad). Symlink
-# rather than copy so a future OTA update to the .app under
-# /Library/Locai just flips through — no separate /Applications
-# refresh needed. ln -sf overwrites if a previous install left one.
+# Locai Link" in Applications / Spotlight / Launchpad). We used to
+# symlink from /Applications back into /Library/Locai; macOS's Launch
+# Services doesn't index symlinked .apps into Applications the same
+# way it does real bundles, so Spotlight can't find the app and the
+# Finder Applications sidebar view misses it.
+#
+# `ditto` is the macOS-native copy for .apps — preserves the code
+# signature, resource forks, and extended attributes that a plain
+# `cp -R` may drop. First remove any stale copy/symlink so a repeat
+# install lands cleanly.
 if [[ -d "$COMPANION_APP" ]]; then
-    ln -sfn "$COMPANION_APP" "$COMPANION_SYMLINK"
-    log "companion symlink: $COMPANION_SYMLINK -> $COMPANION_APP"
+    rm -rf "$COMPANION_SYMLINK"
+    ditto "$COMPANION_APP" "$COMPANION_SYMLINK"
+    log "companion copied: $COMPANION_APP -> $COMPANION_SYMLINK"
 else
-    log "companion app not found at $COMPANION_APP — skipping /Applications symlink"
+    log "companion app not found at $COMPANION_APP — skipping /Applications copy"
 fi
 
 # --- 5. Launch Setup Assistant ---------------------------------------

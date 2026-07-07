@@ -1,7 +1,7 @@
 {
   "name": "setup_assistant",
   "version": "0.1.0",
-  "description": "Loc.ai Link Setup Assistant frontend (bare Svelte + Vite).",
+  "description": "Locai Link Setup Assistant frontend (bare Svelte + Vite).",
   "type": "module",
   "scripts": {
     "dev": "vite",

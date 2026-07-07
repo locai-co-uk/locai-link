@@ -1,6 +1,6 @@
 # Tauri + Svelte + TypeScript
 
-Loc.ai Link Setup Assistant. Bare Svelte + Vite frontend, Tauri (Rust)
+Locai Link Setup Assistant. Bare Svelte + Vite frontend, Tauri (Rust)
 backend. Wizard walks the user through post-install first-run setup.
 
 ## Recommended IDE Setup

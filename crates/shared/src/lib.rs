@@ -23,7 +23,7 @@ pub mod install;
 // crate, so downstream callers (`companion`, `setup_assistant`,
 // `launcher`) don't need to update their imports for the reorganisation.
 pub use health::{
-    agent_health, list_models, toggle_serving, AgentHealth, HealthStatus, ModelInfo, ModelsStatus, ServingAction,
+    agent_health, list_models, toggle_serving, AgentHealth, HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth,
     DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
 };
 pub use autostart::{AGENT_APP_ID, COMPANION_APP_ID};

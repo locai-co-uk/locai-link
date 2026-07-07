@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Loc.ai Link menu-bar companion.
+//! Locai Link menu-bar companion.
 //!
 //! Runs as a tray-only Tauri app (no dock icon, no visible window).
 //! Polls the local agent's `/healthz` and `/models` endpoints on a
@@ -21,6 +21,8 @@
 //! other integrators depend on. Autostart is managed by the `.pkg`
 //! installer / Setup Assistant, not from here.
 
+mod preferences;
+
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -33,7 +35,7 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
-    AppHandle, Manager, Wry,
+    AppHandle, Manager, WindowEvent, Wry,
 };
 use tauri_plugin_opener::OpenerExt;
 
@@ -82,7 +84,7 @@ const CONTROL_URL: &str = "https://control.locai.co.uk";
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
 const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
-const MENU_ID_UNINSTALL: &str = "uninstall";
+const MENU_ID_PREFERENCES: &str = "preferences";
 const MENU_ID_QUIT: &str = "quit";
 
 /// Prefix for per-model CheckMenuItem ids. The suffix after the prefix
@@ -92,7 +94,7 @@ const MENU_ID_MODEL_PREFIX: &str = "model:";
 
 /// Initial label for the status header — replaced on the first poll
 /// response, at most 5s later.
-const STATUS_INITIAL: &str = "Loc.ai Link — checking agent…";
+const STATUS_INITIAL: &str = "Locai Link — checking agent…";
 
 /// Coarse categorisation used to decide whether the tray icon needs
 /// to change. Two-valued because Malformed and Down present the same
@@ -134,6 +136,33 @@ type SharedHandles = Arc<Mutex<MenuHandles>>;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            preferences::get_prefs_state,
+            preferences::poll_status,
+            preferences::set_run_at_login,
+            preferences::runtime_start,
+            preferences::runtime_stop,
+            preferences::runtime_restart,
+            preferences::reveal_log_file,
+            preferences::open_control_device,
+            preferences::launch_uninstaller_prefs,
+        ])
+        // Prevent close-button from exiting the app — the tray keeps
+        // running, only the Preferences window is hidden. On macOS
+        // flip the activation policy back to Accessory so we drop the
+        // Dock icon while no window is visible.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            }
+        })
         .setup(|app| {
             // macOS: mark this as an accessory (menu-bar) app so it
             // doesn't take a Dock slot, doesn't appear in Cmd-Tab, and
@@ -162,7 +191,7 @@ pub fn run() {
             let tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(TRAY_ICON_IS_TEMPLATE)
-                .tooltip("Loc.ai Link")
+                .tooltip("Locai Link")
                 .menu(&menu)
                 // macOS convention is left-click → menu (no separate
                 // left/right split); mirror it on every platform so
@@ -189,9 +218,9 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Kick the runtime LaunchAgent so the user's "open Loc.ai Link"
+/// Kick the runtime LaunchAgent so the user's "open Locai Link"
 /// gesture (via `/Applications/`, Spotlight, Launchpad) is also
-/// implicitly "start Loc.ai Link if it's down".
+/// implicitly "start Locai Link if it's down".
 ///
 /// `launchctl kickstart` (without `-k`) starts a service if it's not
 /// running and no-ops if it is. If the LaunchAgent isn't bootstrapped
@@ -214,49 +243,29 @@ fn kickstart_runtime_if_installed() {
         .output();
 }
 
-/// Fire the uninstaller with a two-step consent flow:
-///
-///   1. Native AppleScript "Are you sure?" dialog. Default button is
-///      Cancel so a stray return keystroke doesn't nuke the install.
-///   2. If confirmed, `do shell script … with administrator privileges`
-///      pops the standard macOS admin prompt and runs the payload
-///      script as root.
-///
-/// The script itself boots out both LaunchAgents (which SIGTERMs the
-/// companion) before `rm -rf`ing the install root. That kills this
-/// very process — but osascript is a separate child that survives the
-/// parent's death (macOS reparents orphaned children to launchd), so
-/// the shell script completes cleanly.
-///
-/// Detached to its own thread so the menu-event thread (a UI-adjacent
-/// thread) never blocks on the AppleScript dialog.
-#[cfg(target_os = "macos")]
-fn launch_uninstaller() {
-    thread::spawn(|| {
-        // osascript can take a multi-line script via a single -e
-        // argument. Quoting is fiddly — AppleScript wants \" for
-        // literal double-quotes, and Rust wants us to backslash them
-        // in turn. The script is:
-        //
-        //   set answer to display dialog "..." buttons {"Cancel", "Uninstall"} ...
-        //   if button returned of answer is "Uninstall" then
-        //       do shell script "/Library/Locai/uninstall.sh" with administrator privileges
-        //   end if
-        //
-        // A Cancel click throws an AppleScript error (user cancelled);
-        // wrapping in a `try` block swallows it so osascript returns 0.
-        let script = "\
-try
-    set answer to display dialog \"This will remove Loc.ai Link and stop all background services. Your device will remain registered in Control.\" buttons {\"Cancel\", \"Uninstall\"} default button \"Cancel\" with icon caution with title \"Uninstall Loc.ai Link\"
-    if button returned of answer is \"Uninstall\" then
-        do shell script \"/Library/Locai/uninstall.sh\" with administrator privileges
-    end if
-end try
-";
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", script])
-            .output();
-    });
+/// Show + focus the Preferences window from a tray menu click. If the
+/// user closed it earlier the window is hidden (see `on_window_event`
+/// in `run()`), so this both un-hides and pulls focus. Errors are
+/// non-fatal — logged and swallowed so a UI hiccup doesn't kill the
+/// menu event thread.
+fn show_preferences_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[companion] preferences window not found");
+        return;
+    };
+    if let Err(e) = window.show() {
+        eprintln!("[companion] window.show failed: {e}");
+        return;
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("[companion] window.set_focus failed: {e}");
+    }
+    // macOS: while the window is visible we want the app to behave
+    // like a regular foreground app (Dock icon, Cmd-Tab entry, focus
+    // handling). Flip back to Accessory when it hides — see
+    // `on_window_event`.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
 }
 
 /// Assemble the tray menu and return it along with a handle to the
@@ -294,26 +303,23 @@ fn build_tray_menu(
     let models_submenu = build_models_submenu(app, models)?;
 
     let sep2 = PredefinedMenuItem::separator(app)?;
-    // Uninstall lives above Quit so it sits in the "destructive"
-    // section. Only shown on macOS — Linux/Windows companion builds
-    // don't have an uninstaller to invoke.
-    #[cfg(target_os = "macos")]
-    let uninstall = MenuItem::with_id(
+    // Preferences opens the settings window (Device / Agent / Network
+    // / Advanced). Uninstall lives *inside* that window in the Advanced
+    // panel — it used to sit here on the tray, moved so all destructive
+    // + configuration actions share one surface.
+    let preferences = MenuItem::with_id(
         app,
-        MENU_ID_UNINSTALL,
-        "Uninstall Loc.ai Link…",
+        MENU_ID_PREFERENCES,
+        "Preferences…",
         true,
-        None::<&str>,
+        Some("CmdOrCtrl+,"),
     )?;
     let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
 
-    #[cfg(target_os = "macos")]
     let menu = Menu::with_items(
         app,
-        &[&status, &sep1, &control, &models_submenu, &sep2, &uninstall, &quit],
+        &[&status, &sep1, &control, &models_submenu, &sep2, &preferences, &quit],
     )?;
-    #[cfg(not(target_os = "macos"))]
-    let menu = Menu::with_items(app, &[&status, &sep1, &control, &models_submenu, &sep2, &quit])?;
     Ok((menu, status))
 }
 
@@ -384,11 +390,8 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 eprintln!("[companion] failed to open {CONTROL_URL}: {e}");
             }
         }
-        MENU_ID_UNINSTALL => {
-            // macOS-only; on other platforms this menu id never renders
-            // (see build_tray_menu) and the arm is unreachable.
-            #[cfg(target_os = "macos")]
-            launch_uninstaller();
+        MENU_ID_PREFERENCES => {
+            show_preferences_window(app);
         }
         MENU_ID_QUIT => {
             // Close the tray only. The agent is a shared service that

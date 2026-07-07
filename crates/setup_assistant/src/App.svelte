@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import locaiLogo from "./lib/locai-logo.png";
   import { onMount } from "svelte";
 
   // Post-install user configuration flow. The .pkg installer has
@@ -94,8 +94,10 @@
 
   type Finish =
     | { kind: "idle" }
+    | { kind: "minting" }
     | { kind: "registering" }
     | { kind: "writing"; registered: RegisteredDevice }
+    | { kind: "bootstrapping"; registered: RegisteredDevice }
     | { kind: "deploying"; registered: RegisteredDevice; done: number; total: number }
     | {
         kind: "done";
@@ -246,7 +248,21 @@
     if (already) {
       registered = already;
     } else {
-      finish = { kind: "registering" };
+      // Phase 1: mint a fresh single-use registration key. Fast in
+      // steady state; slow when Control's Cloud Run instance cold-starts.
+      finish = { kind: "minting" };
+      let registrationKey: string;
+      try {
+        registrationKey = await invoke<string>("mint_registration_key");
+      } catch (e) {
+        finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+        return;
+      }
+
+      // Phase 2: derive the device name, then redeem the key. The
+      // redemption is the call that most often feels slow (Control
+      // creates the row, provisions the Zenoh credentials, hands back
+      // the AgentConfig).
       let deviceName: string;
       try {
         deviceName = await invoke<string>("suggest_device_name");
@@ -254,9 +270,12 @@
         finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
         return;
       }
+
+      finish = { kind: "registering" };
       try {
         registered = await invoke<RegisteredDevice>("register_device", {
           deviceName,
+          registrationKey,
         });
       } catch (e) {
         finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
@@ -264,6 +283,8 @@
       }
     }
 
+    // Phase 3: write the AgentConfig session file the runtime will
+    // read on its next start.
     finish = { kind: "writing", registered };
     let configPath: string | null = null;
     try {
@@ -271,20 +292,6 @@
         installRoot: DEFAULT_INSTALL_ROOT,
         config: registered.config,
       });
-      // Register + kickstart both LaunchAgents so the runtime + menubar
-      // companion come up now. No-op on Linux dev machines. If this
-      // fails (e.g. write to ~/Library/LaunchAgents denied), we still
-      // count the setup as successful — user can launch "Loc.ai Link"
-      // from Applications later and the companion's own kickstart
-      // logic will bring the runtime up.
-      try {
-        await invoke("install_launchagents", {
-          installRoot: DEFAULT_INSTALL_ROOT,
-          runAtLogin,
-        });
-      } catch (e) {
-        console.warn("install_launchagents failed:", e);
-      }
     } catch (e) {
       // Register succeeded on Control but we couldn't lay the config
       // down locally — flag it distinctly so the user knows the device
@@ -297,45 +304,56 @@
       return;
     }
 
-    // Queue deploys for any models the user selected on step 2.
-    // Failures don't roll back the earlier steps — the device is
-    // registered, the config is written, and the user can retry a
-    // failed deploy from the Control UI.
+    // Phase 4: bootstrap the LaunchAgents (register + kickstart). Only
+    // errors on truly weird macOS states; best-effort — if this fails
+    // the user can still launch Locai Link from Applications later
+    // and the companion's kickstart logic recovers.
+    finish = { kind: "bootstrapping", registered };
+    try {
+      await invoke("install_launchagents", {
+        installRoot: DEFAULT_INSTALL_ROOT,
+        runAtLogin,
+      });
+    } catch (e) {
+      console.warn("install_launchagents failed:", e);
+    }
+
+    // Phase 5: queue deploys for any models the user selected. Runs
+    // them in parallel — each is an independent HTTP POST + Zenoh
+    // command dispatch, so N models take ~1 RTT rather than N × RTT.
+    // Failures don't roll back the earlier steps.
     const selected =
       models.kind === "ready" ? Array.from(models.selected) : [];
-    let deployedCount = 0;
     finish = {
       kind: "deploying",
       registered,
       done: 0,
       total: selected.length,
     };
-    for (const modelId of selected) {
-      try {
-        await invoke<string>("deploy_model", {
+    const results = await Promise.allSettled(
+      selected.map((modelId) =>
+        invoke<string>("deploy_model", {
           deviceId: registered.device_id,
           modelId,
-        });
-        deployedCount += 1;
-        finish = {
-          kind: "deploying",
-          registered,
-          done: deployedCount,
-          total: selected.length,
-        };
-      } catch (e) {
-        // Surface the first deploy failure but keep the device in a
-        // finished-with-partial-deploys state — no reason to roll back
-        // the successful deploys.
-        finish = {
-          kind: "error",
-          message: `Deploy failed for one or more models: ${
-            e instanceof Error ? e.message : String(e)
-          }`,
-          registered,
-        };
-        return;
-      }
+        })
+      )
+    );
+    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    const deployedCount = results.length - failures.length;
+
+    if (failures.length > 0) {
+      // Surface the first failure to keep the error message concise;
+      // subsequent failures are usually the same root cause (auth,
+      // network) and repeating them adds noise.
+      const first = failures[0].reason;
+      finish = {
+        kind: "error",
+        message: `Deploy failed for ${failures.length} of ${selected.length} models: ${
+          first instanceof Error ? first.message : String(first)
+        }`,
+        registered,
+      };
+      return;
     }
 
     finish = {
@@ -392,7 +410,7 @@
     <aside class="sidebar">
       <div class="brand">
         <div class="brand__tab">SETUP ASSISTANT</div>
-        <div class="brand__mark">Loc<span class="brand__accent">ai</span> Link</div>
+        <img class="brand__logo" src={locaiLogo} alt="Locai" />
       </div>
 
       <ol class="steps">
@@ -536,7 +554,7 @@
           <p class="eyebrow">STEP 3 · PERMISSIONS</p>
           <h1>Runs quietly in the background</h1>
           <p class="lead">
-            After setup, Loc.ai Link runs in the background and appears
+            After setup, Locai Link runs in the background and appears
             in your menubar.
           </p>
           <label class="toggle-row">
@@ -545,7 +563,7 @@
               bind:checked={runAtLogin}
             />
             <div class="toggle-copy">
-              <span class="toggle-title">Start Loc.ai Link at login</span>
+              <span class="toggle-title">Start Locai Link at login</span>
               <span class="toggle-hint">
                 Auto-start the agent and menubar app when you log in.
                 Uncheck to launch manually from Applications.
@@ -560,7 +578,7 @@
           <p class="eyebrow">STEP 4 · FINISH</p>
           <h1>Register this device</h1>
           <p class="lead">
-            Enrol this machine on your Loc.ai organisation and drop the
+            Enrol this machine on your Locai organisation and drop the
             initial config in place. The agent picks it up on next start.
           </p>
 
@@ -571,12 +589,23 @@
             >
               Complete setup
             </button>
+          {:else if finish.kind === "minting"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Requesting registration key…</span>
+              </div>
+            </div>
           {:else if finish.kind === "registering"}
             <div class="signin-block">
               <div class="row">
                 <div class="spinner"></div>
-                <span>Registering with Control…</span>
+                <span>Registering device with Control…</span>
               </div>
+              <p class="fine-print">
+                First-time registration can take a few seconds while
+                Control provisions credentials for this device.
+              </p>
             </div>
           {:else if finish.kind === "writing"}
             <div class="signin-block">
@@ -587,6 +616,13 @@
               <p class="fine-print">
                 Device ID <span class="mono">{finish.registered.device_id}</span>
               </p>
+            </div>
+          {:else if finish.kind === "bootstrapping"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Setting up background services…</span>
+              </div>
             </div>
           {:else if finish.kind === "deploying"}
             <div class="signin-block">
@@ -621,12 +657,12 @@
                 </p>
               {/if}
               <p class="fine-print">
-                Loc.ai Link is now running in your menubar. You can close
+                Locai Link is now running in your menubar. You can close
                 this window.
               </p>
               <button
                 class="btn btn--primary btn--wide"
-                onclick={() => void getCurrentWindow().close()}
+                onclick={() => void invoke("exit_app")}
               >
                 Close
               </button>
@@ -657,13 +693,19 @@
 
       <footer class="bar">
         <button class="btn btn--ghost" onclick={back} disabled={current === 0}>Go Back</button>
-        <button
-          class="btn btn--primary"
-          onclick={next}
-          disabled={current === STEPS.length - 1 || !canContinue}
-        >
-          Continue
-        </button>
+        <!-- Continue only exists while there's a next step to go to.
+             The last step ("Finish") owns its own primary action ("Complete setup" /
+             "Close"), so a dead grey Continue next to that would be
+             confusing. -->
+        {#if current < STEPS.length - 1}
+          <button
+            class="btn btn--primary"
+            onclick={next}
+            disabled={!canContinue}
+          >
+            Continue
+          </button>
+        {/if}
       </footer>
     </section>
   </main>
@@ -743,15 +785,23 @@
     margin-bottom: var(--space-8);
   }
 
-  .brand__mark {
-    font-family: var(--font-display), var(--font-system);
-    font-weight: var(--weight-extrabold);
-    font-size: 22px;
-    letter-spacing: var(--tracking-display);
-    line-height: 1;
-    color: var(--color-text-on-dark);
+  .brand__logo {
+    /* Source PNG is 501×200 (aspect ~2.5:1), designed black-on-light.
+       Sidebar is near-black, so invert to render the two-tone
+       (black "Loc" + black ".ai" pill with white inner text) as
+       (white "Loc" + white pill with black inner text). Preserves
+       the design's polarity while making it legible on a dark
+       background. Height chosen to sit at the same visual weight
+       as the previous 22px text mark. */
+    height: 32px;
+    width: auto;
+    display: block;
+    filter: invert(1);
   }
 
+  /* Still used by the splash mark (below) and the "Sign in with Locai"
+     button — a green pill wrapping the "ai" letters. Kept alongside
+     the new sidebar logo image so those surfaces retain the accent. */
   .brand__accent {
     background: var(--color-primary-bright);
     color: var(--color-ink);

@@ -87,6 +87,19 @@ class AgentRuntime:
             models_provider=self._snapshot_models,
             command_handler=self.handle_command,
         )
+        # Populate the transport diagnostic. The session is opened
+        # before AgentRuntime is constructed (`get_or_create_zenoh_session`
+        # in main.py) — if we hold one here, `connected=True` is a fair
+        # first-order truth. The runtime doesn't observe silent
+        # mid-session disconnects today; `shutdown()` flips this back
+        # to False when we tear down.
+        if zenoh_session is not None:
+            endpoints = agent_config.transport.args.get("endpoints", []) if agent_config.transport else []
+            self.health_state.set_transport(
+                transport_type=agent_config.transport.type if agent_config.transport else None,
+                endpoint=endpoints[0] if endpoints else None,
+                connected=True,
+            )
         self.health_server = HealthServer(self.health_state)
 
         if threading.current_thread() is threading.main_thread():
@@ -763,6 +776,16 @@ class AgentRuntime:
                 if pipe.is_alive():
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
+
+        # Reflect the transport going away in /healthz before we stop
+        # the server — a companion mid-poll during shutdown then reads
+        # transport.connected=false rather than a stale true.
+        if self.health_state.transport_type is not None:
+            self.health_state.set_transport(
+                transport_type=self.health_state.transport_type,
+                endpoint=self.health_state.transport_endpoint,
+                connected=False,
+            )
 
         # Tear down the health server last — its daemon thread would
         # be killed at process exit anyway, but joining cleanly avoids

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Loc.ai Link",
+  "productName": "Locai Link",
   "version": "0.1.0",
   "identifier": "uk.co.locai.link.companion",
   "build": {
@@ -12,11 +12,16 @@
   "app": {
     "windows": [
       {
-        "title": "companion",
-        "width": 800,
-        "height": 600,
+        "label": "main",
+        "title": "Locai Link Preferences",
+        "width": 520,
+        "height": 620,
+        "minWidth": 480,
+        "minHeight": 560,
+        "resizable": true,
         "visible": false,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "titleBarStyle": "Visible"
       }
     ],
     "security": {

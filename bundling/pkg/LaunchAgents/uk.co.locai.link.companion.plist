@@ -3,13 +3,13 @@
     SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
     SPDX-License-Identifier: BUSL-1.1
 
-    LaunchAgent for the Loc.ai Link menubar companion. Bundled into the
+    LaunchAgent for the Locai Link menubar companion. Bundled into the
     .pkg payload; the Setup Assistant always bootstraps it into the
     user's domain on Finish. The "Start at login" checkbox on the
     Permissions step controls only the RunAtLoad key below.
 
     ProgramArguments points at the .app's binary rather than
-    `open -a Loc.ai\ Link.app` so launchd owns the process directly.
+    `open -a Locai\ Link.app` so launchd owns the process directly.
     That lets the companion be started/stopped via launchctl
     kickstart/bootout without racing with Launch Services.
 -->
@@ -20,7 +20,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Loc.ai Link.app/Contents/MacOS/Loc.ai Link</string>
+        <string>/Applications/Locai Link.app/Contents/MacOS/Locai Link</string>
     </array>
 
     <key>RunAtLoad</key>

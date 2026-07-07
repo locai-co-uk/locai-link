@@ -272,8 +272,8 @@ jobs:
 
       - name: Build companion .app (macOS)
         # Same pattern as the Setup Assistant build above. Companion's
-        # productName is "Loc.ai Link" (with space) so its .app basename
-        # is "Loc.ai Link.app" — that's exactly what we want in
+        # productName is "Locai Link" (with space) so its .app basename
+        # is "Locai Link.app" — that's exactly what we want in
         # /Applications so it's the user-facing entry point.
         if: runner.os == 'macOS'
         shell: bash
@@ -295,9 +295,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          COMPANION_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "Loc.ai Link.app" | head -n 1)
+          COMPANION_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "Locai Link.app" | head -n 1)
           if [ -z "$COMPANION_APP" ]; then
-            echo "::error::companion .app (Loc.ai Link.app) not found after tauri build"
+            echo "::error::companion .app (Locai Link.app) not found after tauri build"
             exit 1
           fi
           echo "Signing $COMPANION_APP"
@@ -348,9 +348,9 @@ jobs:
           # Setup Assistant .app — path was stashed by the codesign step.
           cp -R "$SA_APP_PATH" "$STAGING/Setup Assistant.app"
 
-          # Companion menubar .app — the user-facing "Loc.ai Link" in
+          # Companion menubar .app — the user-facing "Locai Link" in
           # /Applications post-install (postinstall symlinks it there).
-          cp -R "$COMPANION_APP_PATH" "$STAGING/Loc.ai Link.app"
+          cp -R "$COMPANION_APP_PATH" "$STAGING/Locai Link.app"
 
           # LaunchAgent plists — bundled but NOT bootstrapped at
           # install time. The Setup Assistant registers them on
@@ -363,7 +363,7 @@ jobs:
              "$STAGING/LaunchAgents/uk.co.locai.link.companion.plist"
 
           # Uninstaller script — invoked from the companion tray menu
-          # ("Uninstall Loc.ai Link…") via osascript with admin
+          # ("Uninstall Locai Link…") via osascript with admin
           # privileges, and by any user with `sudo /Library/Locai/uninstall.sh`
           # from Terminal. postinstall re-chmods 755 defensively.
           cp bundling/pkg/uninstall.sh "$STAGING/uninstall.sh"

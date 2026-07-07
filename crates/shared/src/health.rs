@@ -43,6 +43,24 @@ pub struct AgentHealth {
     pub uptime_seconds: u64,
     pub currently_serving: bool,
     pub model_id: Option<String>,
+    /// Transport diagnostic. `None` when the runtime is built without
+    /// a transport (unit tests, dev without Zenoh). Older runtimes
+    /// that don't emit this field parse as `None` via `serde(default)`.
+    #[serde(default)]
+    pub transport: Option<TransportHealth>,
+}
+
+/// Snapshot of the runtime's transport layer, surfaced in the
+/// companion's Preferences → Network panel. `connected` is `true` when
+/// the runtime holds an open transport session; the timestamps that
+/// would distinguish "connected but idle" from "connected and flowing"
+/// are deliberately out of scope for v1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportHealth {
+    #[serde(rename = "type")]
+    pub transport_type: String,
+    pub endpoint: Option<String>,
+    pub connected: bool,
 }
 
 /// One servable-model pipeline as reported by `/models`. Shape matches

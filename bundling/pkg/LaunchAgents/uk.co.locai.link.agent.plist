@@ -3,7 +3,7 @@
     SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
     SPDX-License-Identifier: BUSL-1.1
 
-    LaunchAgent for the Loc.ai Link runtime. Bundled into the .pkg
+    LaunchAgent for the Locai Link runtime. Bundled into the .pkg
     payload; the Setup Assistant always bootstraps it into the user's
     domain on Finish so `launchctl kickstart` from the companion works.
     The "Start at login" checkbox on the Permissions step controls only

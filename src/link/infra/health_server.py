@@ -55,13 +55,29 @@ class HealthState:
         # then routes through its normal validation + dispatch path,
         # so the loopback API and the backend share one code path.
         self._command_handler = command_handler
+        # Transport diagnostic — populated by whichever component owns
+        # the transport lifecycle (`AgentRuntime` for Zenoh). Read by
+        # the companion's Preferences window ("Network" panel). All None
+        # when the runtime is built without a transport (unit tests,
+        # local dev without a Zenoh session, etc.).
+        self.transport_type: str | None = None
+        self.transport_endpoint: str | None = None
+        self.transport_connected: bool = False
 
     def snapshot(self) -> dict[str, Any]:
+        transport: dict[str, Any] | None = None
+        if self.transport_type is not None:
+            transport = {
+                "type": self.transport_type,
+                "endpoint": self.transport_endpoint,
+                "connected": self.transport_connected,
+            }
         return {
             "version": self.version,
             "uptime_seconds": int(time.monotonic() - self._boot_time),
             "currently_serving": self.currently_serving,
             "model_id": self.model_id,
+            "transport": transport,
         }
 
     def models(self) -> list[dict[str, Any]]:
@@ -95,6 +111,21 @@ class HealthState:
         else:
             self.currently_serving = True
             self.model_id = model_id
+
+    def set_transport(
+        self,
+        transport_type: str | None,
+        endpoint: str | None,
+        connected: bool,
+    ) -> None:
+        """Record the runtime's transport state for the ``/healthz``
+        response's ``transport`` block. Called by whichever component
+        owns the transport lifecycle — for Zenoh that's the runtime,
+        which sets ``connected=True`` right after ``zenoh.open()``
+        returns and ``connected=False`` on close/shutdown."""
+        self.transport_type = transport_type
+        self.transport_endpoint = endpoint
+        self.transport_connected = connected
 
 
 _MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving)$")

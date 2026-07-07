@@ -1,29 +1,608 @@
 <script lang="ts">
-  // The companion is menu-only — this window is hidden on startup and
-  // never shown by the current UX. Kept as a working surface so if we
-  // ever need a rich secondary view (e.g. "About" or a full details
-  // pane) we can wire it in without rebuilding the whole webview
-  // scaffold.
-</script>
+  // The Preferences window for the Locai Link companion. Tray click
+  // on "Preferences…" un-hides + focuses this window; the "close"
+  // button on the window hides it (see `on_window_event` in
+  // src-tauri/src/lib.rs) so the tray stays running.
+  //
+  // State model:
+  //   - `state` is the full snapshot from `get_prefs_state`, loaded
+  //     once on mount. Everything not-agent-status (device identity,
+  //     install root, log path) is stable for the window's lifetime.
+  //   - `poll_status` refreshes agent state + transport every 4s while
+  //     visible so the Status pill and Network panel are live.
+  //
+  // Failures collapse to a Down agent state; the "Start Locai Link"
+  // button is the primary recovery gesture from there.
+  import { invoke } from "@tauri-apps/api/core";
+  import { onDestroy, onMount } from "svelte";
 
-<main>
-  <p>Loc.ai Link — menu-bar companion</p>
-</main>
+  type TransportHealth = {
+    type: string;
+    endpoint: string | null;
+    connected: boolean;
+  };
 
-<style>
-  main {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-    padding: 1rem;
-    background: var(--color-paper);
-    color: var(--color-ink);
-    font-family: var(--font-body);
+  type DeviceInfo = {
+    name: string;
+    id: string;
+    control_device_url: string;
+  };
+
+  type AgentInfo = {
+    status: "up" | "down";
+    uptime_seconds: number | null;
+    version: string | null;
+    run_at_login: boolean;
+  };
+
+  type AdvancedInfo = {
+    log_file: string;
+    install_root: string;
+  };
+
+  type PrefsState = {
+    device: DeviceInfo | null;
+    agent: AgentInfo;
+    network: TransportHealth | null;
+    advanced: AdvancedInfo;
+  };
+
+  type StatusPoll = {
+    status: "up" | "down";
+    uptime_seconds: number | null;
+    version: string | null;
+    network: TransportHealth | null;
+  };
+
+  let prefs = $state<PrefsState | null>(null);
+  let loadError = $state<string | null>(null);
+  let pending = $state<Set<string>>(new Set());
+  let copyFlash = $state<boolean>(false);
+
+  const POLL_INTERVAL_MS = 4000;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  onMount(async () => {
+    await load();
+    pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);
+  });
+
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer);
+  });
+
+  async function load() {
+    try {
+      prefs = await invoke<PrefsState>("get_prefs_state");
+      loadError = null;
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  p {
+  async function refreshStatus() {
+    // Only poll while the window is actually visible — hidden
+    // windows keep JS timers alive but there's no user watching.
+    if (document.hidden) return;
+    try {
+      const poll = await invoke<StatusPoll>("poll_status");
+      if (!prefs) return;
+      prefs.agent.status = poll.status;
+      prefs.agent.uptime_seconds = poll.uptime_seconds;
+      // Version comes from /healthz when Up; when Down, fall back to
+      // the value from initial load (resolved via the `current` symlink).
+      prefs.agent.version = poll.version ?? prefs.agent.version;
+      prefs.network = poll.network;
+    } catch {
+      // Ignore polling errors — next tick tries again.
+    }
+  }
+
+  async function withPending<T>(key: string, fn: () => Promise<T>): Promise<void> {
+    pending.add(key);
+    pending = new Set(pending);
+    try {
+      await fn();
+    } finally {
+      pending.delete(key);
+      pending = new Set(pending);
+    }
+  }
+
+  async function startRuntime() {
+    await withPending("runtime", async () => {
+      try {
+        await invoke("runtime_start");
+      } catch (e) {
+        console.warn("runtime_start:", e);
+      }
+      // launchctl returns before the process is fully up; give it a
+      // beat then refresh so the UI reflects the new state.
+      await new Promise((r) => setTimeout(r, 800));
+      await refreshStatus();
+    });
+  }
+
+  async function stopRuntime() {
+    await withPending("runtime", async () => {
+      try {
+        await invoke("runtime_stop");
+      } catch (e) {
+        console.warn("runtime_stop:", e);
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      await refreshStatus();
+    });
+  }
+
+  async function restartRuntime() {
+    await withPending("runtime", async () => {
+      try {
+        await invoke("runtime_restart");
+      } catch (e) {
+        console.warn("runtime_restart:", e);
+      }
+      await new Promise((r) => setTimeout(r, 800));
+      await refreshStatus();
+    });
+  }
+
+  async function toggleRunAtLogin(next: boolean) {
+    if (!prefs) return;
+    const prev = prefs.agent.run_at_login;
+    prefs.agent.run_at_login = next;
+    try {
+      await invoke("set_run_at_login", { enabled: next });
+    } catch (e) {
+      // Roll back the optimistic flip if the plist edit fails.
+      prefs.agent.run_at_login = prev;
+      console.warn("set_run_at_login:", e);
+    }
+  }
+
+  async function revealLog() {
+    try {
+      await invoke("reveal_log_file");
+    } catch (e) {
+      console.warn("reveal_log_file:", e);
+    }
+  }
+
+  async function openControl() {
+    try {
+      await invoke("open_control_device", {
+        deviceId: prefs?.device?.id ?? null,
+      });
+    } catch (e) {
+      console.warn("open_control_device:", e);
+    }
+  }
+
+  async function copyDeviceId() {
+    if (!prefs?.device) return;
+    try {
+      await navigator.clipboard.writeText(prefs.device!.id);
+      copyFlash = true;
+      setTimeout(() => {
+        copyFlash = false;
+      }, 1200);
+    } catch {
+      // Clipboard denied — silently ignore; the ID is still visible.
+    }
+  }
+
+  async function uninstall() {
+    try {
+      await invoke("launch_uninstaller_prefs");
+    } catch (e) {
+      console.warn("launch_uninstaller_prefs:", e);
+    }
+  }
+
+  function formatUptime(seconds: number | null): string {
+    if (seconds === null || seconds < 0) return "";
+    const s = Math.floor(seconds);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s % 60}s`;
+    return `${s}s`;
+  }
+
+  function shortId(id: string): string {
+    if (id.length <= 12) return id;
+    return `${id.slice(0, 8)}…${id.slice(-4)}`;
+  }
+</script>
+
+<div class="app">
+  <header>
+    <h1>Preferences</h1>
+    <p class="subtitle">Locai Link</p>
+  </header>
+
+  {#if loadError}
+    <div class="error-card">
+      <strong>Couldn't load preferences.</strong>
+      <p>{loadError}</p>
+      <button class="btn btn--secondary" onclick={load}>Retry</button>
+    </div>
+  {:else if !prefs}
+    <div class="loading">Loading…</div>
+  {:else}
+    <!-- ============ DEVICE ============ -->
+    <section>
+      <h2>Device</h2>
+      {#if prefs.device}
+        <div class="row">
+          <span class="row__label">Name</span>
+          <span class="row__value">{prefs.device.name}</span>
+        </div>
+        <div class="row">
+          <span class="row__label">ID</span>
+          <span class="row__value mono">
+            {shortId(prefs.device.id)}
+            <button
+              class="btn btn--ghost btn--tiny"
+              onclick={copyDeviceId}
+              title="Copy full ID"
+            >
+              {copyFlash ? "Copied" : "Copy"}
+            </button>
+          </span>
+        </div>
+        <div class="row">
+          <span class="row__label">Version</span>
+          <span class="row__value mono">{prefs.agent.version ?? "—"}</span>
+        </div>
+        <div class="row row--action">
+          <button class="btn btn--secondary" onclick={openControl}>
+            Open in Control
+          </button>
+        </div>
+      {:else}
+        <p class="empty">Device not yet registered.</p>
+      {/if}
+    </section>
+
+    <!-- ============ AGENT ============ -->
+    <section>
+      <h2>Agent</h2>
+      <div class="row">
+        <span class="row__label">Status</span>
+        <span class="row__value">
+          <span class="pill pill--{prefs.agent.status}">
+            <span class="dot"></span>
+            {prefs.agent.status === "up" ? "Running" : "Stopped"}
+          </span>
+          {#if prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
+            <span class="uptime">· {formatUptime(prefs.agent.uptime_seconds)}</span>
+          {/if}
+        </span>
+      </div>
+      <div class="row row--action">
+        {#if prefs.agent.status === "up"}
+          <button
+            class="btn btn--secondary"
+            onclick={stopRuntime}
+            disabled={pending.has("runtime")}
+          >
+            Stop Locai Link
+          </button>
+          <button
+            class="btn btn--secondary"
+            onclick={restartRuntime}
+            disabled={pending.has("runtime")}
+          >
+            Restart
+          </button>
+        {:else}
+          <button
+            class="btn btn--primary"
+            onclick={startRuntime}
+            disabled={pending.has("runtime")}
+          >
+            Start Locai Link
+          </button>
+        {/if}
+      </div>
+      <label class="toggle-row">
+        <input
+          type="checkbox"
+          checked={prefs.agent.run_at_login}
+          onchange={(e) => toggleRunAtLogin((e.currentTarget as HTMLInputElement).checked)}
+        />
+        <div class="toggle-copy">
+          <span class="toggle-title">Start Locai Link at login</span>
+          <span class="toggle-hint">
+            Auto-start the agent and menubar app when you log in.
+          </span>
+        </div>
+      </label>
+    </section>
+
+    <!-- ============ NETWORK ============ -->
+    <section>
+      <h2>Network</h2>
+      {#if prefs.agent.status === "down"}
+        <p class="empty">Not available while the agent is stopped.</p>
+      {:else if prefs.network}
+        <div class="row">
+          <span class="row__label">Endpoint</span>
+          <span class="row__value mono">{prefs.network.endpoint ?? "—"}</span>
+        </div>
+        <div class="row">
+          <span class="row__label">Status</span>
+          <span class="row__value">
+            <span class="pill pill--{prefs.network.connected ? 'up' : 'down'}">
+              <span class="dot"></span>
+              {prefs.network.connected ? "Connected" : "Disconnected"}
+            </span>
+          </span>
+        </div>
+      {:else}
+        <p class="empty">No transport configured.</p>
+      {/if}
+    </section>
+
+    <!-- ============ ADVANCED ============ -->
+    <section>
+      <h2>Advanced</h2>
+      <div class="row">
+        <span class="row__label">Log file</span>
+        <span class="row__value mono short">{prefs.advanced.log_file}</span>
+      </div>
+      <div class="row row--action">
+        <button class="btn btn--secondary" onclick={revealLog}>
+          Reveal in Finder
+        </button>
+      </div>
+      <div class="row">
+        <span class="row__label">Install root</span>
+        <span class="row__value mono">{prefs.advanced.install_root}</span>
+      </div>
+      <div class="row row--action row--danger">
+        <button class="btn btn--danger" onclick={uninstall}>
+          Uninstall Locai Link…
+        </button>
+      </div>
+    </section>
+  {/if}
+</div>
+
+<style>
+  :global(html, body) {
+    height: 100%;
+  }
+  :global(body) {
     margin: 0;
-    color: var(--color-ink-muted);
+    font-family: var(--font-body, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif);
+    background: var(--color-surface-cream, #FAF9F6);
+    color: var(--color-text, #1A1A1A);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    padding: 20px 24px 32px;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+
+  header {
+    margin-bottom: 20px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 2px;
+    color: var(--color-text-strong, #0A0A0A);
+  }
+  .subtitle {
+    font-size: 12px;
+    color: var(--color-text-muted, #8A877F);
+    margin: 0;
+  }
+
+  section {
+    background: var(--color-surface, #FFFFFF);
+    border: 1px solid var(--color-border-hairline, #ECEAE4);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+  }
+  h2 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted, #8A877F);
+    margin: 0 0 10px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 0;
+    font-size: 13px;
+    min-height: 24px;
+  }
+  .row__label {
+    color: var(--color-text-secondary, #46443F);
+    flex-shrink: 0;
+  }
+  .row__value {
+    color: var(--color-text-strong, #0A0A0A);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    text-align: right;
+    min-width: 0;
+  }
+  .row__value.mono {
+    font-family: var(--font-mono, ui-monospace, SF Mono, Menlo, monospace);
+    font-size: 12px;
+  }
+  .row__value.short {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+    direction: rtl;
+    text-align: left;
+  }
+  .row--action {
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 6px 0 2px;
+  }
+  .row--danger {
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border-hairline, #ECEAE4);
+    margin-top: 6px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .pill--up {
+    background: var(--color-surface-tint-green-3, #EAF9F1);
+    color: var(--color-primary-pressed, #00A852);
+  }
+  .pill--down {
+    background: #FCECEA;
+    color: var(--color-error, #E84D3D);
+  }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    display: inline-block;
+  }
+  .uptime {
+    color: var(--color-text-muted, #8A877F);
+    font-size: 12px;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid var(--color-border-hairline, #ECEAE4);
+    border-radius: 8px;
+    background: var(--color-surface-cream-alt, #FBFAF7);
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  .toggle-row input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--color-primary, #00B85A);
+    cursor: pointer;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .toggle-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .toggle-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-strong, #0A0A0A);
+  }
+  .toggle-hint {
+    font-size: 12px;
+    color: var(--color-text-muted, #8A877F);
+  }
+
+  .btn {
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 12px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    background: transparent;
+    color: inherit;
+    line-height: 1.4;
+    transition: background 120ms, border-color 120ms;
+  }
+  .btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .btn--primary {
+    background: var(--color-primary, #00B85A);
+    color: #fff;
+    border-color: var(--color-primary-pressed, #00A852);
+  }
+  .btn--primary:hover:not(:disabled) {
+    background: var(--color-primary-pressed, #00A852);
+  }
+  .btn--secondary {
+    background: var(--color-surface, #fff);
+    color: var(--color-text-strong, #0A0A0A);
+    border-color: var(--color-border-input, #D9D6CF);
+  }
+  .btn--secondary:hover:not(:disabled) {
+    background: var(--color-surface-hover, #F5F4F1);
+  }
+  .btn--danger {
+    background: transparent;
+    color: var(--color-error, #E84D3D);
+    border-color: var(--color-error, #E84D3D);
+  }
+  .btn--danger:hover:not(:disabled) {
+    background: #FCECEA;
+  }
+  .btn--ghost {
+    color: var(--color-text-muted, #8A877F);
+    background: transparent;
+    border: 1px solid transparent;
+  }
+  .btn--ghost:hover:not(:disabled) {
+    color: var(--color-text-strong, #0A0A0A);
+    background: var(--color-surface-hover, #F5F4F1);
+  }
+  .btn--tiny {
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+
+  .empty {
+    color: var(--color-text-muted, #8A877F);
+    font-size: 13px;
+    margin: 4px 0 0;
+  }
+
+  .loading {
+    padding: 20px;
+    text-align: center;
+    color: var(--color-text-muted, #8A877F);
+    font-size: 13px;
+  }
+
+  .error-card {
+    padding: 12px 14px;
+    border: 1px solid #F5C5BF;
+    background: #FCECEA;
+    border-radius: 8px;
+    color: var(--color-error, #E84D3D);
+    font-size: 13px;
+  }
+  .error-card p {
+    margin: 6px 0 10px;
   }
 </style>
