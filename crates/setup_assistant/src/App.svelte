@@ -33,9 +33,12 @@
   // (bundling/pkg/scripts/postinstall) lays the launcher, boot.json,
   // and Setup Assistant.app here.
   //
-  // TODO(platform-default): swap to a Tauri-side per-OS lookup once
-  // @tauri-apps/plugin-os is wired.
-  const DEFAULT_INSTALL_ROOT = "/Library/Locai";
+  // Loaded from Rust on mount so the value branches per OS:
+  //   * macOS  → /Library/Locai
+  //   * Linux  → $HOME/.local/share/locai
+  // Empty string until the async fetch resolves; every call site is
+  // gated so an empty root doesn't leak into an invoke() call.
+  let installRoot = $state<string>("");
 
   // Bootstrap runs once on mount to verify the .pkg actually
   // installed. Failure surfaces as a full-screen error instead of
@@ -160,8 +163,11 @@
 
   async function runBootstrapCheck() {
     try {
+      // Resolve the platform-appropriate install root before anything
+      // else — every downstream invoke() threads this value through.
+      installRoot = await invoke<string>("get_install_root");
       const install = await invoke<CheckInstallResult>("check_install", {
-        installRoot: DEFAULT_INSTALL_ROOT,
+        installRoot,
       });
       bootstrap = { kind: "ready", install };
     } catch (e) {
@@ -289,7 +295,7 @@
     let configPath: string | null = null;
     try {
       configPath = await invoke<string>("install_agent_config", {
-        installRoot: DEFAULT_INSTALL_ROOT,
+        installRoot,
         config: registered.config,
       });
     } catch (e) {
@@ -311,7 +317,7 @@
     finish = { kind: "bootstrapping", registered };
     try {
       await invoke("install_launchagents", {
-        installRoot: DEFAULT_INSTALL_ROOT,
+        installRoot,
         runAtLogin,
       });
     } catch (e) {

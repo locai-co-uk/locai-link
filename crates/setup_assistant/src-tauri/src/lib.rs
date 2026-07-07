@@ -101,6 +101,34 @@ pub struct CheckInstallResult {
     pub reason: Option<String>,
 }
 
+/// Where SA lays down session config + related state, keyed on host OS.
+///
+/// * **macOS** — `/Library/Locai` (owned by the `.pkg` postinstall).
+/// * **Linux** — `$HOME/.local/share/locai` (XDG_DATA_HOME). No
+///   installer to lay it down, so `install_agent_config` creates it
+///   on first Finish.
+/// * **Windows** — empty string; SA errors clearly at Finish. No
+///   Windows install story yet.
+///
+/// Frontend calls this on mount and threads the result through
+/// wherever it used to pass the hardcoded `/Library/Locai` string.
+#[tauri::command]
+fn get_install_root() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "/Library/Locai".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/.local/share/locai")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        String::new()
+    }
+}
+
 /// Read the on-disk install state at `install_root`.
 ///
 /// Never returns an `Err` — the failure modes ("no install here",
@@ -524,11 +552,20 @@ fn install_agent_config(
     let config = resolve_config_templates(&config, &context);
 
     let root = PathBuf::from(&install_root);
-    if !root.exists() {
-        return Err(format!(
-            "install root not found at {}. Is Locai Link installed?",
-            root.display()
-        ));
+    // macOS: /Library/Locai is laid down by the .pkg postinstall — a
+    // missing root means the install itself is broken, so error loudly.
+    // Linux: SA is the installer (no root-privileged pkg to run first),
+    // so create the root on demand. The create_dir_all below on configs/
+    // will handle the recursive create, but a missing $HOME is a real
+    // problem we do want to surface.
+    #[cfg(target_os = "macos")]
+    {
+        if !root.exists() {
+            return Err(format!(
+                "install root not found at {}. Is Locai Link installed?",
+                root.display()
+            ));
+        }
     }
     // configs/ is normally created by the runtime on first start
     // (see StateManager.__init__ in src/link/app/state.py). On a
@@ -968,12 +1005,106 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
     Ok(())
 }
 
+/// Linux equivalent of the macOS LaunchAgent bootstrap. Reads the
+/// staged .service files from `<install_root>/systemd/` (put there
+/// by `bundling/linux/install.sh`), copies them into
+/// `~/.config/systemd/user/`, `systemctl --user daemon-reload`, then
+/// activates each per the toggle:
+///
+///   * `run_at_login = true`  → `enable --now`  (starts now + at login)
+///   * `run_at_login = false` → `disable` + `start` (runs now, no login)
+///
+/// Idempotent — re-running the wizard picks up any edits to the source
+/// units and re-enables/starts cleanly.
 #[tauri::command]
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
+    let root = PathBuf::from(&install_root);
+    let source_dir = root.join("systemd");
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "systemd units source not found at {}",
+            source_dir.display()
+        ));
+    }
+
+    let home = std::env::var("HOME").map_err(|_| "$HOME not set".to_string())?;
+    let dest_dir = PathBuf::from(&home)
+        .join(".config")
+        .join("systemd")
+        .join("user");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| {
+        format!("create {}: {e}", dest_dir.display())
+    })?;
+
+    let units: [&str; 2] = [
+        "locai-link-agent.service",
+        "locai-link-companion.service",
+    ];
+
+    for unit in units {
+        let src = source_dir.join(unit);
+        let dst = dest_dir.join(unit);
+        std::fs::copy(&src, &dst)
+            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+        // systemd's unit-file validation rejects anything other than
+        // 0644. rust's fs::copy carries source mode through — force
+        // canonical.
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dst)
+            .map_err(|e| format!("stat {}: {e}", dst.display()))?
+            .permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&dst, perms)
+            .map_err(|e| format!("chmod 644 {}: {e}", dst.display()))?;
+    }
+
+    // Pick up the fresh copies.
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output()
+        .map_err(|e| format!("systemctl --user daemon-reload: {e}"))?;
+    if !reload.status.success() {
+        return Err(format!(
+            "systemctl --user daemon-reload failed: {}",
+            String::from_utf8_lossy(&reload.stderr).trim()
+        ));
+    }
+
+    for unit in units {
+        // Always call disable first — cheap no-op when it wasn't
+        // enabled, guarantees a clean transition when the user
+        // unchecks the toggle on a re-run.
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", unit])
+            .output();
+
+        let args: &[&str] = if run_at_login {
+            &["--user", "enable", "--now", unit]
+        } else {
+            &["--user", "start", unit]
+        };
+        let out = std::process::Command::new("systemctl")
+            .args(args)
+            .output()
+            .map_err(|e| format!("systemctl {args:?}: {e}"))?;
+        if !out.status.success() {
+            eprintln!(
+                "[install_launchagents] {args:?} exited {:?}: {} {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).trim(),
+                String::from_utf8_lossy(&out.stderr).trim(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn install_launchagents(_install_root: String, _run_at_login: bool) -> Result<(), String> {
-    // launchctl doesn't exist off macOS. The SA is designed for the
-    // macOS .pkg flow; Linux dev sessions running the wizard just
-    // skip this step so the rest of the flow still exercises.
+    // No service bootstrap on Windows yet.
     Ok(())
 }
 
@@ -1046,6 +1177,7 @@ pub fn run() {
         .manage(SignInState::default())
         .invoke_handler(tauri::generate_handler![
             check_install,
+            get_install_root,
             sign_in_start,
             sign_in_poll,
             suggest_device_name,

@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=Locai Link
+GenericName=On-device inference agent
+Comment=Open the Locai Link menubar companion
+# Exec = `systemctl --user start` is intentionally idempotent — if the
+# companion is already running, this is a no-op and the existing tray
+# instance keeps going. If it's not, systemd starts it fresh. Meets the
+# "click Locai Link in Applications to bring it up if it isn't running"
+# behaviour without needing a custom single-instance daemon.
+Exec=systemctl --user start locai-link-companion.service
+Icon=locai-link
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+# Keep the entry out of the taskbar / dock — the app itself is a tray
+# icon, so it doesn't want a separate window listing.
+NoDisplay=false
+Keywords=locai;ai;llm;inference;

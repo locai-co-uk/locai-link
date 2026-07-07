@@ -45,6 +45,12 @@
     agent: AgentInfo;
     network: TransportHealth | null;
     advanced: AdvancedInfo;
+    /// Host OS — "macos" | "linux" | "windows" | …
+    /// Gates the UI for controls that only exist on macOS today
+    /// (Start/Stop/Restart, Start-at-login, Uninstall). On other
+    /// platforms those widgets are hidden until the equivalent
+    /// service management (systemd, etc.) is wired.
+    platform: string;
   };
 
   type StatusPoll = {
@@ -280,45 +286,50 @@
           {/if}
         </span>
       </div>
-      <div class="row row--action">
-        {#if prefs.agent.status === "up"}
-          <button
-            class="btn btn--secondary"
-            onclick={stopRuntime}
-            disabled={pending.has("runtime")}
-          >
-            Stop Locai Link
-          </button>
-          <button
-            class="btn btn--secondary"
-            onclick={restartRuntime}
-            disabled={pending.has("runtime")}
-          >
-            Restart
-          </button>
-        {:else}
-          <button
-            class="btn btn--primary"
-            onclick={startRuntime}
-            disabled={pending.has("runtime")}
-          >
-            Start Locai Link
-          </button>
-        {/if}
-      </div>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={prefs.agent.run_at_login}
-          onchange={(e) => toggleRunAtLogin((e.currentTarget as HTMLInputElement).checked)}
-        />
-        <div class="toggle-copy">
-          <span class="toggle-title">Start Locai Link at login</span>
-          <span class="toggle-hint">
-            Auto-start the agent and menubar app when you log in.
-          </span>
+      {#if prefs.platform === "macos" || prefs.platform === "linux"}
+        <!-- Service management is wired for both macOS (launchctl) and
+             Linux (systemctl --user). Windows still lacks a backend,
+             so those buttons stay hidden there. -->
+        <div class="row row--action">
+          {#if prefs.agent.status === "up"}
+            <button
+              class="btn btn--secondary"
+              onclick={stopRuntime}
+              disabled={pending.has("runtime")}
+            >
+              Stop Locai Link
+            </button>
+            <button
+              class="btn btn--secondary"
+              onclick={restartRuntime}
+              disabled={pending.has("runtime")}
+            >
+              Restart
+            </button>
+          {:else}
+            <button
+              class="btn btn--primary"
+              onclick={startRuntime}
+              disabled={pending.has("runtime")}
+            >
+              Start Locai Link
+            </button>
+          {/if}
         </div>
-      </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={prefs.agent.run_at_login}
+            onchange={(e) => toggleRunAtLogin((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <div class="toggle-copy">
+            <span class="toggle-title">Start Locai Link at login</span>
+            <span class="toggle-hint">
+              Auto-start the agent and menubar app when you log in.
+            </span>
+          </div>
+        </label>
+      {/if}
     </section>
 
     <!-- ============ NETWORK ============ -->
@@ -354,18 +365,23 @@
       </div>
       <div class="row row--action">
         <button class="btn btn--secondary" onclick={revealLog}>
-          Reveal in Finder
+          {prefs.platform === "macos" ? "Reveal in Finder" : "Open folder"}
         </button>
       </div>
       <div class="row">
         <span class="row__label">Install root</span>
         <span class="row__value mono">{prefs.advanced.install_root}</span>
       </div>
-      <div class="row row--action row--danger">
-        <button class="btn btn--danger" onclick={uninstall}>
-          Uninstall Locai Link…
-        </button>
-      </div>
+      {#if prefs.platform === "macos" || prefs.platform === "linux"}
+        <!-- macOS: bundling/pkg/uninstall.sh (invoked via osascript with
+             admin privileges). Linux: bundling/linux/uninstall.sh
+             (invoked directly, no admin — per-user install). -->
+        <div class="row row--action row--danger">
+          <button class="btn btn--danger" onclick={uninstall}>
+            Uninstall Locai Link…
+          </button>
+        </div>
+      {/if}
     </section>
   {/if}
 </div>
