@@ -202,6 +202,31 @@ def test_legacy_command_shape_is_rejected(mocker, mock_zenoh_session, mock_state
     assert status_logger.report_command.call_args.args[1] == "failed"
 
 
+def _await_deploys(agent, timeout: float = 5.0):
+    """Join every in-flight deploy worker; asserts none is stuck."""
+    for worker in list(agent._agent_workers.values()):
+        worker.thread.join(timeout=timeout)
+        assert not worker.thread.is_alive(), "deploy worker did not finish in time"
+
+
+def _deploy_cmd(cid: str, pid: str, name: str, model_path: str | None = None) -> dict[str, Any]:
+    args: dict[str, Any] = {}
+    if model_path:
+        args["model_path"] = model_path
+    return {
+        "id": cid,
+        "type": "DEPLOY_MODEL",
+        "pipeline_id": pid,
+        "model_name": name,
+        "config": {
+            "id": pid,
+            "active": False,
+            "source": {"type": "clock_tick", "args": args},
+            "sink": {"type": "console", "args": {}},
+        },
+    }
+
+
 def test_deploy_model_stores_backend_pipeline(empty_agent, mocker, tmp_path, monkeypatch):
     """DEPLOY_MODEL stores the backend-provided config verbatim (no mapping)."""
     monkeypatch.chdir(tmp_path)
@@ -210,25 +235,110 @@ def test_deploy_model_stores_backend_pipeline(empty_agent, mocker, tmp_path, mon
     (models_dir / "m.gguf").write_bytes(b"weights")  # pre-existing → download skipped
     status_logger = mocker.patch.object(empty_agent, "status_logger")
 
-    empty_agent.handle_command(
-        {
-            "id": "d1",
-            "type": "DEPLOY_MODEL",
-            "pipeline_id": "m1",
-            "model_name": "m.gguf",
-            "config": {
-                "id": "m1",
-                "active": False,
-                "source": {"type": "clock_tick", "args": {"model_path": "models/m.gguf"}},
-                "sink": {"type": "console", "args": {}},
-            },
-        }
-    )
+    empty_agent.handle_command(_deploy_cmd("d1", "m1", "m.gguf", "models/m.gguf"))
+    _await_deploys(empty_agent)
 
     stored = empty_agent.pipeline_configs["m1"]
     assert stored.source.type == "clock_tick"
     assert stored.source.args["model_path"] == "models/m.gguf"
     assert status_logger.report_command.call_args.args[1] == "completed"
+
+
+def test_deploy_model_overlap_rejected_same_pipeline(empty_agent, mocker, tmp_path, monkeypatch):
+    """A second DEPLOY_MODEL for a pipeline already deploying is rejected."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "models").mkdir()
+    status_logger = mocker.patch.object(empty_agent, "status_logger")
+
+    # Freeze the download until the test releases it, so the first deploy
+    # sits in-flight while the second one is dispatched.
+    release = threading.Event()
+
+    def chunks(*_args, **_kwargs):
+        release.wait(timeout=3.0)
+        yield b""
+
+    resp = mocker.MagicMock()
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    resp.raise_for_status.return_value = None
+    resp.headers = {"content-length": "0"}
+    resp.iter_content.side_effect = chunks
+    mocker.patch("link.app.runtime.requests.get", return_value=resp)
+
+    empty_agent.handle_command(_deploy_cmd("d1", "m1", "m.gguf", "models/m.gguf"))
+    # Wait for the worker to actually be registered (spawn is async).
+    for _ in range(50):
+        if "m1" in empty_agent._agent_workers:
+            break
+        threading.Event().wait(0.01)
+    assert "m1" in empty_agent._agent_workers
+
+    empty_agent.handle_command(_deploy_cmd("d2", "m1", "m.gguf", "models/m.gguf"))
+
+    # The second deploy must report failed synchronously on the dispatcher.
+    failed_calls = [c for c in status_logger.report_command.call_args_list if c.args == ("d2",) + c.args[1:]]
+    assert any(c.args[1] == "failed" and "already in progress" in c.args[2] for c in failed_calls)
+
+    release.set()
+    _await_deploys(empty_agent)
+
+
+def test_cancel_deploy_interrupts_download(empty_agent, mocker, tmp_path, monkeypatch):
+    """CANCEL_DEPLOY breaks the chunk loop, deletes .partial, reports cancelled."""
+    monkeypatch.chdir(tmp_path)
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    status_logger = mocker.patch.object(empty_agent, "status_logger")
+
+    first_chunk_written = threading.Event()
+    proceed = threading.Event()
+
+    def chunks(*_args, **_kwargs):
+        yield b"first-chunk-bytes"
+        first_chunk_written.set()
+        proceed.wait(timeout=3.0)
+        yield b"should-never-be-written"
+
+    resp = mocker.MagicMock()
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    resp.raise_for_status.return_value = None
+    resp.headers = {"content-length": "100"}
+    resp.iter_content.side_effect = chunks
+    mocker.patch("link.app.runtime.requests.get", return_value=resp)
+
+    empty_agent.handle_command(_deploy_cmd("d1", "m1", "m.gguf", "models/m.gguf"))
+    assert first_chunk_written.wait(timeout=3.0), "worker never wrote first chunk"
+
+    empty_agent.handle_command({"id": "c1", "type": "CANCEL_DEPLOY", "pipeline_id": "m1"})
+    proceed.set()
+    _await_deploys(empty_agent)
+
+    partial = models_dir / "m.gguf.partial"
+    target = models_dir / "m.gguf"
+    assert not partial.exists(), "partial should be cleaned up on cancel"
+    assert not target.exists(), "target must not be published on cancel"
+    assert "m1" not in empty_agent.pipeline_configs, "config must not be committed on cancel"
+
+    # The deploy command (d1) must terminate as failed/cancelled; the cancel
+    # command (c1) itself completes with a "signal sent" note.
+    d1_calls = [c for c in status_logger.report_command.call_args_list if c.args[0] == "d1"]
+    assert any(c.args[1] == "failed" and c.args[2] == "cancelled" for c in d1_calls)
+    c1_calls = [c for c in status_logger.report_command.call_args_list if c.args[0] == "c1"]
+    assert c1_calls and c1_calls[-1].args[1] == "completed"
+
+
+def test_cancel_deploy_no_active_is_noop(empty_agent, mocker):
+    """CANCEL_DEPLOY with no in-flight deploy reports completed with a note."""
+    status_logger = mocker.patch.object(empty_agent, "status_logger")
+
+    empty_agent.handle_command({"id": "c1", "type": "CANCEL_DEPLOY", "pipeline_id": "nope"})
+
+    calls = [c for c in status_logger.report_command.call_args_list if c.args[0] == "c1"]
+    assert len(calls) == 1
+    assert calls[0].args[1] == "completed"
+    assert "No active deploy" in calls[0].args[2]
 
 
 def test_update_pipeline_stores_config_when_not_running(empty_agent, mocker):

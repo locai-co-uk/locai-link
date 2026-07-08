@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from link.config.commands import (
+    CancelDeployCommand,
     DeployModelCommand,
     StartModelInferenceCommand,
     StartServingCommand,
@@ -39,7 +40,7 @@ from link.config.commands import (
 from link.config.templating import resolve_templates
 
 # Fingerprint of the frozen fixture set (see test_contract_fingerprint_matches).
-CONTRACT_SHA256 = "fa487d4b0ec8be07fce9524ca0982326f24bd1455de961f442b8b7c67150b76f"
+CONTRACT_SHA256 = "425ce1d54b81939f310d6d0806c05fdbc2c7d96c5e0531dc38b6ed06e26fd730"
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "wire"
 _FIXTURES = sorted(FIXTURES_DIR.glob("*.json"))
@@ -47,6 +48,7 @@ _FIXTURES = sorted(FIXTURES_DIR.glob("*.json"))
 # Every over-the-wire command type, mapped to the typed command it parses into.
 EXPECTED_CLASS = {
     "DEPLOY_MODEL": DeployModelCommand,
+    "CANCEL_DEPLOY": CancelDeployCommand,
     "START_MODEL_INFERENCE": StartModelInferenceCommand,
     "STOP_MODEL_INFERENCE": StopModelInferenceCommand,
     "START_SERVING": StartServingCommand,
