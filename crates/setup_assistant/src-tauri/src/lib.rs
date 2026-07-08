@@ -718,6 +718,58 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
     }
 }
 
+/// Block until the freshly-kickstarted agent is reachable AND its Zenoh
+/// transport reports `connected: true`. Without this the Finish flow
+/// races: SA fires `deploy_model` on Control, Control dispatches the
+/// DEPLOY_MODEL over Zenoh, the agent hasn't yet subscribed to its
+/// command topic, and the message is dropped. The user sees Control
+/// accept the deploy but no download ever starts. Retries the poll for
+/// up to ~15 s — the Python runtime cold-starts in a couple of seconds
+/// on macOS but PyInstaller unpack + zenoh handshake can burn more on
+/// a slow disk.
+#[tauri::command]
+#[allow(unused_assignments)]
+fn wait_for_agent_ready() -> Result<(), String> {
+    let url = "http://127.0.0.1:50505/healthz";
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    // Every loop iteration overwrites this before the deadline check reads
+    // it, so the initial value would only surface if the loop never ran
+    // (unreachable). `#[allow(unused_assignments)]` is on the fn so the
+    // dead-store warning doesn't fire on that unreachable initialisation.
+    let mut last_err = String::from("agent never came up");
+    loop {
+        match http_agent().get(url).call() {
+            Ok(resp) => match resp.into_json::<serde_json::Value>() {
+                Ok(body) => {
+                    let connected = body
+                        .get("transport")
+                        .and_then(|t| t.get("connected"))
+                        .and_then(|c| c.as_bool())
+                        .unwrap_or(false);
+                    if connected {
+                        // A small settle delay so Zenoh queryable/subscriber
+                        // registrations propagate to the Control side before
+                        // the next `deploy_model` call races them.
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        return Ok(());
+                    }
+                    last_err = "transport not connected yet".to_string();
+                }
+                Err(e) => {
+                    last_err = format!("malformed /healthz: {e}");
+                }
+            },
+            Err(e) => {
+                last_err = format!("{e}");
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("wait_for_agent_ready: {last_err}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
 /// Queue a deploy of `model_id` onto `device_id`; returns the deployment id.
 /// Enqueue-only — Control dispatches via Zenoh, runtime downloads later.
 #[tauri::command]
@@ -1219,18 +1271,27 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
 
 #[tauri::command]
 #[cfg(target_os = "macos")]
-fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
-    // uninstall.tool handles the AppleScript confirm + admin escalation.
+fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
+    // The .pkg ships uninstall.sh at INSTALL_ROOT and the postinstall
+    // chmod +x's it. AppleScript's `do shell script … with administrator
+    // privileges` pops the OS's admin-password prompt.
+    let script = format!("{install_root}/uninstall.sh");
+    if !std::path::Path::new(&script).exists() {
+        return Err(format!("uninstall.sh not found at {script}"));
+    }
+    // Escape any embedded double-quote in the path so the AppleScript
+    // string literal stays well-formed.
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let apple_script = format!(
+        "do shell script \"/bin/bash '{escaped}'\" with administrator privileges"
+    );
     let out = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            "do shell script \"/Library/Locai/uninstall.tool\" with administrator privileges",
-        ])
+        .args(["-e", &apple_script])
         .output()
         .map_err(|e| format!("osascript: {e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "uninstall.tool failed: {}",
+            "uninstall.sh failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -1296,6 +1357,7 @@ pub fn run() {
             list_models,
             deploy_model,
             mark_deployment_pending,
+            wait_for_agent_ready,
             re_register,
             open_companion_preferences,
             launch_uninstaller_from_sa,

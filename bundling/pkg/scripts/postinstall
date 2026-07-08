@@ -32,6 +32,7 @@ INSTALL_ROOT="/Library/Locai"
 LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
 SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
+SETUP_ASSISTANT_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 COMPANION_APP="${INSTALL_ROOT}/Locai Link.app"
 COMPANION_SYMLINK="/Applications/Locai Link.app"
 UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
@@ -117,6 +118,25 @@ else
     log "companion app not found at $COMPANION_APP — skipping /Applications copy"
 fi
 
+# --- 4b. /Applications/Locai Setup Assistant.app ---------------------
+# The SA is also copied into /Applications so it's discoverable via
+# Spotlight / Launchpad / the Applications sidebar. Users who quit the
+# auto-launched SA before completing setup would otherwise have no way
+# to reopen it (the /Library/Locai copy isn't indexed by Launch
+# Services). Same ditto pattern as the companion — preserves the code
+# signature — followed by mdimport so Spotlight sees it immediately.
+if [[ -d "$SETUP_ASSISTANT" ]]; then
+    rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
+    ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
+    log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
+    if command -v mdimport >/dev/null 2>&1; then
+        mdimport "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
+        log "mdimport ran on $SETUP_ASSISTANT_IN_APPLICATIONS"
+    fi
+else
+    log "setup assistant not found at $SETUP_ASSISTANT — skipping /Applications copy"
+fi
+
 # --- 5. Launch Setup Assistant ---------------------------------------
 # The postinstall runs as root; the Setup Assistant must run as the
 # actual user for LaunchAgent registration and Keychain access to work
@@ -131,15 +151,24 @@ if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     exit 0
 fi
 
-if [[ -d "$SETUP_ASSISTANT" ]]; then
+# Prefer the /Applications copy so LaunchServices registers the .app
+# by its indexed bundle identity; fall back to the /Library/Locai copy
+# if the copy step above failed.
+SA_TO_LAUNCH=""
+if [[ -d "$SETUP_ASSISTANT_IN_APPLICATIONS" ]]; then
+    SA_TO_LAUNCH="$SETUP_ASSISTANT_IN_APPLICATIONS"
+elif [[ -d "$SETUP_ASSISTANT" ]]; then
+    SA_TO_LAUNCH="$SETUP_ASSISTANT"
+fi
+if [[ -n "$SA_TO_LAUNCH" ]]; then
     # `open` returns immediately once the .app is dispatched to
     # launchd; the postinstall doesn't hold the Installer.app UI thread.
-    sudo -u "$CONSOLE_USER" open -a "$SETUP_ASSISTANT" || {
-        log "WARN: failed to launch Setup Assistant.app; user must launch it manually"
+    sudo -u "$CONSOLE_USER" open -a "$SA_TO_LAUNCH" || {
+        log "WARN: failed to launch $SA_TO_LAUNCH; user must launch it manually"
     }
-    log "Setup Assistant handed off to $CONSOLE_USER"
+    log "Setup Assistant handed off to $CONSOLE_USER (from $SA_TO_LAUNCH)"
 else
-    log "Setup Assistant.app not found at $SETUP_ASSISTANT — user must launch it manually"
+    log "Setup Assistant.app not found; user must launch it manually"
 fi
 
 exit 0

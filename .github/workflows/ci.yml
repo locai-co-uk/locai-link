@@ -255,3 +255,4 @@ jobs:
       - name: Test Audio Transcriber
         shell: bash
         run: uv run pytest plugins/audio_transcriber/ -v -s -m ""
+

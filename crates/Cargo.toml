@@ -29,12 +29,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
 
-# NOTE: Cargo.lock pins `time = 0.3.49` because cookie 0.18.1 (pulled
-# in by Tauri) hasn't been updated for the `Parsable::parse` signature
-# change introduced in time 0.3.50+. Keep Cargo.lock committed until
-# upstream cookie picks up the new API. To refresh other deps without
-# regressing this, use `cargo update --workspace --exclude time`.
-
 # Release profile applies to the whole workspace. The launcher targets a
 # small static binary; tuning here keeps the Tauri builds small too.
 [profile.release]

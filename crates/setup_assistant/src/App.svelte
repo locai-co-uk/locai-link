@@ -415,6 +415,17 @@
         })
       )
     );
+    // Block until the agent is reachable AND its Zenoh transport reports
+    // connected=true. Otherwise Control's DEPLOY_MODEL dispatch races the
+    // agent's subscriber setup and the command is silently dropped — the
+    // user sees Control accept the deploy but no download ever starts.
+    // Non-fatal if it times out: the user can still deploy from Control
+    // later, and the mark_deployment_pending rows stay as "queued".
+    try {
+      await invoke<void>("wait_for_agent_ready");
+    } catch (e) {
+      console.warn("wait_for_agent_ready timed out; proceeding anyway:", e);
+    }
     const results = await Promise.allSettled(
       selected.map((m) =>
         invoke<string>("deploy_model", {

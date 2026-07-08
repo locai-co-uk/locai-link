@@ -1,0 +1,300 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: CC0-1.0
+#
+# Installers — shellcheck + install/uninstall roundtrip smoke tests.
+#
+# Guards the class of "shipped a broken installer" bugs by running the
+# install/uninstall scripts end-to-end against a synthetic bundle. Fast
+# (~90 s per platform), no secrets required.
+#
+# Coverage:
+#   1. Shellcheck — static analysis of every shipped shell script.
+#      Catches typos, missing quotes, unused vars, set-e / exit-code
+#      gaps at build time rather than at the user's laptop.
+#   2. macOS roundtrip — fakes the file layout a real .pkg install
+#      would produce (INSTALL_ROOT, both /Applications bundles,
+#      user-domain LaunchAgents, per-user Tauri caches / prefs /
+#      WebKit / saved state, /usr/local/bin symlink), then runs
+#      uninstall.sh and asserts every artefact is gone. Also runs
+#      uninstall.sh WITHOUT sudo and asserts it exits non-zero with
+#      the system layout still intact — the exact bug that shipped
+#      in the last release.
+#   3. Linux roundtrip — assembles a synthetic tarball, runs
+#      install.sh against a scratch install root, verifies the install
+#      root + systemd units + .desktop entries + icons + @HOME@
+#      substitution all landed, then uninstall.sh and verifies the
+#      cleanup.
+#
+# What this workflow deliberately does NOT test:
+#   * codesign / notarization on real .pkg — release.yml covers that
+#     on tag push.
+#   * Zenoh deploy race at Finish — needs a live Control server.
+#   * Tray icon visibility / Spotlight UI — no GUI on hosted runners.
+#
+# Why not in ci.yml:
+#   * `paths:` filter below skips this workflow entirely on PRs that
+#     don't touch installer files — most PRs don't, so we don't burn
+#     macOS-runner minutes on unrelated code changes.
+#   * Failure semantics are different from unit tests. A shellcheck
+#     tightening breaking this workflow shouldn't gate a Python fix.
+
+name: Installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+      - "dev"
+    paths:
+      - "bundling/**"
+      - ".github/workflows/installers.yml"
+  pull_request:
+    branches:
+      - "main"
+      - "dev"
+    paths:
+      - "bundling/**"
+      - ".github/workflows/installers.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Lint scripts
+        run: |
+          shellcheck --severity=warning \
+            bundling/pkg/scripts/postinstall \
+            bundling/pkg/uninstall.sh \
+            bundling/linux/install.sh \
+            bundling/linux/uninstall.sh \
+            bundling/linux/pack.sh
+
+  macos-roundtrip:
+    name: macOS uninstall roundtrip
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Synthesise the install layout
+        run: |
+          set -euo pipefail
+          # Everything a real .pkg install would produce, minus the
+          # runnable binaries — those don't matter for uninstall
+          # coverage. Empty dirs get a marker file so `rm -rf` has
+          # something to remove.
+          sudo mkdir -p /Library/Locai
+          sudo touch /Library/Locai/locai-link
+          sudo chmod 755 /Library/Locai/locai-link
+          echo '{"channel":"prod"}' | sudo tee /Library/Locai/boot.json >/dev/null
+          sudo cp bundling/pkg/uninstall.sh /Library/Locai/uninstall.sh
+          sudo chmod 755 /Library/Locai/uninstall.sh
+          sudo mkdir -p "/Library/Locai/Setup Assistant.app/Contents"
+          sudo mkdir -p "/Library/Locai/Locai Link.app/Contents"
+          sudo mkdir -p "/Library/Locai/LaunchAgents"
+          sudo mkdir -p "/Library/Locai/logs" "/Library/Locai/state" "/Library/Locai/versions"
+          sudo mkdir -p "/Applications/Locai Link.app/Contents"
+          sudo mkdir -p "/Applications/Locai Setup Assistant.app/Contents"
+          sudo mkdir -p /usr/local/bin
+          sudo ln -sf /Library/Locai/locai-link /usr/local/bin/locai
+          mkdir -p "$HOME/Library/LaunchAgents"
+          touch "$HOME/Library/LaunchAgents/uk.co.locai.link.agent.plist"
+          touch "$HOME/Library/LaunchAgents/uk.co.locai.link.companion.plist"
+          # Per-user Tauri data: two bundle IDs (companion + setup)
+          # across every $HOME/Library subtree uninstall.sh cleans.
+          for bid in uk.co.locai.link.companion uk.co.locai.link.setup; do
+            mkdir -p "$HOME/Library/Caches/$bid"
+            mkdir -p "$HOME/Library/WebKit/$bid"
+            mkdir -p "$HOME/Library/HTTPStorages/$bid"
+            touch    "$HOME/Library/Preferences/$bid.plist"
+            mkdir -p "$HOME/Library/Saved Application State/$bid.savedState"
+            mkdir -p "$HOME/Library/Application Support/$bid"
+          done
+          mkdir -p "$HOME/Library/Application Support/Locai"
+
+      - name: Non-root uninstall must refuse and leave the system intact
+        run: |
+          set -uo pipefail
+          if bash /Library/Locai/uninstall.sh; then
+            echo "::error::uninstall.sh returned 0 as non-root — it must refuse to run"
+            exit 1
+          fi
+          # System paths must survive a non-root invocation. User-scope
+          # paths are skipped here: non-root CAN write those, so a naive
+          # cleanup could remove them even while /Library survives —
+          # what matters is the root-only paths are untouched.
+          for p in \
+            "/Library/Locai" \
+            "/Library/Locai/uninstall.sh" \
+            "/Applications/Locai Link.app" \
+            "/Applications/Locai Setup Assistant.app" \
+            "/usr/local/bin/locai"; do
+            if [[ ! -e "$p" ]]; then
+              echo "::error::$p was removed by a non-root uninstall — guard is broken"
+              exit 1
+            fi
+          done
+          echo "non-root uninstall refused cleanly"
+
+      - name: Root uninstall runs
+        run: sudo /Library/Locai/uninstall.sh
+
+      - name: Assert nothing is left behind
+        run: |
+          set -uo pipefail
+          fail=0
+          check_gone() {
+            if [[ -e "$1" ]]; then
+              echo "::error::$1 still exists after uninstall"
+              fail=1
+            fi
+          }
+          check_gone "/Library/Locai"
+          check_gone "/Applications/Locai Link.app"
+          check_gone "/Applications/Locai Setup Assistant.app"
+          check_gone "/usr/local/bin/locai"
+          check_gone "$HOME/Library/LaunchAgents/uk.co.locai.link.agent.plist"
+          check_gone "$HOME/Library/LaunchAgents/uk.co.locai.link.companion.plist"
+          for bid in uk.co.locai.link.companion uk.co.locai.link.setup; do
+            check_gone "$HOME/Library/Caches/$bid"
+            check_gone "$HOME/Library/WebKit/$bid"
+            check_gone "$HOME/Library/HTTPStorages/$bid"
+            check_gone "$HOME/Library/Preferences/$bid.plist"
+            check_gone "$HOME/Library/Saved Application State/$bid.savedState"
+            check_gone "$HOME/Library/Application Support/$bid"
+          done
+          check_gone "$HOME/Library/Application Support/Locai"
+          [[ $fail -eq 0 ]] || exit 1
+          echo "root uninstall cleaned every path"
+
+  linux-roundtrip:
+    name: Linux install + uninstall roundtrip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Synthesise a tarball-shaped bundle
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/locai-bundle"
+          mkdir -p "$STAGE/bundle" "$STAGE/systemd" "$STAGE/applications" "$STAGE/icons"
+
+          # "Real enough" launcher: chmod +x shell script that exits 0
+          # when invoked. install.sh only checks -f, but the SA hand-off
+          # at the end does `nohup … &` — so the file must be exec-able.
+          cat > "$STAGE/bundle/locai-link" <<'EOF'
+          #!/bin/bash
+          exit 0
+          EOF
+          chmod 755 "$STAGE/bundle/locai-link"
+
+          # Minimal manifest so future readers don't trip on missing keys.
+          cat > "$STAGE/bundle/manifest.json" <<'EOF'
+          {"version":"0.0.0-smoke","asset_name":"smoke","plugins":[]}
+          EOF
+
+          for bin in setup-assistant companion; do
+            cat > "$STAGE/$bin" <<'EOF'
+          #!/bin/bash
+          exit 0
+          EOF
+            chmod 755 "$STAGE/$bin"
+          done
+
+          echo '{"channel":"prod"}' > "$STAGE/boot.json"
+          cp bundling/linux/systemd/locai-link-agent.service     "$STAGE/systemd/"
+          cp bundling/linux/systemd/locai-link-companion.service "$STAGE/systemd/"
+          cp bundling/linux/applications/locai-link.desktop            "$STAGE/applications/"
+          cp bundling/linux/applications/locai-setup-assistant.desktop "$STAGE/applications/"
+
+          # A single 1×1 PNG per size exercises the icon-copy branches.
+          python3 - <<'PY' "$STAGE/icons"
+          import base64, os, sys
+          out = sys.argv[1]
+          png = base64.b64decode(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+          )
+          for name in ("32x32.png", "128x128.png", "128x128@2x.png"):
+              with open(os.path.join(out, name), "wb") as f:
+                  f.write(png)
+          PY
+
+          cp bundling/linux/install.sh   "$STAGE/install.sh"
+          cp bundling/linux/uninstall.sh "$STAGE/uninstall.sh"
+          chmod 755 "$STAGE/install.sh" "$STAGE/uninstall.sh"
+
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Run install.sh
+        run: |
+          set -euo pipefail
+          # Scratch install root so the test doesn't care about the
+          # runner's real $HOME layout. install.sh reads $LOCAI_INSTALL_ROOT.
+          export LOCAI_INSTALL_ROOT="$RUNNER_TEMP/locai-install"
+          echo "LOCAI_INSTALL_ROOT=$LOCAI_INSTALL_ROOT" >> "$GITHUB_ENV"
+          bash "$STAGE/install.sh"
+
+      - name: Assert install landed
+        run: |
+          set -uo pipefail
+          fail=0
+          check_present() {
+            if [[ ! -e "$1" ]]; then
+              echo "::error::install.sh did not create $1"
+              fail=1
+            fi
+          }
+          check_present "$LOCAI_INSTALL_ROOT/locai-link"
+          check_present "$LOCAI_INSTALL_ROOT/setup-assistant"
+          check_present "$LOCAI_INSTALL_ROOT/companion"
+          check_present "$LOCAI_INSTALL_ROOT/boot.json"
+          check_present "$LOCAI_INSTALL_ROOT/uninstall.sh"
+          check_present "$LOCAI_INSTALL_ROOT/systemd/locai-link-agent.service"
+          check_present "$LOCAI_INSTALL_ROOT/systemd/locai-link-companion.service"
+          check_present "$HOME/.local/share/applications/locai-link.desktop"
+          check_present "$HOME/.local/share/applications/locai-setup-assistant.desktop"
+          check_present "$HOME/.local/share/icons/hicolor/32x32/apps/locai-link.png"
+          check_present "$HOME/.local/share/icons/hicolor/128x128/apps/locai-link.png"
+
+          # @HOME@ substitution guard: the shipped .desktop template uses
+          # the sentinel because %h is KDE-only. A regression would leave
+          # the literal @HOME@ in the installed file, breaking launchers.
+          if grep -q "@HOME@" "$HOME/.local/share/applications/locai-link.desktop"; then
+            echo "::error::@HOME@ sentinel survived into installed .desktop file"
+            fail=1
+          fi
+
+          [[ $fail -eq 0 ]] || exit 1
+          echo "install.sh laid out every expected artefact"
+
+      - name: Run uninstall.sh
+        run: bash "$LOCAI_INSTALL_ROOT/uninstall.sh"
+
+      - name: Assert uninstall cleaned up
+        run: |
+          set -uo pipefail
+          fail=0
+          check_gone() {
+            if [[ -e "$1" ]]; then
+              echo "::error::$1 still exists after uninstall.sh"
+              fail=1
+            fi
+          }
+          check_gone "$LOCAI_INSTALL_ROOT"
+          check_gone "$HOME/.local/share/applications/locai-link.desktop"
+          check_gone "$HOME/.local/share/applications/locai-setup-assistant.desktop"
+          check_gone "$HOME/.local/share/icons/hicolor/32x32/apps/locai-link.png"
+          check_gone "$HOME/.local/share/icons/hicolor/128x128/apps/locai-link.png"
+          [[ $fail -eq 0 ]] || exit 1
+          echo "uninstall.sh cleaned every path install.sh created"

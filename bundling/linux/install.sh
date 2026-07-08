@@ -45,7 +45,6 @@
 set -euo pipefail
 
 INSTALL_ROOT="${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}"
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 DESKTOP_DIR="$HOME/.local/share/applications"
 LOG_PREFIX="[locai-install]"
 
