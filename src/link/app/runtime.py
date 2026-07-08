@@ -520,6 +520,10 @@ class AgentRuntime:
             self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
             self.health_state.set_deployment_progress(pipeline_id, "completed", 100.0, cmd.model_name)
             self.status_logger.report_command(command_id, "completed", f"Model {cmd.model_name} deployed successfully.")
+        except Exception as e:
+            logger.error(f"Deploy '{pipeline_id}' failed: {e}", exc_info=True)
+            self.status_logger.report_command(command_id, "failed", str(e))
+            self.health_state.set_deployment_progress(pipeline_id, "completed", 0.0, cmd.model_name)
         finally:
             with self.lock:
                 worker = self._agent_workers.get(pipeline_id)
@@ -555,9 +559,8 @@ class AgentRuntime:
 
         logger.info(f"Downloading {cmd.model_name} from {download_url}...")
         cancelled = False
-        # `(connect, read)`: cap a stalled or hung stream so a cancel that
-        # slips past the chunk-loop check still surfaces within seconds
-        # rather than waiting on the old 600 s single timeout.
+        total = 0
+        done = 0
         download_timeout: tuple[float, float] = (10.0, 30.0)
         try:
             headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
@@ -565,7 +568,6 @@ class AgentRuntime:
                 self._attach_response(pipeline_id, command_id, r)
                 r.raise_for_status()
                 total = int(r.headers.get("content-length", 0))
-                done = 0
                 last_reported = -1
                 self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
                 self.health_state.set_deployment_progress(pipeline_id, "downloading", 0.0, cmd.model_name)
@@ -587,9 +589,6 @@ class AgentRuntime:
                                 )
                                 last_reported = pct
         except Exception as e:
-            # A cancel that closes the streaming response propagates here as
-            # ConnectionError / ChunkedEncodingError / etc. — treat that as
-            # cancelled, not failed, so the UI stage stays consistent.
             if cancel_event.is_set():
                 cancelled = True
             else:
@@ -606,6 +605,19 @@ class AgentRuntime:
         if cancelled:
             self._cleanup_partial(partial_path)
             self._report_cancelled(cmd, "during download")
+            return False
+
+        # Guard the rename: `iter_content` can return normally on a short
+        # read (server closes early, proxy truncates, etc.), so we must
+        # verify the byte count before publishing — otherwise a truncated
+        # file would land at `target_path` and later deploys would hit the
+        # `target_path.exists()` cache branch and skip the redownload.
+        if total and done != total:
+            self._cleanup_partial(partial_path)
+            msg = f"incomplete download: {done}/{total} bytes"
+            logger.error(msg)
+            self.status_logger.report_command(command_id, "failed", msg)
+            self.health_state.set_deployment_progress(pipeline_id, "completed", 0.0, cmd.model_name)
             return False
 
         # Guard the rename: a cancel arriving after the last chunk but
