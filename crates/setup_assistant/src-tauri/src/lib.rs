@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -10,27 +10,21 @@ use tauri::State;
 
 use locai_link_shared::{installed_version, read_boot_json, BootConfig};
 
-/// Prod Control API base. RFC 8628 device-flow endpoints hang off
-/// `/auth/device/{code,token}` and device registration off `/devices/`.
-///
-/// TODO(env-config): swap to a build-time env selector so dev / staging
-/// can point at `https://dev.api.locai.co.uk/api/v1` etc. Companion has
-/// the same TODO on its `CONTROL_URL` const.
+// TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
 const CONTROL_API_URL: &str = "https://api.locai.co.uk/api/v1";
 
-/// Timeout for both device-code initiation and each poll of the token
-/// endpoint. Kept generous because the backend hits Firestore
-/// synchronously on both paths.
+/// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/*.plist`.
+#[cfg(target_os = "macos")]
+const AGENT_LABEL: &str = "uk.co.locai.link.agent";
+#[cfg(target_os = "macos")]
+const COMPANION_LABEL: &str = "uk.co.locai.link.companion";
+
+/// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// User-Agent for outbound Control API calls. Google-fronted endpoints
-/// have been observed to stall on requests without an explicit UA;
-/// mirrors what the launcher does for GitHub Releases fetches.
+/// Google-fronted endpoints have been observed to stall on requests without an explicit UA.
 const USER_AGENT: &str = "locai-link-setup-assistant/0.1.0";
 
-/// Build an HTTP agent with the timeout + user-agent policy every
-/// device-flow call needs. Cheap to construct; called per-command
-/// rather than held in State to keep the module free of ureq types.
 fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(HTTP_TIMEOUT)
@@ -38,11 +32,8 @@ fn http_agent() -> ureq::Agent {
         .build()
 }
 
-/// Returns a device name derived from the machine's hostname. Matches
-/// what Control shows for fleet-enrolled devices (which pass
-/// `platform.node()` from the runtime) whenever the hostname alone is
-/// usable; short hostnames like `"pc"` get suffixed with the OS name
-/// because Control requires `Device.name` to be at least 3 chars.
+/// Device name derived from the machine's hostname. Short hostnames get
+/// suffixed with the OS name because Control requires `Device.name` >= 3 chars.
 fn machine_hostname() -> String {
     let raw = std::process::Command::new("hostname")
         .output()
@@ -60,20 +51,13 @@ fn machine_hostname() -> String {
         });
 
     match raw {
-        // Long enough to satisfy Control's `min_length=3` — use verbatim.
         Some(h) if h.chars().count() >= 3 => h,
-        // Short but non-empty hostname (e.g. `pc`). Append the OS name
-        // so the user still recognises their machine.
+        // Short but non-empty (e.g. `pc`) — append OS so the machine's still recognisable.
         Some(h) => format!("{h}-{}", std::env::consts::OS),
-        // No hostname reported at all — fall back to a stable default
-        // that still names the OS so the user has a hint.
         None => format!("locai-link-{}", std::env::consts::OS),
     }
 }
 
-/// Tauri command: get the hostname the SA should use when registering
-/// this device. Called from the Finish step so the label matches what
-/// fleet enrollment would produce for the same box.
 #[tauri::command]
 fn suggest_device_name() -> String {
     machine_hostname()
@@ -81,37 +65,23 @@ fn suggest_device_name() -> String {
 
 // --- Check Install -----------------------------------------------------------
 
-/// Wire-format result for the Setup Assistant's "Check Install" step.
-///
-/// Kept flat and JSON-friendly so the Svelte side can consume it
-/// without a schema library. `path` is a stringified `PathBuf` — the
-/// frontend only shows it, never operates on it.
+/// Wire-format result for the SA's "Check Install" step.
 #[derive(Serialize)]
 pub struct CheckInstallResult {
     pub installed: bool,
     pub version: Option<String>,
     pub path: Option<String>,
     pub boot: Option<BootConfig>,
-    /// Populated when `boot.json` exists but couldn't be parsed. Kept
-    /// distinct from `reason` so the UI can say "install found but
-    /// config is broken" rather than hiding the failure.
+    /// Distinct from `reason` so the UI can say "install found but config is broken".
     pub boot_error: Option<String>,
-    /// Human-readable reason when `installed` is false. `None` on the
-    /// success path.
     pub reason: Option<String>,
+    /// From the newest `session_*.json`; when set, the SA renders the
+    /// "already set up" splash instead of the wizard.
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
 }
 
-/// Where SA lays down session config + related state, keyed on host OS.
-///
-/// * **macOS** — `/Library/Locai` (owned by the `.pkg` postinstall).
-/// * **Linux** — `$HOME/.local/share/locai` (XDG_DATA_HOME). No
-///   installer to lay it down, so `install_agent_config` creates it
-///   on first Finish.
-/// * **Windows** — empty string; SA errors clearly at Finish. No
-///   Windows install story yet.
-///
-/// Frontend calls this on mount and threads the result through
-/// wherever it used to pass the hardcoded `/Library/Locai` string.
+/// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
 #[tauri::command]
 fn get_install_root() -> String {
     #[cfg(target_os = "macos")]
@@ -129,12 +99,14 @@ fn get_install_root() -> String {
     }
 }
 
-/// Read the on-disk install state at `install_root`.
-///
-/// Never returns an `Err` — the failure modes ("no install here",
-/// "install root doesn't exist", "boot.json corrupt") are legitimate
-/// outcomes the UI needs to render, not exceptions. `reason` /
-/// `boot_error` carry the detail.
+/// OS the SA is running on, so the frontend can render platform-appropriate strings.
+#[tauri::command]
+fn get_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
+/// Read the on-disk install state. Never `Err` — the failure modes are legitimate
+/// outcomes the UI needs to render; `reason` / `boot_error` carry the detail.
 #[tauri::command]
 fn check_install(install_root: String) -> CheckInstallResult {
     let root = PathBuf::from(&install_root);
@@ -146,6 +118,8 @@ fn check_install(install_root: String) -> CheckInstallResult {
             boot: None,
             boot_error: None,
             reason: Some(format!("Install root does not exist: {install_root}")),
+            device_id: None,
+            device_name: None,
         };
     }
 
@@ -159,6 +133,8 @@ fn check_install(install_root: String) -> CheckInstallResult {
         (None, None)
     };
 
+    let (device_id, device_name) = read_registered_identity(&root);
+
     match installed_version(&root) {
         Some(v) => CheckInstallResult {
             installed: true,
@@ -167,6 +143,8 @@ fn check_install(install_root: String) -> CheckInstallResult {
             boot,
             boot_error,
             reason: None,
+            device_id,
+            device_name,
         },
         None => CheckInstallResult {
             installed: false,
@@ -175,17 +153,60 @@ fn check_install(install_root: String) -> CheckInstallResult {
             boot,
             boot_error,
             reason: Some("No `current` pointer found under install root.".to_string()),
+            device_id,
+            device_name,
         },
     }
 }
 
+/// Pull `(device_id, device_name)` from the newest `session_*.json`, best-effort.
+fn read_registered_identity(install_root: &Path) -> (Option<String>, Option<String>) {
+    let configs = install_root.join("configs");
+    let entries = match std::fs::read_dir(&configs) {
+        Ok(e) => e,
+        Err(_) => return (None, None),
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("session_") || !name.ends_with(".json") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
+            newest = Some((mtime, entry.path()));
+        }
+    }
+    let path = match newest {
+        Some((_, p)) => p,
+        None => return (None, None),
+    };
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return (None, None),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let identity = match json.get("identity") {
+        Some(v) => v,
+        None => return (None, None),
+    };
+    let id = identity.get("device_id").and_then(|v| v.as_str()).map(String::from);
+    let name = identity.get("device_name").and_then(|v| v.as_str()).map(String::from);
+    (id, name)
+}
+
 // --- Sign in (RFC 8628 device authorization) --------------------------------
 
-/// Response to the front-end's `sign_in_start` invocation. Mirrors the
-/// backend's `DeviceCodeResponse` (see platform_backend
-/// `user_routes.py::DeviceCodeResponse`) minus the `device_code` — the
-/// front-end never needs the raw device code, it lives in `SignInState`
-/// and the poll command reads it from there.
+/// Mirrors backend's `DeviceCodeResponse` minus the `device_code` (kept
+/// server-side in `SignInState`).
 #[derive(Serialize)]
 pub struct DeviceCodeStart {
     pub user_code: String,
@@ -195,8 +216,8 @@ pub struct DeviceCodeStart {
     pub expires_in: u64,
 }
 
-/// Wire result of a single poll. Every RFC §3.5 error case becomes a
-/// distinct variant so the front-end doesn't have to inspect strings.
+/// Every RFC §3.5 error case is a distinct variant so the front-end
+/// doesn't inspect strings.
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SignInPollResult {
@@ -209,16 +230,12 @@ pub enum SignInPollResult {
     },
     Denied,
     Expired,
-    /// Anything the front-end can't recover from — network failure,
-    /// unexpected status, missing fields. Message is for display.
     Error {
         message: String,
     },
 }
 
-/// Backend-issued session held server-side (i.e. in the Rust process).
-/// The JWT never crosses the Tauri IPC boundary — the front-end can
-/// only ask "am I signed in" and "please make an authenticated call".
+/// Session held server-side — the JWT never crosses the Tauri IPC boundary.
 struct Session {
     device_code: String,
     access_token: Option<String>,
@@ -233,17 +250,9 @@ pub struct SignInState {
     inner: Mutex<Option<Session>>,
 }
 
-/// Kick off RFC 8628 device authorization. Stores the device_code
-/// server-side so subsequent polls don't require it as an arg.
-///
-/// Retries once on transport errors (timeout / connection refused).
-/// The first hit to `/auth/device/code` after boot has been observed
-/// to time out on macOS — likely DNS/TLS cold start on the fresh
-/// process's network stack — while an immediate retry succeeds. A
-/// single-shot retry with a short pause covers that without pushing
-/// the wizard's total wait past a reasonable budget. Status errors
-/// (4xx/5xx from Control) skip the retry — those are the server
-/// saying "no" and won't change on repeat.
+/// Kick off RFC 8628 device authorization. Retries once on transport errors —
+/// the first post-boot call to `/auth/device/code` has been observed to time
+/// out on macOS (DNS/TLS cold start) with an immediate retry succeeding.
 #[tauri::command]
 fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
     let payload = serde_json::json!({
@@ -262,9 +271,6 @@ fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, Strin
     let resp = match send() {
         Ok(r) => r,
         Err(ureq::Error::Transport(t)) => {
-            // Log the first-attempt failure so we can diagnose if the
-            // retry also fails. Tauri routes this to the SA's stderr;
-            // shows up alongside `install_launchagents` logs on macOS.
             eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying once");
             std::thread::sleep(std::time::Duration::from_millis(1500));
             send().map_err(|e| describe_ureq_err("device code request", e))?
@@ -316,9 +322,8 @@ fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, Strin
     })
 }
 
-/// Poll the token endpoint once. The Svelte side is expected to space
-/// polls by the `interval` returned from `sign_in_start` (and bump it on
-/// `SlowDown`).
+/// Poll the token endpoint once. Front-end paces polls by `interval` from
+/// `sign_in_start` (bumped on `SlowDown`).
 #[tauri::command]
 fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
     let device_code = match state.inner.lock().expect("SignInState poisoned").as_ref() {
@@ -388,7 +393,7 @@ fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
                 username,
             }
         }
-        // RFC §3.5 non-success codes: HTTP 400 with `detail.error` set.
+        // RFC §3.5 non-success codes come as HTTP 400 with `detail.error` set.
         Err(ureq::Error::Status(400, resp)) => {
             let body: serde_json::Value = resp.into_json().unwrap_or_default();
             let err = body
@@ -406,8 +411,7 @@ fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
                 },
             }
         }
-        // Control-plane 429 (rate-limit), not RFC slow_down. Treat as
-        // slow_down so the front-end backs off the same way.
+        // Control-plane 429 — fold into slow_down so the front-end backs off.
         Err(ureq::Error::Status(429, _)) => SignInPollResult::SlowDown,
         Err(e) => SignInPollResult::Error {
             message: format!("token poll failed: {e}"),
@@ -417,12 +421,8 @@ fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
 
 // --- Register device against Control -----------------------------------------
 
-/// Wire result of registering the device with Control. Mirrors
-/// `RegisterWithKeyResponse` on the backend
-/// (`platform_backend/.../device_routes.py::RegisterWithKeyResponse`).
-/// `config` is the AgentConfig blob the runtime expects to see on
-/// disk; we hand it back to the front-end so the Finish step can pass
-/// it to `install_agent_config` verbatim.
+/// Mirrors backend's `RegisterWithKeyResponse`. `config` is the AgentConfig
+/// the runtime expects on disk; passed to `install_agent_config` verbatim.
 #[derive(Serialize)]
 pub struct RegisteredDevice {
     pub device_id: String,
@@ -430,17 +430,8 @@ pub struct RegisteredDevice {
     pub config: serde_json::Value,
 }
 
-/// Mints a fresh single-use registration key using the stored JWT.
-/// Returned string is fed to `register_device` on the next call.
-///
-/// Split from `register_device` so the UI can render distinct
-/// "Requesting registration key…" and "Registering device…" states —
-/// the register-with-key POST can take 5–10s when Control is cold,
-/// and a single monolithic "registering" phase looks like the wizard
-/// has hung.
-///
-/// `registration_source=onboarding_wizard` threads through to Control's
-/// activation-funnel analytics.
+/// Mint a single-use registration key. Split from `register_device` so the UI
+/// can render distinct progress states — register-with-key can take 5-10s cold.
 #[tauri::command]
 fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String> {
     let token = require_token(&state)?;
@@ -466,12 +457,8 @@ fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String
     Ok(registration_key)
 }
 
-/// Redeems a previously-minted `registration_key` for a
-/// (device_id, api_key, AgentConfig) triple. Errors are `String` so
-/// they surface to the UI as toasts.
-///
-/// Fails fast if the user never signed in — the JWT is required for
-/// this call in addition to the one-shot registration key.
+/// Redeem a registration key for a (device_id, api_key, AgentConfig) triple.
+/// Requires the caller to be signed in — JWT is used in addition to the key.
 #[tauri::command]
 fn register_device(
     state: State<'_, SignInState>,
@@ -519,11 +506,8 @@ fn register_device(
     })
 }
 
-/// Write `config` into `<install_root>/configs/session_YYYYMMDD_HHMMSS.json`
-/// — the location the runtime's `StateManager` picks up on next start
-/// (`src/link/app/state.py`, `STATE_DIR = Path("configs")` resolved
-/// against the LaunchAgent's WorkingDirectory `/Library/Locai`).
-/// Returns the path written for UI display.
+/// Write `config` to `<install_root>/configs/session_<UTC>.json` — the location
+/// the runtime's `StateManager` picks up on next start. Returns the written path.
 #[tauri::command]
 fn install_agent_config(
     install_root: String,
@@ -533,31 +517,19 @@ fn install_agent_config(
         return Err("config from register_device was null — nothing to write".to_string());
     }
 
-    // Resolve `${identity.<field>}` placeholders in the same way
-    // `_apply_server_config` does in src/link/app/onboarding.py. The
-    // backend ships topic strings like
-    // "locai/devices/${identity.device_id}/metrics" with the
-    // placeholder unfilled. If we write those verbatim the runtime
-    // publishes/subscribes to literal paths containing "${...}" —
-    // Control never sees telemetry or lifecycle events, and the
-    // device stays "version unknown" forever.
-    //
-    // Uses the identity block that's already resolved in the config
-    // itself as the substitution context, matching the Python
-    // resolve_templates() semantics: unknown placeholders (e.g. the
-    // runtime's `{cid}` / `{mid}` per-emit markers) pass through
-    // untouched.
+    // Backend ships topics like "locai/devices/${identity.device_id}/metrics"
+    // with placeholders unfilled — if we wrote those verbatim the runtime
+    // would pub/sub to literal "${...}" paths. Substitute using the resolved
+    // identity block; unknown placeholders pass through untouched (matches
+    // Python's resolve_templates() so per-emit markers like {cid}/{mid} survive).
     let identity = config.get("identity").cloned().unwrap_or_default();
     let context = serde_json::json!({ "identity": identity });
     let config = resolve_config_templates(&config, &context);
 
     let root = PathBuf::from(&install_root);
-    // macOS: /Library/Locai is laid down by the .pkg postinstall — a
-    // missing root means the install itself is broken, so error loudly.
-    // Linux: SA is the installer (no root-privileged pkg to run first),
-    // so create the root on demand. The create_dir_all below on configs/
-    // will handle the recursive create, but a missing $HOME is a real
-    // problem we do want to surface.
+    // macOS root is laid down by the .pkg postinstall; a missing root means
+    // the install itself is broken. Linux has no pkg step, so the create_dir_all
+    // below will lay it down on demand.
     #[cfg(target_os = "macos")]
     {
         if !root.exists() {
@@ -567,12 +539,7 @@ fn install_agent_config(
             ));
         }
     }
-    // configs/ is normally created by the runtime on first start
-    // (see StateManager.__init__ in src/link/app/state.py). On a
-    // fresh .pkg install the runtime hasn't run yet, so the dir
-    // won't exist — create it ourselves rather than error out. Not
-    // inside `current/`: `current/` is the versioned code symlink
-    // and OTA flips it; session state must survive version updates.
+    // configs/ lives outside current/ so session state survives OTA version flips.
     let configs_dir = root.join("configs");
     std::fs::create_dir_all(&configs_dir).map_err(|e| {
         format!(
@@ -582,12 +549,10 @@ fn install_agent_config(
     })?;
 
     // Filename mirrors StateManager.bootstrap()'s format: session_<UTC>.json.
-    // Uses UTC so two SA runs on different machines produce sortable names.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("system clock: {e}"))?;
     let secs = now.as_secs();
-    // Minimal YYYYMMDD_HHMMSS formatter — no chrono dep needed.
     let ts = format_utc_compact(secs);
     let session_path = configs_dir.join(format!("session_{ts}.json"));
 
@@ -596,8 +561,7 @@ fn install_agent_config(
     std::fs::write(&session_path, serialized)
         .map_err(|e| format!("write {}: {e}", session_path.display()))?;
 
-    // Match StateManager._tighten_permissions on Unix — the session
-    // file contains the device api_key.
+    // 0600 — the session file contains the device api_key.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -614,10 +578,7 @@ fn install_agent_config(
 
 // --- Model catalog (list + deploy) ------------------------------------------
 
-/// Wire-format subset of the backend's `ModelResponse` — only the
-/// fields the wizard actually renders. Skips the heavyweight layer /
-/// summary blobs that `/models/list_without_layers_info` already
-/// omits.
+/// Subset of the backend's `ModelResponse` — only the fields the wizard renders.
 #[derive(Serialize)]
 pub struct ModelSummary {
     pub id: String,
@@ -629,19 +590,12 @@ pub struct ModelSummary {
     pub status: String,
 }
 
-/// Turns a ureq error into a `String` suitable for `Result<T, String>`
-/// return to the front-end, preserving the server's `detail` field on
-/// non-2xx. Without this, ureq's default Display just prints
-/// `"<url>: status code <n>"` and swallows the JSON body — which
-/// is exactly the field Control uses to say *why* it rejected the
-/// call (e.g. `"detail": "device name too long"`).
+/// Turn a ureq error into a display string; preserves the server's `detail`
+/// body on non-2xx, which ureq's default Display drops.
 fn describe_ureq_err(op: &str, err: ureq::Error) -> String {
     match err {
         ureq::Error::Status(code, resp) => {
             let url = resp.get_url().to_string();
-            // .into_string() consumes the response body. Take a best-
-            // effort look; on failure we still return a useful
-            // status-only message.
             match resp.into_string() {
                 Ok(body) if !body.is_empty() => {
                     format!("{op} failed: HTTP {code} from {url} — {body}")
@@ -653,10 +607,7 @@ fn describe_ureq_err(op: &str, err: ureq::Error) -> String {
     }
 }
 
-/// Reads the JWT out of `SignInState`. Every JWT-authed command shares
-/// this failure mode ("call sign_in first"), so having one helper
-/// avoids repeating the lock/unwrap dance and gives the front-end a
-/// consistent error string.
+/// Read the JWT out of `SignInState`, or return the "sign in first" error.
 fn require_token(state: &State<'_, SignInState>) -> Result<String, String> {
     state
         .inner
@@ -667,9 +618,8 @@ fn require_token(state: &State<'_, SignInState>) -> Result<String, String> {
         .ok_or_else(|| "not signed in — sign in first".to_string())
 }
 
-/// Lists the models available to the signed-in user (including
-/// shared/org-visible ones). Hits `/models/list_without_layers_info`
-/// so we skip the ~MB of per-layer detail the SA has no use for.
+/// List models visible to the signed-in user. Hits `list_without_layers_info`
+/// to skip the ~MB of per-layer detail.
 #[tauri::command]
 fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, String> {
     let token = require_token(&state)?;
@@ -689,9 +639,7 @@ fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, Strin
         .as_array()
         .ok_or_else(|| "list_models: expected JSON array".to_string())?;
 
-    // Skip any entry missing an id or display_name — the UI has no
-    // sensible way to render them and Control shouldn't be sending
-    // them, so silent drop is fine.
+    // Drop entries missing id/display_name — the UI can't render them.
     let models = arr
         .iter()
         .filter_map(|m| {
@@ -733,10 +681,45 @@ fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, Strin
     Ok(models)
 }
 
-/// Queue a deploy of `model_id` onto `device_id`. Returns the
-/// deployment id. This just enqueues a command server-side (Control
-/// dispatches it via Zenoh); the runtime does the actual download when
-/// it receives it, so this call returns fast regardless of model size.
+/// Pre-register a model as "queued" so the Models panel shows it at 0%
+/// immediately — the runtime processes deploys serially, so without this the
+/// panel only reveals models one at a time.
+#[tauri::command]
+fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> Result<(), String> {
+    #[derive(serde::Serialize)]
+    struct Body<'a> {
+        pipeline_id: &'a str,
+        model_name: Option<&'a str>,
+    }
+    let body = Body {
+        pipeline_id: &pipeline_id,
+        model_name: model_name.as_deref(),
+    };
+    let url = "http://127.0.0.1:50505/deployments/pending";
+    let payload = serde_json::to_value(&body).unwrap();
+
+    // `install_launchagents` returns as soon as fork() succeeds, but the
+    // health server binds a beat later — retry with backoff during that window.
+    let mut attempts_left = 10u32;
+    let mut delay_ms = 200u64;
+    loop {
+        match http_agent().post(url).send_json(payload.clone()) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                attempts_left = attempts_left.saturating_sub(1);
+                if attempts_left == 0 {
+                    return Err(format!("mark_deployment_pending: {e}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                // Linear — the runtime either comes up quickly or is broken.
+                delay_ms = (delay_ms + 100).min(600);
+            }
+        }
+    }
+}
+
+/// Queue a deploy of `model_id` onto `device_id`; returns the deployment id.
+/// Enqueue-only — Control dispatches via Zenoh, runtime downloads later.
 #[tauri::command]
 fn deploy_model(
     state: State<'_, SignInState>,
@@ -751,11 +734,8 @@ fn deploy_model(
         ))
         .set("Accept", "application/json")
         .set("Authorization", &format!("Bearer {token}"))
-        // Endpoint takes no body — path params only. Send an explicit
-        // empty payload rather than `.call()`: `.call()` on a POST
-        // doesn't set `Content-Length`, and Google's L7 load balancer
-        // in front of Control rejects headerless POSTs with `HTTP 411
-        // Length Required` before the request ever reaches the API.
+        // `.send_bytes(&[])` sets Content-Length: 0 — `.call()` on a POST
+        // omits it and Google's L7 LB rejects with HTTP 411 Length Required.
         .send_bytes(&[])
         .map_err(|e| describe_ureq_err("deploy_model", e))?;
 
@@ -769,13 +749,8 @@ fn deploy_model(
         .ok_or_else(|| "deployment id missing from response".to_string())
 }
 
-/// Recursively substitute `${path.to.key}` placeholders in a JSON
-/// value using dotted lookups against `context`. Mirrors the semantics
-/// of the runtime's `resolve_templates` in
-/// `src/link/config/templating.py`: dicts and arrays are walked;
-/// strings get placeholders substituted; unknown placeholders are
-/// preserved verbatim so per-emit markers (e.g. `{cid}` / `{mid}` from
-/// the reporting handlers) pass through untouched.
+/// Recursively substitute `${path.to.key}` placeholders. Mirrors the runtime's
+/// `resolve_templates` — unknown placeholders pass through so per-emit markers survive.
 fn resolve_config_templates(
     value: &serde_json::Value,
     context: &serde_json::Value,
@@ -811,16 +786,13 @@ fn resolve_template_string(s: &str, context: &serde_json::Value) -> String {
                 let path = &after_open[..close];
                 match lookup_context_path(context, path) {
                     Some(v) => result.push_str(&v),
-                    // Unknown placeholder — preserve verbatim (this
-                    // is how `{cid}` / `{mid}` and any other unknown
-                    // key survive to be substituted later by the
-                    // runtime's per-emit handlers).
+                    // Preserve unknown placeholders for the runtime to substitute later.
                     None => result.push_str(&rest[open..open + 2 + close + 1]),
                 }
                 rest = &after_open[close + 1..];
             }
             None => {
-                // Unclosed "${" — copy the rest verbatim, stop scanning.
+                // Unclosed "${" — copy rest verbatim.
                 result.push_str(&rest[open..]);
                 return result;
             }
@@ -836,37 +808,19 @@ fn lookup_context_path(context: &serde_json::Value, path: &str) -> Option<String
         node = node.get(part)?;
     }
     match node {
-        // Preserve the placeholder rather than emit "null" verbatim.
+        // Preserve the placeholder rather than emit "null".
         serde_json::Value::Null => None,
-        // String needs .clone() — .to_string() on a JSON string wraps
-        // it in escaped quotes.
+        // .to_string() on a JSON string wraps it in escaped quotes — .clone().
         serde_json::Value::String(s) => Some(s.clone()),
-        // Numbers / bools stringify cleanly via Display.
         other => Some(other.to_string()),
     }
 }
 
 // --- LaunchAgent bootstrap (macOS) -------------------------------------------
 
-/// Copy the runtime + companion LaunchAgent plists from
-/// `<install_root>/LaunchAgents/` into the user's
-/// `~/Library/LaunchAgents/`, then bootstrap + kickstart both.
-///
-/// `run_at_login` controls only the plist's `RunAtLoad` key. Both
-/// plists are always installed and bootstrapped so `launchctl kickstart`
-/// from the companion works either way. When the toggle is off:
-///   * `RunAtLoad` in each plist is patched to `false` before bootstrap
-///   * both agents are still kickstarted now (so the user sees the tray
-///     icon + runtime come up right after Finish — the setup they just
-///     completed pays off immediately)
-///   * next login, launchd sees RunAtLoad=false and leaves them alone
-///
-/// Users can also flip this later from System Settings → General →
-/// Login Items (the LaunchAgents appear there as "background items").
-///
-/// No-op on non-macOS platforms — `launchctl` doesn't exist elsewhere.
-/// The install path branches on target_os so Linux dev machines don't
-/// error out running through the flow.
+/// Copy staged LaunchAgent plists into `~/Library/LaunchAgents/`, then bootstrap
+/// + kickstart both. `run_at_login` only affects the plist's RunAtLoad — both
+/// agents are always kickstarted now so the user sees the setup pay off immediately.
 #[tauri::command]
 #[cfg(target_os = "macos")]
 fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
@@ -885,7 +839,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         format!("create {}: {e}", dest_dir.display())
     })?;
 
-    // Names + labels must match the plists in bundling/pkg/LaunchAgents/.
+    // Must match bundling/pkg/LaunchAgents/.
     let agents: [(&str, &str); 2] = [
         (
             "uk.co.locai.link.agent.plist",
@@ -897,17 +851,11 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         ),
     ];
 
-    // Belt-and-braces: strip the com.apple.quarantine xattr from the
-    // companion .app before we ask launchd to run it. A signed +
-    // notarized .pkg shouldn't attach quarantine to files it installs,
-    // but if it does (some macOS versions, some MDM deployment paths)
-    // launchctl-driven launches sit silently blocked until the user
-    // double-clicks in Finder. `xattr -dr` on a path without the attr
-    // is a no-op — safe to run unconditionally.
+    // A signed .pkg shouldn't attach com.apple.quarantine, but some macOS
+    // versions / MDM paths do — and launchctl-driven launches sit silently
+    // blocked when it's present. `xattr -dr` is a no-op when the attr is absent.
     let companion_app_paths = [
         "/Applications/Locai Link.app",
-        // Also cover the /Library/Locai bundle (in case a variant
-        // build ever launches from there directly).
         "/Library/Locai/Locai Link.app",
     ];
     for path in companion_app_paths {
@@ -922,11 +870,8 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         std::fs::copy(&src, &dst)
             .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
 
-        // macOS 12+ validates plist permissions before load — anything
-        // other than 0644 user-owned makes `launchctl bootstrap` reject
-        // with a cryptic "Bootstrap failed: 5: Input/output error".
-        // Rust's fs::copy carries source mode bits through; force the
-        // canonical mode here so the source's exact perms don't matter.
+        // macOS 12+ rejects plists that aren't 0644 with "Bootstrap failed: 5".
+        // fs::copy carries source mode through — force canonical.
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&dst)
@@ -937,11 +882,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
                 .map_err(|e| format!("chmod 644 {}: {e}", dst.display()))?;
         }
 
-        // Toggle RunAtLoad via PlistBuddy — macOS-native, handles
-        // xml/binary plists equally, and doesn't depend on the exact
-        // whitespace of the source file the way a string replace would.
-        // Source plists ship with RunAtLoad=true; only touch when the
-        // user opted out.
+        // Source plists ship with RunAtLoad=true; only touch when opted out.
         if !run_at_login {
             let status = std::process::Command::new("/usr/libexec/PlistBuddy")
                 .args(["-c", "Set :RunAtLoad false", dst.to_str().unwrap_or("")])
@@ -959,13 +900,9 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         let domain = format!("gui/{uid}");
         let service = format!("{domain}/{label}");
 
-        // bootout-then-bootstrap: if the plist was loaded by a prior
-        // install, `launchctl bootstrap` will fail with "service already
-        // loaded" and the fresh plist (with our just-flipped RunAtLoad,
-        // updated ProgramArguments after rename, etc.) never takes
-        // effect. Explicitly bootout first — no-op error on the first
-        // install where it wasn't loaded — then bootstrap the fresh
-        // copy. Ignore stdout on bootout; capture stderr on bootstrap.
+        // bootout-then-bootstrap so a re-install actually picks up the fresh
+        // plist — bootstrap alone fails with "service already loaded" and
+        // leaves the old ProgramArguments / RunAtLoad in effect.
         let _ = std::process::Command::new("launchctl")
             .args(["bootout", &service])
             .output();
@@ -975,8 +912,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             .output()
             .map_err(|e| format!("launchctl bootstrap: {e}"))?;
         if !bootstrap_out.status.success() {
-            // Log but keep going — kickstart may still work if the
-            // service was already loaded and bootstrap merely raced.
+            // Log but keep going — kickstart may still succeed on a raced bootstrap.
             eprintln!(
                 "[install_launchagents] bootstrap {service} failed ({:?}): {} {}",
                 bootstrap_out.status.code(),
@@ -985,9 +921,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             );
         }
 
-        // kickstart -k restarts the service if already running, starts
-        // it fresh if not. Its output is where "no such service"
-        // manifests when the bootstrap didn't take.
+        // -k restarts if running, starts fresh otherwise.
         let kickstart_out = std::process::Command::new("launchctl")
             .args(["kickstart", "-k", &service])
             .output()
@@ -1005,17 +939,9 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
     Ok(())
 }
 
-/// Linux equivalent of the macOS LaunchAgent bootstrap. Reads the
-/// staged .service files from `<install_root>/systemd/` (put there
-/// by `bundling/linux/install.sh`), copies them into
-/// `~/.config/systemd/user/`, `systemctl --user daemon-reload`, then
-/// activates each per the toggle:
-///
-///   * `run_at_login = true`  → `enable --now`  (starts now + at login)
-///   * `run_at_login = false` → `disable` + `start` (runs now, no login)
-///
-/// Idempotent — re-running the wizard picks up any edits to the source
-/// units and re-enables/starts cleanly.
+/// Linux equivalent of the macOS LaunchAgent bootstrap. Copies staged units
+/// into `~/.config/systemd/user/`, reloads, then enables-and-starts or
+/// just starts based on the toggle. Idempotent.
 #[tauri::command]
 #[cfg(target_os = "linux")]
 fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
@@ -1047,9 +973,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         let dst = dest_dir.join(unit);
         std::fs::copy(&src, &dst)
             .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
-        // systemd's unit-file validation rejects anything other than
-        // 0644. rust's fs::copy carries source mode through — force
-        // canonical.
+        // systemd rejects non-0644 units; fs::copy carries source mode through.
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&dst)
             .map_err(|e| format!("stat {}: {e}", dst.display()))?
@@ -1059,7 +983,6 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             .map_err(|e| format!("chmod 644 {}: {e}", dst.display()))?;
     }
 
-    // Pick up the fresh copies.
     let reload = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output()
@@ -1072,9 +995,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
     }
 
     for unit in units {
-        // Always call disable first — cheap no-op when it wasn't
-        // enabled, guarantees a clean transition when the user
-        // unchecks the toggle on a re-run.
+        // disable first so unchecking the toggle on re-run has a clean transition.
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "disable", unit])
             .output();
@@ -1104,13 +1025,10 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
 #[tauri::command]
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn install_launchagents(_install_root: String, _run_at_login: bool) -> Result<(), String> {
-    // No service bootstrap on Windows yet.
     Ok(())
 }
 
-/// Get the current user's UID by shelling out to `id -u`. Avoids
-/// pulling `libc` into an otherwise-libc-free crate. macOS ships
-/// `id` in /usr/bin.
+/// UID via `id -u` — avoids pulling libc into an otherwise-libc-free crate.
 #[cfg(target_os = "macos")]
 fn current_uid() -> Result<String, String> {
     let out = std::process::Command::new("id")
@@ -1123,31 +1041,213 @@ fn current_uid() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Terminate the Setup Assistant process. Bound to the "Close" button
-/// on the Finish step's done state.
-///
-/// `getCurrentWindow().close()` on macOS hides the window rather than
-/// exiting the app — Tauri 2 defaults to standard Cocoa "close-hides"
-/// semantics. For a one-shot wizard we actually want the process to
-/// end so the postinstall handoff doesn't leave a stale accessory
-/// process around after Finish.
+/// Wipe local state for re-register: best-effort Control delete, stop runtime,
+/// remove session file + downloaded models + pipeline state. Install itself
+/// (binaries, units, launcher, versions) stays intact.
+#[tauri::command]
+fn re_register(
+    state: State<'_, SignInState>,
+    install_root: String,
+    old_device_id: String,
+) -> Result<(), String> {
+    // 1. Control-side delete — best-effort; failure doesn't block the local wipe.
+    if !old_device_id.is_empty() {
+        if let Ok(token) = require_token(&state) {
+            // device_id is a UUID — no percent-encoding needed. Add urlencoding
+            // if Control ever accepts non-UUID ids.
+            let url = format!("{CONTROL_API_URL}/devices/delete_device_by_id?device_id={old_device_id}");
+            match http_agent()
+                .delete(&url)
+                .set("Authorization", &format!("Bearer {token}"))
+                .call()
+            {
+                Ok(_) => {}
+                Err(e) => eprintln!("[re_register] Control DELETE failed (continuing): {e}"),
+            }
+        }
+    }
+
+    // 2. Stop runtime + companion so they release state files before delete.
+    //    `stop` preserves the enable state, so the toggle survives.
+    #[cfg(target_os = "linux")]
+    {
+        for unit in ["locai-link-agent.service", "locai-link-companion.service"] {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "stop", unit])
+                .output();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for label in [AGENT_LABEL, COMPANION_LABEL] {
+            let _ = std::process::Command::new("launchctl")
+                .args(["bootout", &format!("gui/{}/{label}", current_uid().unwrap_or_default())])
+                .output();
+        }
+    }
+
+    // 3. Nuke session files + downloaded models + pipeline state. Keep the
+    //    rest so the fresh wizard doesn't re-install what's already on disk.
+    let root = PathBuf::from(&install_root);
+    for name in ["configs", "models", "state"] {
+        let dir = root.join(name);
+        if !dir.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            return Err(format!("failed to remove {}: {e}", dir.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Open the companion's Preferences window via its IPC endpoint. If the
+/// companion isn't running, start the service and retry with backoff.
+#[tauri::command]
+fn open_companion_preferences() -> Result<(), String> {
+    if try_show_preferences_now().is_ok() {
+        return Ok(());
+    }
+
+    // IPC listener binds a beat after the process launches.
+    start_companion_service()?;
+
+    let mut attempts_left = 15u32;
+    let mut delay_ms = 150u64;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        if try_show_preferences_now().is_ok() {
+            return Ok(());
+        }
+        attempts_left = attempts_left.saturating_sub(1);
+        if attempts_left == 0 {
+            return Err(
+                "Preferences window didn't open — companion may not have finished starting.".into(),
+            );
+        }
+        delay_ms = (delay_ms + 100).min(600);
+    }
+}
+
+fn try_show_preferences_now() -> Result<(), String> {
+    match http_agent()
+        .post("http://127.0.0.1:50506/preferences/show")
+        .send_bytes(&[])
+    {
+        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
+        Ok(resp) => Err(format!("HTTP {} from IPC endpoint", resp.status())),
+        Err(e) => Err(format!("IPC POST: {e}")),
+    }
+}
+
+fn start_companion_service() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let out = std::process::Command::new("systemctl")
+            .args(["--user", "start", "locai-link-companion.service"])
+            .output()
+            .map_err(|e| format!("systemctl start: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "systemctl start failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let uid = current_uid()?;
+        let out = std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &format!("gui/{uid}/{COMPANION_LABEL}")])
+            .output()
+            .map_err(|e| format!("launchctl kickstart: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "launchctl kickstart failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("start_companion_service: unsupported platform".to_string())
+    }
+}
+
+/// Fire the uninstaller from the SA splash. `systemd-run --user --collect` on
+/// Linux so the script survives the runtime + companion being killed mid-run.
+#[tauri::command]
+#[cfg(target_os = "linux")]
+fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
+    let script = format!("{install_root}/uninstall.sh");
+    if !std::path::Path::new(&script).exists() {
+        return Err(format!("uninstall.sh not found at {script}"));
+    }
+    let out = std::process::Command::new("systemd-run")
+        .args([
+            "--user",
+            "--collect",
+            "--description=Locai Link uninstaller",
+            "--",
+            "/bin/bash",
+            &script,
+        ])
+        .output()
+        .map_err(|e| format!("systemd-run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemd-run failed ({:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(target_os = "macos")]
+fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
+    // uninstall.tool handles the AppleScript confirm + admin escalation.
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "do shell script \"/Library/Locai/uninstall.tool\" with administrator privileges",
+        ])
+        .output()
+        .map_err(|e| format!("osascript: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "uninstall.tool failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
+    Err("launch_uninstaller_from_sa: unsupported platform".to_string())
+}
+
+/// Exit the SA. `close()` on macOS just hides the window (Cocoa default);
+/// this one-shot wizard needs the process to actually terminate.
 #[tauri::command]
 fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// UTC seconds → `YYYYMMDD_HHMMSS` — enough date arithmetic to avoid
-/// bringing chrono into a Tauri app that otherwise doesn't need it.
+/// UTC seconds → `YYYYMMDD_HHMMSS`. Enough date arithmetic to skip chrono.
 fn format_utc_compact(unix_secs: u64) -> String {
-    // Days since 1970-01-01, remainder is time-of-day.
     let days = unix_secs / 86_400;
     let tod = unix_secs % 86_400;
     let h = tod / 3600;
     let m = (tod % 3600) / 60;
     let s = tod % 60;
 
-    // Civil-from-days (Howard Hinnant). Handles 1970..∞ without pulling
-    // a date library. See http://howardhinnant.github.io/date_algorithms.html.
+    // Civil-from-days (Howard Hinnant, http://howardhinnant.github.io/date_algorithms.html).
     let z = days as i64 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64; // [0, 146096]
@@ -1178,11 +1278,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_install,
             get_install_root,
+            get_platform,
             sign_in_start,
             sign_in_poll,
             suggest_device_name,
             list_models,
             deploy_model,
+            mark_deployment_pending,
+            re_register,
+            open_companion_preferences,
+            launch_uninstaller_from_sa,
             mint_registration_key,
             register_device,
             install_agent_config,

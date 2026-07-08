@@ -40,8 +40,24 @@ def _resolve() -> str | None:
             return v
     except (PackageNotFoundError, Exception):
         # Metadata unavailable (editable installs, frozen bundles, broken
-        # site-packages). Fall through to the pyproject.toml walk-up.
+        # site-packages). Fall through.
         pass
+
+    # PyInstaller-frozen runtime: build.py drops manifest.json next to the
+    # ELF (versions/<v>/manifest.json). Preferred over pyproject walk-up
+    # in frozen mode because the source tree isn't shipped.
+    if getattr(sys, "frozen", False):
+        try:
+            import json
+
+            manifest = Path(sys.executable).resolve().parent / "manifest.json"
+            if manifest.is_file():
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                v = data.get("version")
+                if isinstance(v, str) and v:
+                    return v
+        except Exception:
+            pass
 
     try:
         import tomllib

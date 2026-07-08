@@ -1,21 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Reading Link's on-disk install state — the `boot.json` config and the
-//! `current` pointer under an `<install_root>`. Both surfaces (Setup
-//! Assistant, menu-bar app) call these to answer "is there already an
-//! install here, and what version is it?".
+//! On-disk install state: `boot.json` config + `current` version pointer.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Schema of the `boot.json` config the launcher reads on startup.
-///
-/// Mirrored from `launcher/src/boot.rs::BootConfig` — kept here so the
-/// other Rust surfaces (Setup Assistant, menu-bar) can read the same
-/// record without depending on the launcher crate directly. Field
-/// optionality matches the launcher exactly.
+/// Schema of `boot.json`. Mirrors `launcher/src/boot.rs::BootConfig` —
+/// field optionality must match the launcher exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     pub host_app: String,
@@ -32,20 +25,14 @@ fn default_channel() -> String {
     "stable".to_string()
 }
 
-/// Resolved currently-installed version of Link, as the launcher would see it.
+/// Currently-installed version of Link, as the launcher would see it.
 #[derive(Debug, Clone)]
 pub struct InstalledVersion {
     pub version: String,
     pub path: PathBuf,
 }
 
-/// Parse `boot.json` from disk.
-///
-/// Returns [`io::ErrorKind::NotFound`] when the file is missing and
-/// [`io::ErrorKind::InvalidData`] when its contents aren't valid JSON
-/// matching [`BootConfig`]. Callers treat "no boot.json" and
-/// "malformed boot.json" identically — the installer needs to rewrite
-/// it either way.
+/// Parse `boot.json`. `NotFound` when missing, `InvalidData` when malformed.
 pub fn read_boot_json(path: &Path) -> Result<BootConfig, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
     serde_json::from_str(&content)
@@ -53,12 +40,7 @@ pub fn read_boot_json(path: &Path) -> Result<BootConfig, std::io::Error> {
 }
 
 /// Resolve `<install_root>/current` to the version it points at.
-///
-/// `current` may be either a symlink (Unix + Windows Developer Mode)
-/// or a text-pointer file containing the target path — the launcher
-/// writes whichever the OS supports, and this reader accepts both.
-/// Returns `None` when `current` doesn't exist, points at a target
-/// that doesn't exist, or the target has no final path component.
+/// Accepts either a symlink or a text-pointer file (launcher writes whichever the OS supports).
 pub fn installed_version(install_root: &Path) -> Option<InstalledVersion> {
     let current = install_root.join("current");
     let raw_target = resolve_current(&current)?;
@@ -74,9 +56,7 @@ pub fn installed_version(install_root: &Path) -> Option<InstalledVersion> {
     Some(InstalledVersion { version, path: resolved })
 }
 
-/// Read `current` as a symlink first, falling back to text-pointer
-/// contents. Two-tier so the launcher can write whichever form the OS
-/// supports without the reader needing to know which was chosen.
+/// Read `current` as a symlink first, falling back to text-pointer contents.
 fn resolve_current(current: &Path) -> Option<PathBuf> {
     if let Ok(target) = std::fs::read_link(current) {
         return Some(target);

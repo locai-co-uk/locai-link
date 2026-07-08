@@ -53,7 +53,17 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 fi
 
-# --- 4. Remove install root -------------------------------------------
+# --- 4. Remove icons --------------------------------------------------
+
+ICON_ROOT="$HOME/.local/share/icons/hicolor"
+for size in 32 128 256; do
+    rm -f "$ICON_ROOT/${size}x${size}/apps/locai-link.png"
+done
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "$ICON_ROOT" 2>/dev/null || true
+fi
+
+# --- 5. Remove install root -------------------------------------------
 
 rm -rf "$INSTALL_ROOT"
 

@@ -72,7 +72,7 @@ class AgentRuntime:
         self.config_restart_requested = False
 
         # Health server for local clients that need a fresh view of
-        # agent state. Daemon thread on 127.0.0.1:8101; mutated from
+        # agent state. Daemon thread on 127.0.0.1:50505; mutated from
         # command dispatch when a serve starts/stops. Started lazily
         # in run() so unit tests that construct an AgentRuntime don't
         # accidentally bind the port.
@@ -285,7 +285,7 @@ class AgentRuntime:
         logger.info("Agent Runtime active...")
         self.status_logger.report_lifecycle("online")
         # Lazy-start the health server here (not in __init__) so tests
-        # that construct an AgentRuntime in-process don't race for port 8101.
+        # that construct an AgentRuntime in-process don't race for port 50505.
         self.health_server.start()
 
         # 1. Try Recovery First
@@ -489,6 +489,7 @@ class AgentRuntime:
                     done = 0
                     last_reported = -1
                     self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
+                    self.health_state.set_deployment_progress(pipeline_id, "downloading", 0.0, model_name)
                     with open(target_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
@@ -496,10 +497,15 @@ class AgentRuntime:
                             if total:
                                 pct = int((done / total) * 100)
                                 # Throttle to 5%-step deltas — keeps frontend SSE
-                                # smooth without flooding the Zenoh fanout.
+                                # smooth without flooding the Zenoh fanout. The
+                                # /healthz mirror gets the same cadence for free
+                                # since it lives in the same branch.
                                 if pct >= last_reported + 5:
                                     self.status_logger.report_deployment_progress(
                                         pipeline_id, "downloading", float(pct), done, total
+                                    )
+                                    self.health_state.set_deployment_progress(
+                                        pipeline_id, "downloading", float(pct), model_name
                                     )
                                     last_reported = pct
                 logger.info(f"Model saved to {target_path}")
@@ -507,11 +513,15 @@ class AgentRuntime:
                 msg = f"Failed to download model: {e}"
                 logger.error(msg)
                 self.status_logger.report_command(command_id, "failed", msg)
+                # Best-effort remove from in-flight — failed deploys shouldn't
+                # linger as a stuck progress row on the UI.
+                self.health_state.set_deployment_progress(pipeline_id, "completed", 0.0, model_name)
                 return
         else:
             logger.info(f"Model {model_name} already exists. Using cached file.")
 
         self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
+        self.health_state.set_deployment_progress(pipeline_id, "configuring", 95.0, model_name)
 
         with self.lock:
             self.pipeline_configs[pipeline_id] = cmd.config
@@ -523,6 +533,7 @@ class AgentRuntime:
 
         logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
         self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
+        self.health_state.set_deployment_progress(pipeline_id, "completed", 100.0, model_name)
         self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
 
     def _update_pipeline(self, cmd: UpdatePipelineCommand):

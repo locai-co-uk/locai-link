@@ -36,6 +36,20 @@ def _post_no_body(port: int, path: str) -> Any:
     return urllib.request.urlopen(req, timeout=2)
 
 
+def _post_json(port: int, path: str, body: dict[str, Any]) -> Any:
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://{HEALTH_HOST}:{port}{path}",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        return urllib.request.urlopen(req, timeout=2)
+    except urllib.error.HTTPError as e:
+        return e
+
+
 @pytest.fixture
 def server():
     """Yield a fresh, started HealthServer on an ephemeral port."""
@@ -84,6 +98,78 @@ def test_set_transport_disconnect_flips_connected_only(server):
         "endpoint": "tls/zenoh.example.com:7448",
         "connected": False,
     }
+
+
+def test_deployments_empty_when_none_in_flight(server):
+    _, _, port = server
+    body = _get_health(port)
+    assert body["deployments"] == []
+
+
+def test_set_deployment_progress_surfaces_row(server):
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 42.0, model_name="foo.gguf")
+    body = _get_health(port)
+    assert body["deployments"] == [
+        {
+            "pipeline_id": "p-1",
+            "model_name": "foo.gguf",
+            "stage": "downloading",
+            "progress_pct": 42.0,
+        }
+    ]
+
+
+def test_queued_does_not_overwrite_active_progress(server):
+    # Setup Assistant fires pre-registration POSTs in parallel with real
+    # deploys — a late "queued" write must not stomp active progress.
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 30.0, model_name="foo.gguf")
+    state.set_deployment_progress("p-1", "queued", 0.0, model_name="foo.gguf")
+    body = _get_health(port)
+    assert body["deployments"][0]["stage"] == "downloading"
+    assert body["deployments"][0]["progress_pct"] == 30.0
+
+
+def test_pending_endpoint_registers_queued_row(server):
+    _, state, port = server
+    resp = _post_json(
+        port,
+        "/deployments/pending",
+        {"pipeline_id": "p-1", "model_name": "foo.gguf"},
+    )
+    assert resp.status == 202
+    assert state.deployments["p-1"] == {
+        "pipeline_id": "p-1",
+        "model_name": "foo.gguf",
+        "stage": "queued",
+        "progress_pct": 0.0,
+    }
+
+
+def test_pending_endpoint_rejects_missing_pipeline_id(server):
+    _, _, port = server
+    resp = _post_json(port, "/deployments/pending", {"model_name": "foo.gguf"})
+    assert resp.status == 400
+
+
+def test_completed_deployment_clears_row(server):
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 42.0, model_name="foo.gguf")
+    state.set_deployment_progress("p-1", "completed", 100.0)
+    body = _get_health(port)
+    assert body["deployments"] == []
+
+
+def test_deployment_progress_carries_model_name_across_ticks(server):
+    # First tick sets model_name; later ticks (throttled 5%-step deltas)
+    # only pass pct + stage. Row should still carry the original name.
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 0.0, model_name="foo.gguf")
+    state.set_deployment_progress("p-1", "downloading", 50.0)
+    body = _get_health(port)
+    assert body["deployments"][0]["model_name"] == "foo.gguf"
+    assert body["deployments"][0]["progress_pct"] == 50.0
 
 
 def test_set_serving_surfaces_in_response(server):

@@ -8,9 +8,13 @@
 # exercise the "extract + install.sh" path without cutting a release.
 #
 # Prereqs (run these first in the repo root):
-#     uv run python bundling/build.py --plugins language_model audio_transcriber
+#     uv run python bundling/build.py --plugins <plugin-set>
 #     ( cd crates/setup_assistant && npm run tauri build -- --no-bundle )
 #     ( cd crates/companion       && npm run tauri build -- --no-bundle )
+#
+# Plugin selection is picked up from dist/locai-link/manifest.json
+# (written by build.py). Whatever plugins ended up in the bundle are
+# what the tarball is labelled for — no separate --plugins flag here.
 #
 # Output layout (inside the tarball):
 #     locai-link-<code>-linux-x86_64-<version>/
@@ -24,27 +28,17 @@
 #     └── uninstall.sh
 #
 # Usage:
-#     ./bundling/linux/pack.sh                        # → dist/locai-link-<code>-linux-x86_64-<ver>.tar.gz
-#     ./bundling/linux/pack.sh --plugins language_model
+#     ./bundling/linux/pack.sh                        # → dist/locai-link-<code>-linux-x86_64-<ver>-DEV.tar.gz
 #     ./bundling/linux/pack.sh --output /tmp/foo.tar.gz
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-PLUGINS=(language_model audio_transcriber)
 OUTPUT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --plugins)
-            shift
-            PLUGINS=()
-            while [[ $# -gt 0 && "$1" != --* ]]; do
-                PLUGINS+=("$1")
-                shift
-            done
-            ;;
         --output|-o)
             OUTPUT="$2"
             shift 2
@@ -69,28 +63,28 @@ err() {
 BUNDLE_DIR="$REPO_ROOT/dist/locai-link"
 TAURI_DIR="$REPO_ROOT/crates/target/release"
 BOOT_JSON="$REPO_ROOT/bundling/pkg/boot.json"
+MANIFEST="$BUNDLE_DIR/current/manifest.json"
 
-[[ -f "$BUNDLE_DIR/locai-link" ]]              || err "runtime bundle not at $BUNDLE_DIR — run \`uv run python bundling/build.py --plugins ${PLUGINS[*]}\` first."
+[[ -f "$BUNDLE_DIR/locai-link" ]]                || err "runtime bundle not at $BUNDLE_DIR — run \`uv run python bundling/build.py --plugins …\` first."
+[[ -f "$MANIFEST" ]]                             || err "manifest.json not at $MANIFEST — did build.py finish?"
 [[ -f "$TAURI_DIR/locai-link-setup-assistant" ]] || err "setup-assistant binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/setup_assistant."
 [[ -f "$TAURI_DIR/locai-link-companion" ]]       || err "companion binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/companion."
 [[ -f "$BOOT_JSON" ]]                            || err "boot.json not at $BOOT_JSON."
 
-# --- Derive the asset name -------------------------------------------
-# Reuses bundling/manifest.py so the naming stays in lockstep with CI
-# (and with what release-assets.yml uploads).
+# --- Derive the asset name from manifest.json ------------------------
+# manifest.json is the single source of truth for what's in the bundle
+# — build.py wrote it based on the plugin set it just compiled. Reading
+# it here means the tarball label can't diverge from the bundle contents
+# (previous flag-based flow could mislabel if pack.sh's --plugins list
+# didn't match the one passed to build.py).
 
-ASSET_STEM="$(cd "$REPO_ROOT" && uv run python -c '
-import sys
-sys.path.insert(0, "bundling")
-from manifest import derive_asset_name
-print(derive_asset_name(sys.argv[1:]))
-' "${PLUGINS[@]}")"
+read -r ASSET_STEM VERSION < <(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+print(m["asset_name"], "v" + m["version"])
+' "$MANIFEST")
 
-VERSION="$(cd "$REPO_ROOT" && uv run python -c '
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
-print("v" + data["project"]["version"])
-')"
+[[ -n "$ASSET_STEM" && -n "$VERSION" ]] || err "manifest.json missing asset_name/version fields"
 
 # Include -DEV suffix when packing outside CI so we don't ever ship a
 # locally-built artefact with a canonical release name.
@@ -116,11 +110,17 @@ cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
 install -m 0755 "$TAURI_DIR/locai-link-setup-assistant" "$ROOT/setup-assistant"
 install -m 0755 "$TAURI_DIR/locai-link-companion"       "$ROOT/companion"
 
-# 3. boot.json + systemd + .desktop entries + install/uninstall.
+# 3. boot.json + systemd + .desktop entries + icons + install/uninstall.
 install -m 0644 "$BOOT_JSON"                            "$ROOT/boot.json"
-mkdir -p "$ROOT/systemd" "$ROOT/applications"
+mkdir -p "$ROOT/systemd" "$ROOT/applications" "$ROOT/icons"
 install -m 0644 "$SCRIPT_DIR/systemd/"*.service         "$ROOT/systemd/"
 install -m 0644 "$SCRIPT_DIR/applications/"*.desktop    "$ROOT/applications/"
+# Icons come from the SA crate — companion has the same brand set. The
+# install.sh reshuffles these into hicolor sizes at install time.
+ICONS_SRC="$REPO_ROOT/crates/setup_assistant/src-tauri/icons"
+for name in 32x32.png 128x128.png 128x128@2x.png; do
+    [[ -f "$ICONS_SRC/$name" ]] && install -m 0644 "$ICONS_SRC/$name" "$ROOT/icons/$name"
+done
 install -m 0755 "$SCRIPT_DIR/install.sh"                "$ROOT/install.sh"
 install -m 0755 "$SCRIPT_DIR/uninstall.sh"              "$ROOT/uninstall.sh"
 

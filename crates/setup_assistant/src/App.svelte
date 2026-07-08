@@ -27,6 +27,8 @@
     } | null;
     boot_error: string | null;
     reason: string | null;
+    device_id: string | null;
+    device_name: string | null;
   };
 
   // Default install root. macOS location — the .pkg postinstall
@@ -39,6 +41,35 @@
   // Empty string until the async fetch resolves; every call site is
   // gated so an empty root doesn't leak into an invoke() call.
   let installRoot = $state<string>("");
+
+  // OS the SA is running on ("macos" / "linux" / other). Frontend uses
+  // this to render menubar vs tray, System Settings vs systemctl, etc.
+  // Loaded from Rust on mount alongside installRoot.
+  let platform = $state<string>("");
+
+  // "splash" — check_install found a registered device, so show the
+  //   "already set up" chooser (Open Preferences / Re-register /
+  //   Uninstall). This is the default landing state for re-runs of the
+  //   SA on a machine that's already onboarded.
+  // "wizard" — either a fresh install (no session file) OR the user
+  //   picked Re-register on the splash and confirmed. Runs the normal
+  //   sign-in → models → permissions → finish flow.
+  let mode = $state<"splash" | "wizard">("wizard");
+
+  // When set, the Finish step's completeSetup() runs `re_register`
+  // (Control DELETE + local wipe) before minting the new registration
+  // key. Cleared after that call succeeds. Carrying the old id here —
+  // rather than re-reading check_install at Finish time — means the
+  // wipe uses the id the user actually saw on the splash.
+  let pendingReRegister = $state<{ deviceId: string; deviceName: string | null } | null>(null);
+
+  // Splash action UI state — one at a time, no concurrency.
+  let splashAction = $state<
+    | { kind: "idle" }
+    | { kind: "confirming"; action: "re-register" | "uninstall" }
+    | { kind: "working"; message: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
 
   // Bootstrap runs once on mount to verify the .pkg actually
   // installed. Failure surfaces as a full-screen error instead of
@@ -166,10 +197,18 @@
       // Resolve the platform-appropriate install root before anything
       // else — every downstream invoke() threads this value through.
       installRoot = await invoke<string>("get_install_root");
+      platform = await invoke<string>("get_platform");
       const install = await invoke<CheckInstallResult>("check_install", {
         installRoot,
       });
       bootstrap = { kind: "ready", install };
+      // Already-set-up detection: if check_install pulled a device_id
+      // out of session_*.json, land on the splash first. User has to
+      // explicitly choose Re-register to enter the wizard — protects
+      // against accidental clicks from the Applications menu.
+      if (install.device_id) {
+        mode = "splash";
+      }
     } catch (e) {
       bootstrap = { kind: "error", message: e instanceof Error ? e.message : String(e) };
     }
@@ -250,6 +289,29 @@
     const already: RegisteredDevice | undefined =
       finish.kind === "error" ? finish.registered : undefined;
 
+    // Re-register: user picked this on the splash. Delete the old
+    // device on Control + wipe local state (session file, models,
+    // pipeline state) BEFORE minting a fresh registration key.
+    // Skipped when `already` is set — that's the retry path for a
+    // registered-but-not-config-written state, where wiping would
+    // orphan the new device we just created.
+    if (pendingReRegister && !already) {
+      finish = { kind: "minting" };
+      try {
+        await invoke<void>("re_register", {
+          installRoot,
+          oldDeviceId: pendingReRegister.deviceId,
+        });
+        pendingReRegister = null;
+      } catch (e) {
+        finish = {
+          kind: "error",
+          message: `Re-register cleanup failed: ${e instanceof Error ? e.message : String(e)}`,
+        };
+        return;
+      }
+    }
+
     let registered: RegisteredDevice;
     if (already) {
       registered = already;
@@ -329,18 +391,35 @@
     // command dispatch, so N models take ~1 RTT rather than N × RTT.
     // Failures don't roll back the earlier steps.
     const selected =
-      models.kind === "ready" ? Array.from(models.selected) : [];
+      models.kind === "ready"
+        ? models.models.filter((m) => models.selected.has(m.id))
+        : [];
     finish = {
       kind: "deploying",
       registered,
       done: 0,
       total: selected.length,
     };
+    // Pre-register each selected model as "queued 0%" with the local
+    // runtime so the companion's Models panel shows every row from t=0
+    // rather than one row at a time as the runtime processes deploys
+    // serially. Loopback POST — cheap, doesn't gate the real Control
+    // dispatch below. Any failure is swallowed inside the Tauri
+    // command; the runtime registers the model itself the moment it
+    // starts downloading.
+    await Promise.allSettled(
+      selected.map((m) =>
+        invoke<void>("mark_deployment_pending", {
+          pipelineId: m.id,
+          modelName: m.display_name,
+        })
+      )
+    );
     const results = await Promise.allSettled(
-      selected.map((modelId) =>
+      selected.map((m) =>
         invoke<string>("deploy_model", {
           deviceId: registered.device_id,
-          modelId,
+          modelId: m.id,
         })
       )
     );
@@ -368,6 +447,63 @@
       config_path: configPath,
       deployed_count: deployedCount,
     };
+  }
+
+  async function openCompanionPrefs() {
+    splashAction = { kind: "working", message: "Opening Preferences…" };
+    try {
+      await invoke<void>("open_companion_preferences");
+      // Preferences window is up in the companion — no need for two
+      // windows fighting for focus. Exit the SA cleanly.
+      await invoke<void>("exit_app");
+    } catch (e) {
+      splashAction = {
+        kind: "error",
+        message: `Couldn't open Preferences: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  }
+
+  function startReRegister() {
+    splashAction = { kind: "confirming", action: "re-register" };
+  }
+
+  function startUninstall() {
+    splashAction = { kind: "confirming", action: "uninstall" };
+  }
+
+  function cancelConfirm() {
+    splashAction = { kind: "idle" };
+  }
+
+  async function confirmReRegister() {
+    if (bootstrap.kind !== "ready" || !bootstrap.install.device_id) return;
+    // Stash the old identity for completeSetup() — it invokes
+    // `re_register` (Control DELETE + local wipe) before minting a
+    // fresh registration key. Wizard runs normally afterwards.
+    pendingReRegister = {
+      deviceId: bootstrap.install.device_id,
+      deviceName: bootstrap.install.device_name,
+    };
+    splashAction = { kind: "idle" };
+    mode = "wizard";
+  }
+
+  async function confirmUninstall() {
+    splashAction = { kind: "working", message: "Removing Locai Link…" };
+    try {
+      await invoke<void>("launch_uninstaller_from_sa", { installRoot });
+      // Uninstaller runs as a transient user-scope service (cgroup
+      // isolated) — it survives us exiting. Close the SA to get out of
+      // the way; the tray will disappear as the uninstaller stops the
+      // companion service.
+      await invoke<void>("exit_app");
+    } catch (e) {
+      splashAction = {
+        kind: "error",
+        message: `Uninstall failed: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
   }
 
   async function reopenBrowser() {
@@ -411,6 +547,90 @@
       <div class="splash__detail">{bootstrap.message}</div>
     {/if}
   </div>
+{:else if mode === "splash" && bootstrap.install.device_id}
+  <!-- ============ ALREADY-INSTALLED CHOOSER ============ -->
+  <!-- Reuses the wizard's sidebar + stage layout so the "already set
+       up" surface looks like the rest of the SA rather than a separate
+       app. The steps list is dropped (no step machine to render); the
+       brand + version foot stay. -->
+  <main class="wizard">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand__tab">SETUP ASSISTANT</div>
+        <img class="brand__logo" src={locaiLogo} alt="Locai" />
+      </div>
+      {#if bootstrap.install.installed && bootstrap.install.version}
+        <div class="rail-foot">
+          v{bootstrap.install.version}
+        </div>
+      {/if}
+    </aside>
+
+    <section class="content">
+      <div class="content__body">
+        <p class="eyebrow">MANAGE</p>
+        <h1>Already set up on this device</h1>
+        <p class="lead">
+          {#if bootstrap.install.device_name}
+            <strong>{bootstrap.install.device_name}</strong>
+            <span class="mono chooser__uuid">· {bootstrap.install.device_id}</span>
+          {:else}
+            <span class="mono">{bootstrap.install.device_id}</span>
+          {/if}
+        </p>
+
+        {#if splashAction.kind === "confirming" && splashAction.action === "re-register"}
+          <div class="signin-block">
+            <p class="lead">
+              This removes the current device from Control and clears
+              local models. You'll sign in and re-register from scratch.
+              The installed app stays.
+            </p>
+            <div class="row">
+              <button class="btn btn--ghost" onclick={cancelConfirm}>Cancel</button>
+              <button class="btn btn--danger" onclick={confirmReRegister}>Re-register</button>
+            </div>
+          </div>
+        {:else if splashAction.kind === "confirming" && splashAction.action === "uninstall"}
+          <div class="signin-block">
+            <p class="lead">
+              This stops Locai Link, removes it from your applications,
+              and deletes local models. The device row on Control stays
+              — remove it from Control if you no longer want it there.
+            </p>
+            <div class="row">
+              <button class="btn btn--ghost" onclick={cancelConfirm}>Cancel</button>
+              <button class="btn btn--danger" onclick={confirmUninstall}>Uninstall</button>
+            </div>
+          </div>
+        {:else if splashAction.kind === "working"}
+          <div class="signin-block">
+            <div class="row">
+              <div class="spinner"></div>
+              <span>{splashAction.message}</span>
+            </div>
+          </div>
+        {:else}
+          {#if splashAction.kind === "error"}
+            <div class="signin-block signin-block--error">
+              {splashAction.message}
+            </div>
+          {/if}
+          <div class="chooser__actions">
+            <button class="btn btn--primary btn--wide" onclick={openCompanionPrefs}>
+              Preferences
+            </button>
+            <button class="btn btn--ghost btn--wide" onclick={startReRegister}>
+              Re-register…
+            </button>
+            <button class="btn btn--ghost btn--wide" onclick={startUninstall}>
+              Uninstall…
+            </button>
+          </div>
+        {/if}
+      </div>
+    </section>
+  </main>
 {:else}
   <main class="wizard">
     <aside class="sidebar">
@@ -561,7 +781,7 @@
           <h1>Runs quietly in the background</h1>
           <p class="lead">
             After setup, Locai Link runs in the background and appears
-            in your menubar.
+            in your {platform === "linux" ? "system tray" : "menubar"}.
           </p>
           <label class="toggle-row">
             <input
@@ -571,14 +791,18 @@
             <div class="toggle-copy">
               <span class="toggle-title">Start Locai Link at login</span>
               <span class="toggle-hint">
-                Auto-start the agent and menubar app when you log in.
-                Uncheck to launch manually from Applications.
+                Auto-start the agent and {platform === "linux" ? "tray" : "menubar"} app when you log in.
+                Uncheck to launch manually from {platform === "linux" ? "your Applications menu" : "Applications"}.
               </span>
             </div>
           </label>
           <p class="fine-print">
-            You can change this later in <strong>System Settings →
-            General → Login Items &amp; Extensions</strong>.
+            {#if platform === "linux"}
+              You can change this at any time from Locai Link Preferences.
+            {:else}
+              You can change this later in <strong>System Settings →
+              General → Login Items &amp; Extensions</strong>.
+            {/if}
           </p>
         {:else if STEPS[current].id === "finish"}
           <p class="eyebrow">STEP 4 · FINISH</p>
@@ -663,15 +887,9 @@
                 </p>
               {/if}
               <p class="fine-print">
-                Locai Link is now running in your menubar. You can close
-                this window.
+                Locai Link is now running in your {platform === "linux" ? "system tray" : "menubar"}.
+                You can close this window.
               </p>
-              <button
-                class="btn btn--primary btn--wide"
-                onclick={() => void invoke("exit_app")}
-              >
-                Close
-              </button>
             </div>
           {:else if finish.kind === "error"}
             <div class="signin-block">
@@ -699,10 +917,9 @@
 
       <footer class="bar">
         <button class="btn btn--ghost" onclick={back} disabled={current === 0}>Go Back</button>
-        <!-- Continue only exists while there's a next step to go to.
-             The last step ("Finish") owns its own primary action ("Complete setup" /
-             "Close"), so a dead grey Continue next to that would be
-             confusing. -->
+        <!-- Continue drives the wizard forward; on the last step it's
+             replaced by Complete, which exits the app once registration
+             finished. Both never render together. -->
         {#if current < STEPS.length - 1}
           <button
             class="btn btn--primary"
@@ -710,6 +927,13 @@
             disabled={!canContinue}
           >
             Continue
+          </button>
+        {:else if finish.kind === "done"}
+          <button
+            class="btn btn--primary"
+            onclick={() => void invoke("exit_app")}
+          >
+            Complete
           </button>
         {/if}
       </footer>
@@ -767,6 +991,20 @@
     color: var(--color-text-on-dark-45);
     max-width: 60ch;
     word-break: break-word;
+  }
+  /* Chooser lives inside the wizard shell — stack the 3 lifecycle
+     actions vertically, matching the width of the Continue/Sign-in
+     buttons in the normal wizard flow. */
+  .chooser__actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 320px;
+    margin-top: var(--space-16);
+  }
+  .chooser__uuid {
+    color: var(--color-text-muted);
+    font-size: 12px;
   }
 
   /* --- Sidebar (dark rail) ------------------------------------------------- */

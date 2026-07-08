@@ -53,12 +53,37 @@
     platform: string;
   };
 
+  type ModelInfo = {
+    id: string;
+    alias: string;
+    port: number | null;
+    host: string;
+    is_serving: boolean;
+  };
+
+  type DeploymentProgress = {
+    pipeline_id: string;
+    model_name: string | null;
+    stage: string;
+    progress_pct: number;
+  };
+
   type StatusPoll = {
     status: "up" | "down";
     uptime_seconds: number | null;
     version: string | null;
     network: TransportHealth | null;
+    models: ModelInfo[];
+    deployments: DeploymentProgress[];
   };
+
+  // Models + in-flight deployments are refreshed by the same
+  // `poll_status` tick as everything else. Kept outside `prefs` because
+  // they aren't part of the initial `get_prefs_state` snapshot — they
+  // only exist once the poll has run at least once, and the Models
+  // panel handles the empty case naturally.
+  let models = $state<ModelInfo[]>([]);
+  let deployments = $state<DeploymentProgress[]>([]);
 
   let prefs = $state<PrefsState | null>(null);
   let loadError = $state<string | null>(null);
@@ -70,6 +95,11 @@
 
   onMount(async () => {
     await load();
+    // Kick a poll immediately so the Models panel + Agent panel don't
+    // sit at "empty / stale" for up to POLL_INTERVAL_MS on open —
+    // `get_prefs_state` doesn't carry models/deployments, only
+    // `poll_status` does.
+    await refreshStatus();
     pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);
   });
 
@@ -99,9 +129,70 @@
       // the value from initial load (resolved via the `current` symlink).
       prefs.agent.version = poll.version ?? prefs.agent.version;
       prefs.network = poll.network;
+      models = poll.models;
+      deployments = poll.deployments;
     } catch {
       // Ignore polling errors — next tick tries again.
     }
+  }
+
+  // Join models + deployments by pipeline_id so the panel can render
+  // one row per pipeline, showing progress inline when a deployment is
+  // in flight for that id. Deployments without a matching model row
+  // (models list hasn't caught up yet, or the runtime is still creating
+  // the pipeline) get their own row keyed by pipeline_id.
+  const modelRows = $derived.by(() => {
+    type Row = {
+      pipeline_id: string;
+      alias: string;
+      port: number | null;
+      is_serving: boolean;
+      deployment: DeploymentProgress | null;
+    };
+    const byId = new Map<string, Row>();
+    for (const m of models) {
+      byId.set(m.id, {
+        pipeline_id: m.id,
+        alias: m.alias,
+        port: m.port,
+        is_serving: m.is_serving,
+        deployment: null,
+      });
+    }
+    for (const d of deployments) {
+      const existing = byId.get(d.pipeline_id);
+      if (existing) {
+        existing.deployment = d;
+      } else {
+        byId.set(d.pipeline_id, {
+          pipeline_id: d.pipeline_id,
+          alias: d.model_name ?? d.pipeline_id,
+          port: null,
+          is_serving: false,
+          deployment: d,
+        });
+      }
+    }
+    return Array.from(byId.values());
+  });
+
+  async function toggleServing(row: {
+    pipeline_id: string;
+    is_serving: boolean;
+  }) {
+    const action = row.is_serving ? "stop-serving" : "serve";
+    await withPending(`serve:${row.pipeline_id}`, async () => {
+      try {
+        await invoke<void>("toggle_model_serving", {
+          pipelineId: row.pipeline_id,
+          action,
+        });
+        // Next poll (up to 4s later) reads /models and flips the pill —
+        // no optimistic update, poll is authoritative.
+      } catch (e) {
+        console.warn("toggle_model_serving failed:", e);
+      }
+    });
   }
 
   async function withPending<T>(key: string, fn: () => Promise<T>): Promise<void> {
@@ -194,14 +285,6 @@
       }, 1200);
     } catch {
       // Clipboard denied — silently ignore; the ID is still visible.
-    }
-  }
-
-  async function uninstall() {
-    try {
-      await invoke("launch_uninstaller_prefs");
-    } catch (e) {
-      console.warn("launch_uninstaller_prefs:", e);
     }
   }
 
@@ -325,10 +408,88 @@
           <div class="toggle-copy">
             <span class="toggle-title">Start Locai Link at login</span>
             <span class="toggle-hint">
-              Auto-start the agent and menubar app when you log in.
+              Auto-start the agent and {prefs.platform === "linux" ? "tray" : "menubar"} app when you log in.
             </span>
           </div>
         </label>
+      {/if}
+    </section>
+
+    <!-- ============ MODELS ============ -->
+    <section>
+      <h2>Models</h2>
+      {#if prefs.agent.status === "down"}
+        <p class="empty">Not available while the agent is stopped.</p>
+      {:else if modelRows.length === 0}
+        <p class="empty">No models on this device yet.</p>
+      {:else}
+        <ul class="models">
+          {#each modelRows as row (row.pipeline_id)}
+            <li class="model">
+              <div class="model__main">
+                <span class="model__alias">{row.alias}</span>
+                {#if row.port !== null}
+                  <span class="model__port mono">:{row.port}</span>
+                {/if}
+              </div>
+              <div class="model__state">
+                {#if row.deployment}
+                  <!-- In-flight: SVG progress wheel + stage label -->
+                  <span
+                    class="wheel"
+                    role="progressbar"
+                    aria-valuenow={Math.round(row.deployment.progress_pct)}
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    title="{row.deployment.stage}"
+                  >
+                    <svg viewBox="0 0 32 32" width="20" height="20">
+                      <circle class="wheel__track" cx="16" cy="16" r="14" />
+                      <circle
+                        class="wheel__fill"
+                        cx="16"
+                        cy="16"
+                        r="14"
+                        stroke-dasharray={`${(row.deployment.progress_pct / 100) * 87.96} 87.96`}
+                        transform="rotate(-90 16 16)"
+                      />
+                    </svg>
+                  </span>
+                  <span class="model__pct">
+                    {Math.round(row.deployment.progress_pct)}%
+                  </span>
+                  <span class="model__stage">
+                    {row.deployment.stage === "downloading"
+                      ? "Downloading"
+                      : row.deployment.stage === "configuring"
+                        ? "Configuring"
+                        : row.deployment.stage === "queued"
+                          ? "Queued"
+                          : row.deployment.stage}
+                  </span>
+                {:else if row.is_serving}
+                  <span class="pill pill--up">▶ Serving</span>
+                  <button
+                    class="btn btn--ghost btn--sm"
+                    onclick={() => toggleServing(row)}
+                    disabled={pending.has(`serve:${row.pipeline_id}`)}
+                  >
+                    Stop
+                  </button>
+                {:else}
+                  <span class="pill pill--idle">✓ Deployed</span>
+                  <button
+                    class="btn btn--primary btn--sm"
+                    onclick={() => toggleServing(row)}
+                    disabled={pending.has(`serve:${row.pipeline_id}`)}
+                  >
+                    Serve
+                  </button>
+                {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </section>
 
@@ -372,16 +533,10 @@
         <span class="row__label">Install root</span>
         <span class="row__value mono">{prefs.advanced.install_root}</span>
       </div>
-      {#if prefs.platform === "macos" || prefs.platform === "linux"}
-        <!-- macOS: bundling/pkg/uninstall.sh (invoked via osascript with
-             admin privileges). Linux: bundling/linux/uninstall.sh
-             (invoked directly, no admin — per-user install). -->
-        <div class="row row--action row--danger">
-          <button class="btn btn--danger" onclick={uninstall}>
-            Uninstall Locai Link…
-          </button>
-        </div>
-      {/if}
+      <!-- Uninstall lives on the Setup Assistant chooser (Applications
+           menu → Locai Setup Assistant), not here. Preferences is for
+           tweaking a running install; lifecycle ops (re-register,
+           uninstall) belong on the SA. -->
     </section>
   {/if}
 </div>
@@ -473,11 +628,6 @@
     gap: 8px;
     padding: 6px 0 2px;
   }
-  .row--danger {
-    padding-top: 12px;
-    border-top: 1px solid var(--color-border-hairline, #ECEAE4);
-    margin-top: 6px;
-  }
 
   .pill {
     display: inline-flex;
@@ -493,8 +643,85 @@
     color: var(--color-primary-pressed, #00A852);
   }
   .pill--down {
-    background: #FCECEA;
+    background: var(--color-surface-tint-error, #FCECEA);
     color: var(--color-error, #E84D3D);
+  }
+  .pill--idle {
+    background: var(--color-surface-alt, #F1F0EA);
+    color: var(--color-text-muted, #8A877F);
+  }
+
+  /* Models panel */
+  .models {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .model {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    background: var(--color-surface-alt, #F7F5EF);
+    border-radius: 8px;
+    gap: 12px;
+  }
+  .model__main {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+  .model__alias {
+    font-weight: 500;
+    color: var(--color-text, #2C2A24);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model__port {
+    color: var(--color-text-muted, #8A877F);
+    font-size: 12px;
+  }
+  .model__state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .model__pct {
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    color: var(--color-text, #2C2A24);
+    min-width: 3.5ch;
+    text-align: right;
+  }
+  .model__stage {
+    font-size: 12px;
+    color: var(--color-text-muted, #8A877F);
+  }
+  .wheel {
+    display: inline-flex;
+  }
+  .wheel__track {
+    fill: none;
+    stroke: var(--color-surface-tint-3, #E9E6DE);
+    stroke-width: 4;
+  }
+  .wheel__fill {
+    fill: none;
+    stroke: var(--color-primary, #00C05F);
+    stroke-width: 4;
+    stroke-linecap: round;
+    transition: stroke-dasharray 0.4s ease-out;
+  }
+  .btn--sm {
+    padding: 4px 10px;
+    font-size: 12px;
   }
   .dot {
     width: 6px;
@@ -561,6 +788,8 @@
   }
   .btn--primary {
     background: var(--color-primary, #00B85A);
+    /* White on green — same in both themes because the button bg
+       is always the brand green, not a themed surface. */
     color: #fff;
     border-color: var(--color-primary-pressed, #00A852);
   }
@@ -581,7 +810,7 @@
     border-color: var(--color-error, #E84D3D);
   }
   .btn--danger:hover:not(:disabled) {
-    background: #FCECEA;
+    background: var(--color-surface-tint-error, #FCECEA);
   }
   .btn--ghost {
     color: var(--color-text-muted, #8A877F);
@@ -612,8 +841,8 @@
 
   .error-card {
     padding: 12px 14px;
-    border: 1px solid #F5C5BF;
-    background: #FCECEA;
+    border: 1px solid var(--color-border-error, #F5C5BF);
+    background: var(--color-surface-tint-error, #FCECEA);
     border-radius: 8px;
     color: var(--color-error, #E84D3D);
     font-size: 13px;

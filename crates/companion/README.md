@@ -2,7 +2,7 @@
 
 Locai Link menu-bar companion. Bare Svelte + Vite frontend, Tauri
 (Rust) backend. Lives in the macOS menu bar; polls `/healthz` on
-127.0.0.1:8101 and exposes agent status + a Models flyout.
+127.0.0.1:50505 and exposes agent status + a Models flyout.
 
 ## Recommended IDE Setup
 

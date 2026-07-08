@@ -62,35 +62,44 @@ err() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BUNDLE_DIR=""      # Rust launcher + versions/ + current + manifest.json
-TAURI_DIR=""       # setup-assistant + companion binaries
+SA_BIN=""          # setup-assistant Tauri binary (name differs per layout)
+COMPANION_BIN=""   # companion Tauri binary
 UNITS_DIR=""       # locai-link-{agent,companion}.service
 DESKTOPS_DIR=""    # locai-{link,setup-assistant}.desktop
+ICONS_SRC=""       # dir with 32x32.png / 128x128.png / 128x128@2x.png
 BOOT_JSON=""
 
 resolve_paths() {
     # Case 1 — extracted tarball. pack.sh writes install.sh next to a
-    # `bundle/` subdir + the Tauri binaries + boot.json + systemd/ +
-    # applications/. If any of that shape is missing, this isn't a
-    # tarball layout and we fall through to the repo-source case.
+    # `bundle/` subdir + Tauri binaries renamed to `setup-assistant` +
+    # `companion` (no `locai-link-` prefix) + boot.json + systemd/ +
+    # applications/ + icons/. Fall through to the repo-source case if
+    # the shape doesn't match.
     if [[ -d "$SCRIPT_DIR/bundle" && -f "$SCRIPT_DIR/setup-assistant" ]]; then
         BUNDLE_DIR="$SCRIPT_DIR/bundle"
-        TAURI_DIR="$SCRIPT_DIR"
+        SA_BIN="$SCRIPT_DIR/setup-assistant"
+        COMPANION_BIN="$SCRIPT_DIR/companion"
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
+        ICONS_SRC="$SCRIPT_DIR/icons"
         BOOT_JSON="$SCRIPT_DIR/boot.json"
         return
     fi
 
     # Case 2 — local repo checkout, install.sh at bundling/linux/.
     # Expect `bundling/build.py` and `cargo tauri build --no-bundle`
-    # to have been run first.
+    # to have been run first. Cargo target names carry the crate prefix.
+    # Icons come straight from the SA crate's tauri icons/ dir; the
+    # companion has an identical brand set so we don't need both.
     local repo_root
     repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
     if [[ -f "$repo_root/dist/locai-link/locai-link" ]]; then
         BUNDLE_DIR="$repo_root/dist/locai-link"
-        TAURI_DIR="$repo_root/crates/target/release"
+        SA_BIN="$repo_root/crates/target/release/locai-link-setup-assistant"
+        COMPANION_BIN="$repo_root/crates/target/release/locai-link-companion"
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
+        ICONS_SRC="$repo_root/crates/setup_assistant/src-tauri/icons"
         BOOT_JSON="$repo_root/bundling/pkg/boot.json"
         return
     fi
@@ -102,16 +111,16 @@ resolve_paths
 
 log "install root:       $INSTALL_ROOT"
 log "runtime bundle:     $BUNDLE_DIR"
-log "tauri binaries:     $TAURI_DIR"
+log "setup assistant:    $SA_BIN"
+log "companion:          $COMPANION_BIN"
 log "systemd units:      $UNITS_DIR"
 log "desktop entries:    $DESKTOPS_DIR"
+log "icons source:       $ICONS_SRC"
 
 # --- Sanity checks ----------------------------------------------------
 
 command -v systemctl >/dev/null 2>&1 || err "systemctl not found — this installer requires systemd."
 
-SA_BIN="$TAURI_DIR/locai-link-setup-assistant"
-COMPANION_BIN="$TAURI_DIR/locai-link-companion"
 LAUNCHER_BIN="$BUNDLE_DIR/locai-link"
 
 [[ -f "$LAUNCHER_BIN" ]]  || err "runtime launcher not at $LAUNCHER_BIN"
@@ -165,13 +174,48 @@ log "systemd units staged at $INSTALL_ROOT/systemd/"
 # starts it; if it is, the call is a no-op and the existing tray
 # instance keeps going.
 mkdir -p "$DESKTOP_DIR"
-install -m 0644 "$DESKTOPS_DIR/locai-link.desktop"            "$DESKTOP_DIR/"
-install -m 0644 "$DESKTOPS_DIR/locai-setup-assistant.desktop" "$DESKTOP_DIR/"
+# Substitute `@HOME@` with the real home dir at copy time. The .desktop
+# spec doesn't define a portable home-dir field code — `%h` is a
+# KDE-only extension, GNOME/xdg-open treat it as a literal — so the
+# only reliable answer is an absolute path baked in per-user at install
+# time. `sed | install /dev/stdin` avoids leaving a tmp file behind.
+for entry in locai-link.desktop locai-setup-assistant.desktop; do
+    sed "s|@HOME@|$HOME|g" "$DESKTOPS_DIR/$entry" \
+        | install -m 0644 /dev/stdin "$DESKTOP_DIR/$entry"
+done
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 fi
 log "menu entries installed to $DESKTOP_DIR"
+
+# --- Icons ------------------------------------------------------------
+# `.desktop` files reference `Icon=locai-link` (a themed icon name);
+# without a matching PNG in the hicolor theme, launchers show a
+# placeholder. Copy the SA-crate icons into the user hicolor tree in
+# the sizes their launcher will actually look up.
+ICON_ROOT="$HOME/.local/share/icons/hicolor"
+if [[ -d "$ICONS_SRC" ]]; then
+    for size in 32 128; do
+        src="$ICONS_SRC/${size}x${size}.png"
+        [[ -f "$src" ]] || continue
+        dest_dir="$ICON_ROOT/${size}x${size}/apps"
+        mkdir -p "$dest_dir"
+        install -m 0644 "$src" "$dest_dir/locai-link.png"
+    done
+    # Tauri names the 256x256 file `128x128@2x.png` (retina naming);
+    # hicolor wants it under 256x256/.
+    if [[ -f "$ICONS_SRC/128x128@2x.png" ]]; then
+        mkdir -p "$ICON_ROOT/256x256/apps"
+        install -m 0644 "$ICONS_SRC/128x128@2x.png" "$ICON_ROOT/256x256/apps/locai-link.png"
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t "$ICON_ROOT" 2>/dev/null || true
+    fi
+    log "icons installed to $ICON_ROOT"
+else
+    log "WARN: no icons source at $ICONS_SRC — menu entries will show a placeholder icon"
+fi
 
 # --- Launch Setup Assistant ------------------------------------------
 # The wizard picks up from here — sign-in, models, permissions

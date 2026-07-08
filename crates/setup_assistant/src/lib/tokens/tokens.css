@@ -37,9 +37,12 @@
   --color-surface-cream: #FAF9F6;
   --color-surface-cream-alt: #FBFAF7;
   --color-surface-hover: #F5F4F1;        /* neutral row hover                   */
+  --color-surface-alt: #F1F0EA;          /* pill-idle bg, subtle-surface hover  */
   --color-surface-tint-green: #F2FBF6;   /* green hover / chip bg               */
   --color-surface-tint-green-2: #F6FCF9; /* downloaded card                     */
   --color-surface-tint-green-3: #EAF9F1; /* recommended pill                    */
+  --color-surface-tint-error: #FCECEA;   /* pill-down / error-block bg          */
+  --color-surface-tint-error-3: #E9E6DE; /* wheel track (neutral)               */
   --color-surface-dark-rail: #0A0A0A;
 
   /* ---- Borders ------------------------------------------------------------- */
@@ -50,6 +53,7 @@
   --color-border-checkbox-off: #C9C6BE;
   --color-border-green-tint: #BFE9CF;
   --color-border-green-tint-2: #CFEBD9;
+  --color-border-error: #F5C5BF;         /* error-card outline                  */
 
   /* ---- Status -------------------------------------------------------------- */
   --color-status-live: #00D26A;
@@ -197,6 +201,84 @@
   --motion-toggle: 150ms;
   --easing-standard: ease;
   --easing-out: ease-out;
+}
+
+/* =============================================================================
+   Dark mode — driven by `prefers-color-scheme: dark`. WebKit reads GTK/Qt
+   theme settings on Linux and the system-appearance flag on macOS, so this
+   block is picked up automatically without JS. Every token defined in :root
+   above has a dark override here; anything that stays the same across modes
+   (typography scale, spacing, radii, motion) is deliberately omitted.
+
+   Design rules the overrides follow:
+     * Paper flips near-black (#0F0F0E) — a hair off pure black so pure-black
+       shadows still register as depth cues.
+     * Sidebar `dark-rail` goes DARKER than paper (pure black) so the two
+       panes stay distinguishable without a hard border.
+     * Green primary stays the brand hue, just slightly desaturated so it
+       doesn't scream against a dark surface.
+     * Tinted backgrounds (success/error pills, downloaded cards) shift to
+       low-saturation dark tints instead of the light pastels used above.
+     * `on-dark` tokens FLIP to "on-light" semantics — in dark mode the
+       previously-dark rail carries light content and vice versa.
+============================================================================= */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-primary: #00B85A;
+    --color-primary-bright: #00CB66;
+    --color-primary-pressed: #24D078;
+    --color-error: #F26F60;
+    --color-warning: #F0BE55;
+    --color-warning-text: #F0BE55;
+
+    --color-text-strong: #F5F5F3;
+    --color-text: #E8E7E3;
+    --color-text-secondary: #C9C6BE;
+    --color-text-muted: #949089;
+    --color-text-faint: #6A6862;
+    --color-text-disabled: #4E4C48;
+    --color-text-on-dark: #F5F5F3;
+    --color-text-on-dark-70: rgba(245,245,243,0.78);
+    --color-text-on-dark-55: rgba(245,245,243,0.55);
+    --color-text-on-dark-45: rgba(245,245,243,0.45);
+
+    --color-paper: #0E0E0D;
+    --color-surface-cream: #0E0E0D;
+    --color-surface-cream-alt: #131311;
+    --color-surface: #1C1C19;
+    --color-surface-hover: #26251F;
+    --color-surface-alt: #1B1B18;
+    --color-surface-tint-green: #123420;
+    --color-surface-tint-green-2: #143923;
+    --color-surface-tint-green-3: #164028;
+    --color-surface-tint-error: #3A1E1B;
+    --color-surface-tint-error-3: #2A2925;
+    --color-surface-dark-rail: #050505;
+
+    --color-border-hairline: #262521;
+    --color-border: #2E2C27;
+    --color-border-strong: #3A3833;
+    --color-border-input: #3A3833;
+    --color-border-checkbox-off: #464440;
+    --color-border-green-tint: #2A5540;
+    --color-border-green-tint-2: #326048;
+    --color-border-error: #5A2823;
+
+    --color-wallpaper: #1E1B17;
+    --color-menubar-bg: rgba(10,10,10,0.72);
+    --color-menubar-border: rgba(255,255,255,0.10);
+    --color-menubar-text: rgba(255,255,255,0.82);
+    --color-dock-bg: rgba(30,28,25,0.34);
+    --color-dock-border: rgba(255,255,255,0.10);
+
+    --shadow-popover: 0 18px 52px rgba(0,0,0,0.55);
+    --shadow-popover-flyout: 0 18px 52px rgba(0,0,0,0.60);
+    --shadow-window-installer: 0 30px 76px rgba(0,0,0,0.65), 0 3px 12px rgba(0,0,0,0.35);
+    --shadow-window-setup: 0 36px 88px rgba(0,0,0,0.65), 0 4px 14px rgba(0,0,0,0.35);
+    --shadow-sheet: 0 20px 50px rgba(0,0,0,0.72);
+    --shadow-button-sm: 0 1px 2px rgba(0,0,0,0.35);
+    --shadow-button-xs: 0 1px 2px rgba(0,0,0,0.30);
+  }
 }
 
 /* =============================================================================
