@@ -45,12 +45,17 @@ logger = logging.getLogger(__name__)
 class _AgentWorker:
     """Handle for a long-running background command worker."""
 
-    __slots__ = ("cancel_event", "thread", "command_id")
+    __slots__ = ("cancel_event", "thread", "command_id", "response")
 
-    def __init__(self, cancel_event: threading.Event, thread: threading.Thread, command_id: str):
+    def __init__(self, cancel_event: threading.Event, thread: threading.Thread, command_id: str) -> None:
         self.cancel_event = cancel_event
         self.thread = thread
         self.command_id = command_id
+        # Streaming HTTP response stashed while a download is in flight, so
+        # `_cancel_deploy` can close the underlying socket and let
+        # `iter_content` unblock immediately instead of waiting for the read
+        # timeout to fire.
+        self.response: requests.Response | None = None
 
 
 class AgentRuntime:
@@ -61,7 +66,7 @@ class AgentRuntime:
         agent_config: AgentConfig,
         state_manager: StateManager | None = None,
         zenoh_session: "zenoh.Session | None" = None,
-    ):
+    ) -> None:
         """Initialise the runtime with agent configuration and optional managers.
 
         Args:
@@ -99,7 +104,7 @@ class AgentRuntime:
             except ValueError:
                 logger.debug("Signal handlers skipped (not main thread).")
 
-    def handle_command(self, data: dict[str, Any]):
+    def handle_command(self, data: dict[str, Any]) -> None:
         """Validate an incoming command against the shared contract and dispatch it.
 
         Commands arrive clean and flat, so there is nothing to parse: resolve our
@@ -262,7 +267,7 @@ class AgentRuntime:
             logger.error(f"Command handling failed: {e}", exc_info=True)
             self.status_logger.report_command(cmd.id, "failed", str(e))
 
-    def run(self):
+    def run(self) -> None:
         """Main Lifecycle Loop.
 
         Starts the agent runtime and keeps it running until a shutdown event occurs.
@@ -421,7 +426,7 @@ class AgentRuntime:
                 logger.warning(f"Cannot stop '{pipeline_id}': Not running.")
                 return True
 
-    def _deploy_model(self, cmd: DeployModelCommand):
+    def _deploy_model(self, cmd: DeployModelCommand) -> None:
         """Validate a DEPLOY_MODEL and dispatch the download to a worker thread.
 
         Args:
@@ -464,108 +469,181 @@ class AgentRuntime:
         logger.info(f"Initiating deployment for command '{command_id}'...")
         thread.start()
 
-    def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event):
-        """Run the actual download + config registration for a DEPLOY_MODEL.
+    def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event) -> None:
+        """Orchestrate download → publish → commit for a single DEPLOY_MODEL.
+
+        Delegates the two heavy phases to `_download_and_publish` and
+        `_commit_deploy`. Any terminal condition is reported by the phase
+        that hit it; this method only wires the phases and cleans up the
+        worker registration in `finally`.
 
         Args:
             cmd: The DEPLOY_MODEL command being executed.
             cancel_event: Set by `_cancel_deploy` to break the chunk loop.
         """
-        command_id = cmd.id
         pipeline_id = cmd.pipeline_id
-        model_name = cmd.model_name
-
+        command_id = cmd.id
         try:
             models_dir = Path.cwd().joinpath("models")
             models_dir.mkdir(parents=True, exist_ok=True)
-
+            target_path = models_dir / cmd.model_name
+            partial_path = target_path.with_name(target_path.name + ".partial")
             download_url = (
                 f"{self.agent_config.identity.api_url}/models/{pipeline_id}/download/"
                 + self.agent_config.identity.device_id
                 + "/agent"
             )
-            target_path = models_dir / model_name
 
-            partial_path = target_path.with_name(target_path.name + ".partial")
-            cancelled = False
-
-            if not target_path.exists():
-                if partial_path.exists():
-                    try:
-                        partial_path.unlink()
-                    except OSError as e:
-                        logger.warning(f"Failed to remove stale partial {partial_path}: {e}")
-
-                logger.info(f"Downloading {model_name} from {download_url}...")
-                try:
-                    headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
-                    with requests.get(download_url, headers=headers, stream=True, timeout=600) as r:
-                        r.raise_for_status()
-                        total = int(r.headers.get("content-length", 0))
-                        done = 0
-                        last_reported = -1
-                        self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
-                        with open(partial_path, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                if cancel_event.is_set():
-                                    cancelled = True
-                                    break
-                                f.write(chunk)
-                                done += len(chunk)
-                                if total:
-                                    pct = int((done / total) * 100)
-                                    if pct >= last_reported + 5:
-                                        self.status_logger.report_deployment_progress(
-                                            pipeline_id, "downloading", float(pct), done, total
-                                        )
-                                        last_reported = pct
-                except Exception as e:
-                    self._cleanup_partial(partial_path)
-                    msg = f"Failed to download model: {e}"
-                    logger.error(msg)
-                    self.status_logger.report_command(command_id, "failed", msg)
-                    return
-
-                if cancelled:
-                    self._cleanup_partial(partial_path)
-                    logger.info(f"Deploy '{pipeline_id}' cancelled during download.")
-                    self.status_logger.report_deployment_progress(pipeline_id, "cancelled", 0.0, 0, 0)
-                    self.status_logger.report_command(command_id, "failed", "cancelled")
-                    return
-
-                partial_path.replace(target_path)
-                logger.info(f"Model saved to {target_path}")
-            else:
-                logger.info(f"Model {model_name} already exists. Using cached file.")
-
-            # Re-check cancel between download completion and config commit
-            # so a cancel arriving at the tail of the download still counts.
-            if cancel_event.is_set():
-                logger.info(f"Deploy '{pipeline_id}' cancelled before configuring.")
-                self.status_logger.report_deployment_progress(pipeline_id, "cancelled", 0.0, 0, 0)
-                self.status_logger.report_command(command_id, "failed", "cancelled")
+            if target_path.exists():
+                logger.info(f"Model {cmd.model_name} already exists. Using cached file.")
+            elif not self._download_and_publish(cmd, cancel_event, download_url, target_path, partial_path):
                 return
 
-            self.status_logger.report_deployment_progress(pipeline_id, "configuring", 95.0, 0, 0)
-
-            with self.lock:
-                self.pipeline_configs[pipeline_id] = cmd.config
-                if self.state_manager:
-                    try:
-                        self.state_manager.update_pipeline_config(cmd.config)
-                    except Exception as e:
-                        logger.warning(f"Failed to persist state: {e}")
+            if not self._commit_deploy(cmd, cancel_event):
+                self._report_cancelled(cmd, "before configuring")
+                return
 
             logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
             self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
-            self.status_logger.report_command(command_id, "completed", f"Model {model_name} deployed successfully.")
+            self.status_logger.report_command(command_id, "completed", f"Model {cmd.model_name} deployed successfully.")
         finally:
             with self.lock:
                 worker = self._agent_workers.get(pipeline_id)
                 if worker is not None and worker.command_id == command_id:
                     del self._agent_workers[pipeline_id]
 
-    def _cancel_deploy(self, cmd: CancelDeployCommand):
+    def _download_and_publish(
+        self,
+        cmd: DeployModelCommand,
+        cancel_event: threading.Event,
+        download_url: str,
+        target_path: Path,
+        partial_path: Path,
+    ) -> bool:
+        """Stream the model to `partial_path`, then rename to `target_path`.
+
+        Reports its own failure / cancellation via `status_logger`; the caller
+        only needs the terminal-vs-continue signal.
+
+        Returns:
+            True when the file was published to `target_path`; False if the
+            download failed or was cancelled at any point up to (and
+            including) the rename.
+        """
+        pipeline_id = cmd.pipeline_id
+        command_id = cmd.id
+
+        if partial_path.exists():
+            try:
+                partial_path.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to remove stale partial {partial_path}: {e}")
+
+        logger.info(f"Downloading {cmd.model_name} from {download_url}...")
+        cancelled = False
+        # `(connect, read)`: cap a stalled or hung stream so a cancel that
+        # slips past the chunk-loop check still surfaces within seconds
+        # rather than waiting on the old 600 s single timeout.
+        download_timeout: tuple[float, float] = (10.0, 30.0)
+        try:
+            headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
+            with requests.get(download_url, headers=headers, stream=True, timeout=download_timeout) as r:
+                self._attach_response(pipeline_id, command_id, r)
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                done = 0
+                last_reported = -1
+                self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
+                with open(partial_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if cancel_event.is_set():
+                            cancelled = True
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            pct = int((done / total) * 100)
+                            if pct >= last_reported + 5:
+                                self.status_logger.report_deployment_progress(
+                                    pipeline_id, "downloading", float(pct), done, total
+                                )
+                                last_reported = pct
+        except Exception as e:
+            # A cancel that closes the streaming response propagates here as
+            # ConnectionError / ChunkedEncodingError / etc. — treat that as
+            # cancelled, not failed, so the UI stage stays consistent.
+            if cancel_event.is_set():
+                cancelled = True
+            else:
+                self._cleanup_partial(partial_path)
+                msg = f"Failed to download model: {e}"
+                logger.error(msg)
+                self.status_logger.report_command(command_id, "failed", msg)
+                return False
+        finally:
+            self._attach_response(pipeline_id, command_id, None)
+
+        if cancelled:
+            self._cleanup_partial(partial_path)
+            self._report_cancelled(cmd, "during download")
+            return False
+
+        # Guard the rename: a cancel arriving after the last chunk but
+        # before the atomic replace must not publish the file.
+        if cancel_event.is_set():
+            self._cleanup_partial(partial_path)
+            self._report_cancelled(cmd, "before publish")
+            return False
+
+        partial_path.replace(target_path)
+        logger.info(f"Model saved to {target_path}")
+        return True
+
+    def _commit_deploy(self, cmd: DeployModelCommand, cancel_event: threading.Event) -> bool:
+        """Register `cmd.config` on the runtime and persist it to state.
+
+        Args:
+            cmd: The DEPLOY_MODEL command being finalised.
+            cancel_event: A final cancel signal — checked inside the write
+                lock so a cancel that arrives after the download completes
+                still prevents the pipeline_config commit.
+
+        Returns:
+            True when the config was committed; False when a cancel
+            arrived after acquiring the lock (caller should report).
+        """
+        self.status_logger.report_deployment_progress(cmd.pipeline_id, "configuring", 95.0, 0, 0)
+        with self.lock:
+            if cancel_event.is_set():
+                return False
+            self.pipeline_configs[cmd.pipeline_id] = cmd.config
+            if self.state_manager:
+                try:
+                    self.state_manager.update_pipeline_config(cmd.config)
+                except Exception as e:
+                    logger.warning(f"Failed to persist state: {e}")
+        return True
+
+    def _attach_response(self, pipeline_id: str, command_id: str, response: requests.Response | None) -> None:
+        """Stash (or clear) the streaming response on this pipeline's worker.
+
+        Used only by `_download_and_publish` so `_cancel_deploy` can close
+        the socket and unblock `iter_content` without waiting for the read
+        timeout. Guarded by `worker.command_id == command_id` so we never
+        clobber a newer worker if the caller races with cleanup.
+        """
+        with self.lock:
+            worker = self._agent_workers.get(pipeline_id)
+            if worker is not None and worker.command_id == command_id:
+                worker.response = response
+
+    def _report_cancelled(self, cmd: DeployModelCommand, when: str) -> None:
+        """Emit the cancelled progress + failed command pair for `cmd`."""
+        logger.info(f"Deploy '{cmd.pipeline_id}' cancelled {when}.")
+        self.status_logger.report_deployment_progress(cmd.pipeline_id, "cancelled", 0.0, 0, 0)
+        self.status_logger.report_command(cmd.id, "failed", "cancelled")
+
+    def _cancel_deploy(self, cmd: CancelDeployCommand) -> None:
         """Signal an in-flight DEPLOY_MODEL for `cmd.pipeline_id` to abort.
 
         Args:
@@ -580,11 +658,21 @@ class AgentRuntime:
                 return
             worker.cancel_event.set()
             original = worker.command_id
+            active_response = worker.response
+
+        # Close the stashed streaming response so `iter_content` unblocks
+        # immediately instead of waiting for the read timeout. Best effort —
+        # cancel_event is authoritative; this only shortens latency.
+        if active_response is not None:
+            try:
+                active_response.close()
+            except Exception as e:
+                logger.debug(f"Failed to close active deploy response: {e}")
 
         logger.info(f"Cancelling deploy for '{cmd.pipeline_id}' (deploy command '{original}')")
         self.status_logger.report_command(cmd.id, "completed", f"Cancel signal sent to deploy '{original}'")
 
-    def _cleanup_partial(self, partial_path: Path):
+    def _cleanup_partial(self, partial_path: Path) -> None:
         """Best-effort delete of a `.partial` file; log and continue on failure.
 
         Args:
@@ -596,7 +684,7 @@ class AgentRuntime:
             except OSError as e:
                 logger.warning(f"Failed to delete partial {partial_path}: {e}")
 
-    def _update_pipeline(self, cmd: UpdatePipelineCommand):
+    def _update_pipeline(self, cmd: UpdatePipelineCommand) -> None:
         """Updates a deployed pipeline's configuration, preserving its running state.
 
         If the pipeline is running, it restarts with the new configuration.
@@ -667,7 +755,7 @@ class AgentRuntime:
         pipeline_id: str,
         force_stop: bool = False,
         payload: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """Uninstalls a pipeline by removing its configuration and on-disk artifacts.
 
         Args:
@@ -763,7 +851,7 @@ class AgentRuntime:
         suffix = f" (file deleted: {artifact_path.name})" if deleted and artifact_path else ""
         self.status_logger.report_command(command_id, "completed", f"Pipeline '{pipeline_id}' removed{suffix}")
 
-    def _log_status(self):
+    def _log_status(self) -> None:
         """Logs the current status of the agent, including running and configured pipelines."""
         status = {
             "running_pipelines": list(self.pipelines.keys()),
@@ -798,7 +886,7 @@ class AgentRuntime:
 
         return ComponentRegistry.load_plugin(name, args)
 
-    def _signal_handler(self, signum: int, frame: Any):
+    def _signal_handler(self, signum: int, frame: Any) -> None:
         """Handle SIGINT/SIGTERM for graceful shutdown.
 
         Args:
@@ -809,7 +897,7 @@ class AgentRuntime:
         self.running = False
         self.shutdown_event.set()
 
-    def _shutdown(self):
+    def _shutdown(self) -> None:
         """Graceful System Shutdown.
 
         Stops all pipelines and cleans up resources.
