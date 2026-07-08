@@ -1140,40 +1140,40 @@ fn try_show_preferences_now() -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn start_companion_service() -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        let out = std::process::Command::new("systemctl")
-            .args(["--user", "start", "locai-link-companion.service"])
-            .output()
-            .map_err(|e| format!("systemctl start: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "systemctl start failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok(())
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "start", "locai-link-companion.service"])
+        .output()
+        .map_err(|e| format!("systemctl start: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl start failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    #[cfg(target_os = "macos")]
-    {
-        let uid = current_uid()?;
-        let out = std::process::Command::new("launchctl")
-            .args(["kickstart", "-k", &format!("gui/{uid}/{COMPANION_LABEL}")])
-            .output()
-            .map_err(|e| format!("launchctl kickstart: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "launchctl kickstart failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok(())
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn start_companion_service() -> Result<(), String> {
+    let uid = current_uid()?;
+    let out = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &format!("gui/{uid}/{COMPANION_LABEL}")])
+        .output()
+        .map_err(|e| format!("launchctl kickstart: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "launchctl kickstart failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err("start_companion_service: unsupported platform".to_string())
-    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn start_companion_service() -> Result<(), String> {
+    Err("start_companion_service: unsupported platform".to_string())
 }
 
 /// Fire the uninstaller from the SA splash. `systemd-run --user --collect` on
