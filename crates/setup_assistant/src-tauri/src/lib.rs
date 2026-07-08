@@ -936,6 +936,17 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         }
     }
 
+    // Belt-and-braces: `open -a` the companion so LaunchServices activates it
+    // via NSWorkspace. Idempotent — if kickstart already brought the tray up,
+    // this is a no-op. If kickstart raced or a stale service state suppressed
+    // the launch, this makes the tray icon appear.
+    for path in ["/Applications/Locai Link.app", "/Library/Locai/Locai Link.app"] {
+        if std::path::Path::new(path).exists() {
+            let _ = std::process::Command::new("open").args(["-a", path]).output();
+            break;
+        }
+    }
+
     Ok(())
 }
 

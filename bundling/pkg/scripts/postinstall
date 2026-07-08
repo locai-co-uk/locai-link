@@ -105,6 +105,14 @@ if [[ -d "$COMPANION_APP" ]]; then
     rm -rf "$COMPANION_SYMLINK"
     ditto "$COMPANION_APP" "$COMPANION_SYMLINK"
     log "companion copied: $COMPANION_APP -> $COMPANION_SYMLINK"
+
+    # Force Spotlight to index the freshly-copied .app now, otherwise a
+    # first-time user may not find it via ⌘-Space until the background
+    # mdworker scan catches up (can be minutes on some machines).
+    if command -v mdimport >/dev/null 2>&1; then
+        mdimport "$COMPANION_SYMLINK" 2>/dev/null || true
+        log "mdimport ran on $COMPANION_SYMLINK"
+    fi
 else
     log "companion app not found at $COMPANION_APP — skipping /Applications copy"
 fi
