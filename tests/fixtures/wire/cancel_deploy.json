@@ -1,0 +1,5 @@
+{
+  "id": "cmd_canceldeploy_0001",
+  "type": "CANCEL_DEPLOY",
+  "pipeline_id": "llama-3-8b"
+}

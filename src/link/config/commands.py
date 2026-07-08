@@ -37,6 +37,13 @@ class DeployModelCommand(_CommandBase):
     )
 
 
+class CancelDeployCommand(_CommandBase):
+    """Interrupt an in-flight `DEPLOY_MODEL` for the named pipeline."""
+
+    type: Literal["CANCEL_DEPLOY"] = "CANCEL_DEPLOY"
+    pipeline_id: str = Field(description="Pipeline whose in-flight deploy should be cancelled.")
+
+
 class StartModelCommand(_CommandBase):
     """Start (or replace) a pipeline from a full inline config."""
 
@@ -122,6 +129,7 @@ class UpdateAgentConfigCommand(_CommandBase):
 
 Command = Annotated[
     DeployModelCommand
+    | CancelDeployCommand
     | StartModelCommand
     | StartModelInferenceCommand
     | StopModelInferenceCommand
