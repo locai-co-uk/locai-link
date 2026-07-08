@@ -86,6 +86,7 @@ pub fn run() {
             preferences::get_prefs_state,
             preferences::poll_status,
             preferences::toggle_model_serving,
+            preferences::cancel_model_deploy,
             preferences::set_run_at_login,
             preferences::runtime_start,
             preferences::runtime_stop,

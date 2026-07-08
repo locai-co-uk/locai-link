@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 HEALTH_HOST = "127.0.0.1"
 HEALTH_PORT = 50505
 
-_MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving)$")
+_MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving|cancel-deploy)$")
 _LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
 
 
@@ -213,27 +213,36 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 return
             pipeline_id, action = match.group(1), match.group(2)
 
-            model = next((m for m in state.models() if m["id"] == pipeline_id), None)
-            if model is None:
-                self.send_error(404, f"Unknown pipeline: {pipeline_id}")
-                return
-
             command: dict[str, Any]
-            if action == "serve":
+            if action == "cancel-deploy":
+                # An in-flight deploy isn't in state.models() yet, so skip the
+                # existence check — the runtime treats a missing worker as a
+                # completed-with-note no-op.
                 command = {
                     "id": f"loopback-{uuid.uuid4().hex[:8]}",
-                    "type": "START_SERVING",
-                    "pipeline_id": pipeline_id,
-                    "port": model.get("port") or 8100,
-                    "host": model.get("host") or "0.0.0.0",
-                    "model_display_name": model.get("alias") or pipeline_id,
-                }
-            else:  # stop-serving
-                command = {
-                    "id": f"loopback-{uuid.uuid4().hex[:8]}",
-                    "type": "STOP_SERVING",
+                    "type": "CANCEL_DEPLOY",
                     "pipeline_id": pipeline_id,
                 }
+            else:
+                model = next((m for m in state.models() if m["id"] == pipeline_id), None)
+                if model is None:
+                    self.send_error(404, f"Unknown pipeline: {pipeline_id}")
+                    return
+                if action == "serve":
+                    command = {
+                        "id": f"loopback-{uuid.uuid4().hex[:8]}",
+                        "type": "START_SERVING",
+                        "pipeline_id": pipeline_id,
+                        "port": model.get("port") or 8100,
+                        "host": model.get("host") or "0.0.0.0",
+                        "model_display_name": model.get("alias") or pipeline_id,
+                    }
+                else:  # stop-serving
+                    command = {
+                        "id": f"loopback-{uuid.uuid4().hex[:8]}",
+                        "type": "STOP_SERVING",
+                        "pipeline_id": pipeline_id,
+                    }
 
             try:
                 state.dispatch(command)

@@ -387,6 +387,23 @@ def test_post_unknown_pipeline_returns_404():
     assert received == [], "no command should dispatch for an unknown pipeline"
 
 
+def test_post_cancel_deploy_dispatches_cancel_command():
+    # cancel-deploy targets an in-flight deploy that isn't in state.models()
+    # yet, so no existence check is required.
+    srv, port, received = _server_with_handlers([])
+    try:
+        resp = _post_no_body(port, "/models/llm_server/cancel-deploy")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+
+    assert len(received) == 1
+    cmd = received[0]
+    assert cmd["type"] == "CANCEL_DEPLOY"
+    assert cmd["pipeline_id"] == "llm_server"
+    assert cmd["id"].startswith("loopback-")
+
+
 def test_post_serve_falls_back_to_defaults_when_config_is_bare():
     """A pipeline that's never served yet may have port/host unset in
     args. The endpoint should fill in the same defaults StartServingCommand

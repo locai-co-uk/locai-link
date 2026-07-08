@@ -195,6 +195,16 @@
     });
   }
 
+  async function cancelDeploy(pipelineId: string) {
+    await withPending(`cancel:${pipelineId}`, async () => {
+      try {
+        await invoke<void>("cancel_model_deploy", { pipelineId });
+      } catch (e) {
+        console.warn("cancel_model_deploy failed:", e);
+      }
+    });
+  }
+
   async function withPending<T>(key: string, fn: () => Promise<T>): Promise<void> {
     pending.add(key);
     pending = new Set(pending);
@@ -467,6 +477,16 @@
                           ? "Queued"
                           : row.deployment.stage}
                   </span>
+                  {#if row.deployment.stage === "downloading"}
+                    <button
+                      class="btn btn--ghost btn--sm"
+                      onclick={() => cancelDeploy(row.pipeline_id)}
+                      disabled={pending.has(`cancel:${row.pipeline_id}`)}
+                      aria-label={`Cancel download of ${row.alias}`}
+                    >
+                      Cancel
+                    </button>
+                  {/if}
                 {:else if row.is_serving}
                   <span class="pill pill--up">▶ Serving</span>
                   <button

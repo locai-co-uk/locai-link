@@ -7,9 +7,10 @@
 use std::path::PathBuf;
 
 use locai_link_shared::{
-    agent_health, list_models, toggle_serving as shared_toggle_serving, DeploymentProgress,
-    HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL,
-    DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
+    agent_health, cancel_deployment as shared_cancel_deployment, list_models,
+    toggle_serving as shared_toggle_serving, DeploymentProgress, HealthStatus, ModelInfo,
+    ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
+    DEFAULT_MODEL_ACTION_BASE,
 };
 use serde::Serialize;
 use tauri::AppHandle;
@@ -154,6 +155,13 @@ pub fn toggle_model_serving(pipeline_id: String, action: String) -> Result<(), S
         other => return Err(format!("unknown action: {other}")),
     };
     shared_toggle_serving(DEFAULT_MODEL_ACTION_BASE, &pipeline_id, parsed)
+}
+
+/// Cancel an in-flight deploy for `pipeline_id`. Runtime is idempotent — a
+/// cancel with no active worker returns success with a note.
+#[tauri::command]
+pub fn cancel_model_deploy(pipeline_id: String) -> Result<(), String> {
+    shared_cancel_deployment(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)
 }
 
 #[tauri::command]

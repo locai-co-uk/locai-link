@@ -133,6 +133,17 @@ pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) 
     }
 }
 
+/// Ask the agent to cancel an in-flight deploy for `pipeline_id`. No-op on the
+/// runtime side if no deploy is currently in-flight.
+pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String> {
+    let url = format!("{base_url}/{pipeline_id}/cancel-deploy");
+    match HTTP_AGENT.post(&url).send_bytes(&[]) {
+        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
+        Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
+        Err(e) => Err(format!("POST {url} failed: {e}")),
+    }
+}
+
 /// Probe Link's `/healthz` endpoint. Every failure mode collapses to
 /// `Down`/`Malformed` — never panics or bubbles a `Result`.
 pub fn agent_health(url: &str) -> HealthStatus {
