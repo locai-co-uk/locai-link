@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.19]
 
 First end-to-end GUI install path for macOS + Linux: a `.pkg` (macOS)
 or tarball (Linux) drops the frozen runtime, LaunchAgents / systemd
@@ -63,15 +63,14 @@ crates, `/healthz`) is now wired end-to-end.
   returns, and the optimistic local flip means the next click reads
   the new state.
 
-### Added — Runtime deploy orchestration
+### Changed — Runtime deploy hardening
 
-- `DEPLOY_MODEL` now runs on a per-pipeline worker thread rather than
-  blocking the command dispatcher, so parallel model deploys are
-  supported. `CANCEL_DEPLOY` command signals the worker's cancel event
-  and closes the in-flight streaming response.
-- Health server extensions: `POST /models/{pipeline_id}/{serve,stop-serving,cancel-deploy}`
-  action endpoints; `/healthz` now carries `deployments[]` (in-flight
-  progress) alongside `models[]` and `transport{}`.
+Builds on the worker-thread + CANCEL_DEPLOY primitive shipped in 1.0.18:
+
+- Cancel-deploy is now propagated to the streaming HTTP response —
+  the worker stashes the `requests.Response` and `_cancel_deploy`
+  closes the socket so `iter_content` unblocks in milliseconds instead
+  of waiting for the read timeout.
 - Truncated-download guard: after the chunk loop, if `total > 0 &&
   done != total` the partial is deleted and the deploy is reported as
   failed rather than atomically publishing a short file.
@@ -82,6 +81,11 @@ crates, `/healthz`) is now wired end-to-end.
   `with self.lock` block that registers the worker, so a
   `CANCEL_DEPLOY` arriving between register and start can no longer
   observe `thread.is_alive() == False` and short-circuit.
+- Health server extensions: `POST /models/{pipeline_id}/{serve,stop-serving,cancel-deploy}`
+  action endpoints; `/healthz` now carries `deployments[]` (in-flight
+  progress) alongside `models[]` and `transport{}`. The `deployments`
+  read + write paths take a lock so the handler thread can't race the
+  worker threads on `dict.values()`.
 
 ### Added — macOS .pkg installer (`bundling/pkg/`)
 
@@ -171,6 +175,55 @@ crates, `/healthz`) is now wired end-to-end.
   silent-EACCES exit-0 non-root uninstall, missing user-data wipe,
   and `@HOME@` substitution failures.
 
+### Changed — Companion Preferences performance
+
+- `get_prefs_state` no longer probes `/healthz` (was redundant with
+  `poll_status`); it now returns static/on-disk fields only. Cold-start
+  cost drops to a single localhost RTT.
+- `get_prefs_state` + `poll_status` are `async` on Tauri's
+  `spawn_blocking` pool so slow HTTP responses don't stall the
+  WebView main thread.
+- Poll interval tightened from 4 s to 2 s.
+
+### Fixed
+
+- `resolve_agent_version`: docstring now lists the PyInstaller-frozen
+  `manifest.json` lookup step (the code path already existed; docs
+  were stale).
+- Dependency and CI hygiene: dependabot ignore list for the GTK3-rs
+  family (blocked upstream on wry publishing a webkitgtk6/GTK4
+  backend); `cargo update` refreshes tauri 2.11.5, plist 1.10, quick-xml
+  0.41, time 0.3.53, zbus 5.17.
+
+## [1.0.18] - 2026-07-07
+
+Companion menu-bar tray beta + runtime deploy pipeline groundwork.
+First working end-to-end path: the runtime can accept a DEPLOY_MODEL
+command from Control on a background worker thread, and a macOS
+tray-icon app talks to it via `/healthz` + `/models` to display which
+models are running. Everything else in the SA + GUI installer stack
+builds on top of this.
+
+### Added — Menu-bar companion (initial beta)
+
+- New `crates/companion/` Tauri crate producing a tray-only macOS app.
+  Icon in the menu bar reflects agent up/down; dropdown shows a status
+  header, a Models submenu with per-pipeline serve/stop toggles, and a
+  Quit item that stops both the runtime and the companion cleanly.
+- Login-autostart wiring: the companion's `set_run_at_login` Tauri
+  command flips `RunAtLoad` on the user's LaunchAgent plist.
+
+### Added — Runtime deploy orchestration
+
+- `DEPLOY_MODEL` now runs on a per-pipeline worker thread rather than
+  blocking the command dispatcher, so parallel model deploys are
+  supported.
+- `CANCEL_DEPLOY` command signals the worker's cancel event and lets
+  the download loop exit cleanly.
+- Existing worker registry / status reporting extended with
+  progress + cancel primitives so downstream telemetry sees a coherent
+  in-flight → completed / cancelled / failed timeline.
+
 ### Changed — Tauri frontends
 
 - `crates/setup_assistant/` and `crates/companion/`: swapped from
@@ -184,16 +237,6 @@ crates, `/healthz`) is now wired end-to-end.
   `1420`) so both apps can be run concurrently during dev; companion
   HMR moved to `1423` to sidestep setup_assistant's HMR port.
 
-### Changed — Companion Preferences performance
-
-- `get_prefs_state` no longer probes `/healthz` (was redundant with
-  `poll_status`); it now returns static/on-disk fields only. Cold-start
-  cost drops to a single localhost RTT.
-- `get_prefs_state` + `poll_status` are `async` on Tauri's
-  `spawn_blocking` pool so slow HTTP responses don't stall the
-  WebView main thread.
-- Poll interval tightened from 4 s to 2 s.
-
 ### Removed — TUI
 
 - `src/link/ui/` deleted, along with the `tui` subcommand, the
@@ -201,16 +244,6 @@ crates, `/healthz`) is now wired end-to-end.
   The GUI installer (setup assistant + menu-bar companion) supersedes
   the Textual-based agent-management interface, which never made it
   past a niche developer utility.
-
-### Fixed
-
-- `resolve_agent_version`: docstring now lists the PyInstaller-frozen
-  `manifest.json` lookup step (the code path already existed; docs
-  were stale).
-- Dependency and CI hygiene: dependabot ignore list for the GTK3-rs
-  family (blocked upstream on wry publishing a webkitgtk6/GTK4
-  backend); `cargo update` refreshes tauri 2.11.5, plist 1.10, quick-xml
-  0.41, time 0.3.53, zbus 5.17.
 
 ### Fixed — Editor-only diagnostics
 

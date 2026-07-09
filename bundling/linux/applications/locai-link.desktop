@@ -13,7 +13,9 @@ Icon=locai-link
 Terminal=false
 Categories=Utility;
 StartupNotify=false
-# Keep the entry out of the taskbar / dock — the app itself is a tray
-# icon, so it doesn't want a separate window listing.
+# Keep the entry visible in the app menu — NoDisplay=false is the
+# default, called out here explicitly because the companion is a tray
+# app and this is the user's re-launch surface if the tray is missing.
+# NoDisplay affects app-menu discovery only, not taskbar/dock.
 NoDisplay=false
 Keywords=locai;ai;llm;inference;

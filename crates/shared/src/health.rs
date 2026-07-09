@@ -122,11 +122,10 @@ impl ServingAction {
     }
 }
 
-/// Ask the agent to start or stop serving `pipeline_id`. `base_url` is combined
-/// as `{base}/{pipeline_id}/{action}`.
-pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) -> Result<(), String> {
-    let url = format!("{base_url}/{pipeline_id}/{}", action.path());
-    // Empty body — endpoint reads pipeline args server-side.
+/// POST a per-model action against `{base_url}/{pipeline_id}/{path}` with an
+/// empty body. Shared by toggle_serving + cancel_deployment.
+fn post_action(base_url: &str, pipeline_id: &str, path: &str) -> Result<(), String> {
+    let url = format!("{base_url}/{pipeline_id}/{path}");
     match HTTP_AGENT.post(&url).send_bytes(&[]) {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
         Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
@@ -134,15 +133,16 @@ pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) 
     }
 }
 
+/// Ask the agent to start or stop serving `pipeline_id`. `base_url` is combined
+/// as `{base}/{pipeline_id}/{action}`.
+pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) -> Result<(), String> {
+    post_action(base_url, pipeline_id, action.path())
+}
+
 /// Ask the agent to cancel an in-flight deploy for `pipeline_id`. No-op on the
 /// runtime side if no deploy is currently in-flight.
 pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String> {
-    let url = format!("{base_url}/{pipeline_id}/cancel-deploy");
-    match HTTP_AGENT.post(&url).send_bytes(&[]) {
-        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
-        Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
-        Err(e) => Err(format!("POST {url} failed: {e}")),
-    }
+    post_action(base_url, pipeline_id, "cancel-deploy")
 }
 
 /// Probe Link's `/healthz` endpoint. Every failure mode collapses to

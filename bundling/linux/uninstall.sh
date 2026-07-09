@@ -23,6 +23,17 @@ log() {
     echo "[locai-uninstall] $*"
 }
 
+# Refuse to run `rm -rf` on anything that looks unsafe — empty, root,
+# or a top-level directory. A user who unset $HOME then invoked the
+# uninstaller could otherwise wipe /.local/share/locai (technically an
+# absolute path) or worse. Belt-and-braces since $HOME is normally safe.
+case "$INSTALL_ROOT" in
+    ""|"/"|"/root"|"/home"|"/Users"|"/var"|"/opt"|"/etc"|"/tmp"|"/usr"|"/bin"|"/sbin")
+        log "refusing to remove unsafe INSTALL_ROOT: '$INSTALL_ROOT'"
+        exit 1
+        ;;
+esac
+
 # --- 1. Stop + disable user services (best-effort) --------------------
 # `disable --now` stops and prevents auto-start in one call. Failures
 # (unit not enabled, already gone, etc.) are non-fatal — we just want

@@ -58,6 +58,9 @@ def _resolve() -> str | None:
                 if isinstance(v, str) and v:
                     return v
         except Exception:
+            # Best-effort manifest read/parse in frozen mode; any failure
+            # (missing file, unreadable, malformed JSON) falls through to
+            # the pyproject walk-up below.
             pass
 
     try:

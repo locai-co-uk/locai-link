@@ -931,6 +931,10 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             .output();
     }
 
+    // Collect per-service kickstart failures so the caller sees a real Err
+    // rather than a silent-success + missing tray icon.
+    let mut kickstart_failures: Vec<String> = Vec::new();
+
     for (plist_name, label) in agents {
         let src = source_dir.join(plist_name);
         let dst = dest_dir.join(plist_name);
@@ -988,18 +992,22 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             );
         }
 
-        // -k restarts if running, starts fresh otherwise.
+        // -k restarts if running, starts fresh otherwise. Kickstart is the
+        // load-bearing step — if this fails the service is definitely not
+        // running, so record it and surface at the end.
         let kickstart_out = std::process::Command::new("launchctl")
             .args(["kickstart", "-k", &service])
             .output()
             .map_err(|e| format!("launchctl kickstart: {e}"))?;
         if !kickstart_out.status.success() {
-            eprintln!(
-                "[install_launchagents] kickstart {service} failed ({:?}): {} {}",
+            let msg = format!(
+                "kickstart {service} exited {:?}: {} {}",
                 kickstart_out.status.code(),
                 String::from_utf8_lossy(&kickstart_out.stdout).trim(),
                 String::from_utf8_lossy(&kickstart_out.stderr).trim(),
             );
+            eprintln!("[install_launchagents] {msg}");
+            kickstart_failures.push(msg);
         }
     }
 
@@ -1014,6 +1022,9 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         }
     }
 
+    if !kickstart_failures.is_empty() {
+        return Err(kickstart_failures.join("\n"));
+    }
     Ok(())
 }
 
@@ -1072,6 +1083,8 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         ));
     }
 
+    let mut start_failures: Vec<String> = Vec::new();
+
     for unit in units {
         // disable first so unchecking the toggle on re-run has a clean transition.
         let _ = std::process::Command::new("systemctl")
@@ -1088,13 +1101,19 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             .output()
             .map_err(|e| format!("systemctl {args:?}: {e}"))?;
         if !out.status.success() {
-            eprintln!(
-                "[install_launchagents] {args:?} exited {:?}: {} {}",
+            let msg = format!(
+                "systemctl {args:?} exited {:?}: {} {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stdout).trim(),
                 String::from_utf8_lossy(&out.stderr).trim(),
             );
+            eprintln!("[install_launchagents] {msg}");
+            start_failures.push(msg);
         }
+    }
+
+    if !start_failures.is_empty() {
+        return Err(start_failures.join("\n"));
     }
 
     Ok(())
@@ -1286,19 +1305,21 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
 
 #[tauri::command]
 #[cfg(target_os = "macos")]
-fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
-    // The .pkg ships uninstall.sh at INSTALL_ROOT and the postinstall
-    // chmod +x's it. AppleScript's `do shell script … with administrator
-    // privileges` pops the OS's admin-password prompt.
-    let script = format!("{install_root}/uninstall.sh");
+fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
+    // Ignore the frontend-supplied install_root and resolve canonically.
+    // The uninstaller runs `with administrator privileges` — we don't want
+    // an injectable path input on that surface.
+    let script = format!("{}/uninstall.sh", resolve_install_root());
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
-    // Escape any embedded double-quote in the path so the AppleScript
-    // string literal stays well-formed.
-    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    // AppleScript's `quoted form of` is the safe shell-argument escape —
+    // handles single quotes, spaces, backslashes without manual escaping.
+    // Build the AppleScript string with `&` concatenation so the path
+    // literal stays inside AppleScript's own double-quoted-string escape.
+    let escaped_path = script.replace('\\', "\\\\").replace('"', "\\\"");
     let apple_script = format!(
-        "do shell script \"/bin/bash '{escaped}'\" with administrator privileges"
+        "do shell script \"/bin/bash \" & quoted form of \"{escaped_path}\" with administrator privileges"
     );
     let out = std::process::Command::new("osascript")
         .args(["-e", &apple_script])

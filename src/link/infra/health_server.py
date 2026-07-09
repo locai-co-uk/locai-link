@@ -56,6 +56,11 @@ class HealthState:
         self.transport_connected: bool = False
 
         self.deployments: dict[str, dict[str, Any]] = {}
+        # Protects `deployments` — mutated by worker threads via
+        # `set_deployment_progress`, iterated by the handler thread via
+        # `snapshot`; without a lock `dict.values()` iteration can raise
+        # `RuntimeError: dictionary changed size during iteration`.
+        self._deploy_lock = threading.Lock()
 
     def snapshot(self) -> dict[str, Any]:
         transport: dict[str, Any] | None = None
@@ -65,13 +70,15 @@ class HealthState:
                 "endpoint": self.transport_endpoint,
                 "connected": self.transport_connected,
             }
+        with self._deploy_lock:
+            deployments_snapshot = list(self.deployments.values())
         return {
             "version": self.version,
             "uptime_seconds": int(time.monotonic() - self._boot_time),
             "currently_serving": self.currently_serving,
             "model_id": self.model_id,
             "transport": transport,
-            "deployments": list(self.deployments.values()),
+            "deployments": deployments_snapshot,
         }
 
     def models(self) -> list[dict[str, Any]]:
@@ -119,19 +126,20 @@ class HealthState:
         started yet), ``downloading``, ``configuring``, ``completed``.
         On ``completed`` the row is removed so the UI can drop it.
         """
-        if stage == "completed":
-            self.deployments.pop(pipeline_id, None)
-            return
-        existing = self.deployments.get(pipeline_id)
-        if stage == "queued" and existing is not None and existing.get("stage") != "queued":
-            return
-        existing = existing or {}
-        self.deployments[pipeline_id] = {
-            "pipeline_id": pipeline_id,
-            "model_name": model_name or existing.get("model_name"),
-            "stage": stage,
-            "progress_pct": progress_pct,
-        }
+        with self._deploy_lock:
+            if stage == "completed":
+                self.deployments.pop(pipeline_id, None)
+                return
+            existing = self.deployments.get(pipeline_id)
+            if stage == "queued" and existing is not None and existing.get("stage") != "queued":
+                return
+            existing = existing or {}
+            self.deployments[pipeline_id] = {
+                "pipeline_id": pipeline_id,
+                "model_name": model_name or existing.get("model_name"),
+                "stage": stage,
+                "progress_pct": progress_pct,
+            }
 
     def set_transport(
         self,

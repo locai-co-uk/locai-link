@@ -10,6 +10,11 @@ on:
         description: "Existing tag to re-attach assets to (leave blank to create a new release from pyproject.toml)"
         required: false
         type: string
+      dry_run:
+        description: "Build the .pkg / .tar.gz / .zip but skip the release-create + asset-attach steps. Bundles are still uploaded to the workflow run as artifacts (14-day retention)."
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -48,8 +53,10 @@ jobs:
           fi
 
       - name: Create GitHub release
-        # Skip when re-attaching to an existing release (workflow_dispatch with tag input).
-        if: inputs.tag == ''
+        # Skip when re-attaching to an existing release (workflow_dispatch
+        # with tag input), and skip entirely when dry_run is true — dry-run
+        # builds go to workflow-run artifacts, not to a release.
+        if: inputs.tag == '' && !inputs.dry_run
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
@@ -429,7 +436,7 @@ jobs:
           # 4. Wrap in the distribution .pkg with the wizard UI.
           #    productbuild references locai-link-runtime.pkg relative
           #    to --package-path.
-          UNSIGNED_PKG="$RUNNER_TEMP/Loc.ai-Link-unsigned.pkg"
+          UNSIGNED_PKG="$RUNNER_TEMP/Locai-Link-unsigned.pkg"
           productbuild \
             --distribution "$DIST_XML" \
             --package-path "$RUNNER_TEMP" \
@@ -437,7 +444,7 @@ jobs:
             "$UNSIGNED_PKG"
 
           # 5. Sign the outer .pkg with the Installer cert.
-          SIGNED_PKG="$RUNNER_TEMP/Loc.ai-Link.pkg"
+          SIGNED_PKG="$RUNNER_TEMP/Locai-Link.pkg"
           productsign \
             --sign "$APPLE_DEVELOPER_ID_INSTALLER" \
             "$UNSIGNED_PKG" \
@@ -457,10 +464,11 @@ jobs:
           #    offline on first-run.
           xcrun stapler staple "$SIGNED_PKG"
 
-          # 8. Copy into release-assets/ with a version-stamped name,
-          #    matching how the tar.gz is named below.
+          # 8. Copy into release-assets/ with a name matching the
+          #    ${asset_base}-${platform}-${TAG}.${ext} pattern used by
+          #    the tar.gz / zip legs so all release assets look uniform.
           mkdir -p release-assets
-          FINAL_NAME="Loc.ai-Link-${TAG}.pkg"
+          FINAL_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.pkg"
           cp "$SIGNED_PKG" "release-assets/$FINAL_NAME"
 
           python - <<EOF > "release-assets/${FINAL_NAME}.sha256"
@@ -534,7 +542,8 @@ jobs:
     # Run even if one bundle matrix leg failed — the surviving legs
     # still produced usable artifacts and shouldn't be held hostage.
     # `release` still has to succeed (no tag = nothing to attach to).
-    if: always() && needs.release.result == 'success'
+    # Skip entirely on dry_run — bundles stay in the run's artifacts only.
+    if: always() && needs.release.result == 'success' && !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:
       contents: write
