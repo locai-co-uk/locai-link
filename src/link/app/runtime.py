@@ -562,6 +562,9 @@ class AgentRuntime:
         cancelled = False
         total = 0
         done = 0
+        # `(connect, read)`: cap a stalled or hung stream so a cancel that
+        # slips past the chunk-loop check still surfaces within seconds
+        # rather than waiting on the old 600 s single timeout.
         download_timeout: tuple[float, float] = (10.0, 30.0)
         try:
             headers = {"Authorization": f"Bearer {self.agent_config.identity.api_key}"}
