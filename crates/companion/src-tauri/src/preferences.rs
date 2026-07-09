@@ -104,46 +104,54 @@ pub struct StatusPoll {
 
 // --- Commands ----------------------------------------------------------------
 
+// probe_runtime / probe_runtime_full / list_models are blocking HTTP calls.
+// Run them on the blocking pool so the WebView thread isn't stalled during
+// the poll (visible as tray/UI freezes on slow /healthz responses).
 #[tauri::command]
-pub fn get_prefs_state() -> PrefsState {
-    let (agent_status, uptime, version, transport) = probe_runtime();
-
-    let device = read_session_config_device();
-    // Prefer /healthz (source of truth); fall back to `current` when runtime is down.
-    let effective_version = version.clone().or_else(resolve_current_version);
-
-    PrefsState {
-        device,
-        agent: AgentInfo {
-            status: agent_status,
-            uptime_seconds: uptime,
-            version: effective_version,
-            run_at_login: read_run_at_login(),
-        },
-        network: transport,
-        advanced: AdvancedInfo {
-            log_file: runtime_log_file(),
-            install_root: install_root(),
-        },
-        platform: std::env::consts::OS.to_string(),
-    }
+pub async fn get_prefs_state() -> PrefsState {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (agent_status, uptime, version, transport) = probe_runtime();
+        let device = read_session_config_device();
+        let effective_version = version.clone().or_else(resolve_current_version);
+        PrefsState {
+            device,
+            agent: AgentInfo {
+                status: agent_status,
+                uptime_seconds: uptime,
+                version: effective_version,
+                run_at_login: read_run_at_login(),
+            },
+            network: transport,
+            advanced: AdvancedInfo {
+                log_file: runtime_log_file(),
+                install_root: install_root(),
+            },
+            platform: std::env::consts::OS.to_string(),
+        }
+    })
+    .await
+    .expect("prefs probe panicked")
 }
 
 #[tauri::command]
-pub fn poll_status() -> StatusPoll {
-    let (status, uptime, version, network, deployments) = probe_runtime_full();
-    let models = match list_models(DEFAULT_MODELS_URL) {
-        ModelsStatus::Ok(list) => list,
-        ModelsStatus::Down | ModelsStatus::Malformed(_) => Vec::new(),
-    };
-    StatusPoll {
-        status,
-        uptime_seconds: uptime,
-        version,
-        network,
-        models,
-        deployments,
-    }
+pub async fn poll_status() -> StatusPoll {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (status, uptime, version, network, deployments) = probe_runtime_full();
+        let models = match list_models(DEFAULT_MODELS_URL) {
+            ModelsStatus::Ok(list) => list,
+            ModelsStatus::Down | ModelsStatus::Malformed(_) => Vec::new(),
+        };
+        StatusPoll {
+            status,
+            uptime_seconds: uptime,
+            version,
+            network,
+            models,
+            deployments,
+        }
+    })
+    .await
+    .expect("poll_status panicked")
 }
 
 /// Start or stop serving `pipeline_id`. `action` is `"serve"` or `"stop-serving"`.

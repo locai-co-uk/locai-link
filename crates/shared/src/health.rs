@@ -14,8 +14,9 @@ pub const DEFAULT_HEALTH_URL: &str = "http://127.0.0.1:50505/healthz";
 /// Endpoint for listing servable-model pipelines.
 pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:50505/models";
 
-/// Base for per-model action endpoints, combined with `/{pipeline_id}/{serve,stop-serving}`.
-/// Same string as [`DEFAULT_MODELS_URL`] — kept distinct so call sites read as intent.
+/// Base for per-model action endpoints, combined with
+/// `/{pipeline_id}/{serve,stop-serving,cancel-deploy}`. Same string as
+/// [`DEFAULT_MODELS_URL`] — kept distinct so call sites read as intent.
 pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -283,6 +284,35 @@ mod tests {
     #[test]
     fn toggle_serving_returns_err_on_connection_refused() {
         let res = toggle_serving("http://127.0.0.1:1/models", "anything", ServingAction::Start);
+        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
+    }
+
+    #[test]
+    fn cancel_deployment_hits_cancel_path_and_reports_ok() {
+        let (port, handle, captured) =
+            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        let res = cancel_deployment(&format!("http://127.0.0.1:{port}/models"), "llm_server");
+        handle.join().unwrap();
+        assert!(res.is_ok(), "got {res:?}");
+        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(
+            request_line.starts_with("POST /models/llm_server/cancel-deploy HTTP/1.1"),
+            "got: {request_line:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_deployment_returns_err_on_non_2xx() {
+        let (port, handle, _) =
+            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        let res = cancel_deployment(&format!("http://127.0.0.1:{port}/models"), "ghost");
+        handle.join().unwrap();
+        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
+    }
+
+    #[test]
+    fn cancel_deployment_returns_err_on_connection_refused() {
+        let res = cancel_deployment("http://127.0.0.1:1/models", "anything");
         assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
     }
 

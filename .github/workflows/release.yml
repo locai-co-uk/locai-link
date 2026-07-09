@@ -377,6 +377,12 @@ jobs:
           DIST_XML="$RUNNER_TEMP/Distribution.xml"
           sed "s/version=\"0.0.0\"/version=\"$VERSION\"/" \
             bundling/pkg/Distribution.xml > "$DIST_XML"
+          # Guard against silent no-op if the placeholder in the source XML
+          # ever drifts — otherwise we ship a .pkg still labelled 0.0.0.
+          if ! grep -q "version=\"$VERSION\"" "$DIST_XML"; then
+            echo "::error::Failed to stamp version into Distribution.xml"
+            exit 1
+          fi
 
           # 3. Build the component .pkg with the postinstall wired in.
           COMPONENT_PKG="$RUNNER_TEMP/locai-link-runtime.pkg"

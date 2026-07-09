@@ -81,9 +81,7 @@ pub struct CheckInstallResult {
     pub device_name: Option<String>,
 }
 
-/// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
-#[tauri::command]
-fn get_install_root() -> String {
+fn resolve_install_root() -> String {
     #[cfg(target_os = "macos")]
     {
         "/Library/Locai".to_string()
@@ -97,6 +95,12 @@ fn get_install_root() -> String {
     {
         String::new()
     }
+}
+
+/// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
+#[tauri::command]
+fn get_install_root() -> String {
+    resolve_install_root()
 }
 
 /// OS the SA is running on, so the frontend can render platform-appropriate strings.
@@ -354,11 +358,16 @@ fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
                     }
                 }
             };
-            let access_token = body
-                .get("access_token")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            // Reject empty/missing access_token: storing Some("") would let
+            // require_token() hand out an empty bearer downstream.
+            let access_token = match body.get("access_token").and_then(|v| v.as_str()) {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => {
+                    return SignInPollResult::Error {
+                        message: "token response missing access_token".to_string(),
+                    }
+                }
+            };
             let refresh_token = body
                 .get("refresh_token")
                 .and_then(|v| v.as_str())
@@ -467,15 +476,21 @@ fn register_device(
 ) -> Result<RegisteredDevice, String> {
     let token = require_token(&state)?;
 
+    // Include the installed agent version so Control doesn't show "unknown"
+    // until the first lifecycle heartbeat lands post-restart.
+    let mut metadata = serde_json::json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "source": "setup_assistant",
+    });
+    if let Some(v) = installed_version(&PathBuf::from(resolve_install_root())) {
+        metadata["agent_version"] = serde_json::Value::String(v.version);
+    }
     let register_body = serde_json::json!({
         "registration_key": registration_key,
         "name": device_name,
         "device_type": "other",
-        "metadata": {
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "source": "setup_assistant",
-        },
+        "metadata": metadata,
     });
     let reg_resp = http_agent()
         .post(&format!("{CONTROL_API_URL}/devices/register-with-key"))

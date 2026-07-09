@@ -42,7 +42,6 @@
   --color-surface-tint-green-2: #F6FCF9; /* downloaded card                     */
   --color-surface-tint-green-3: #EAF9F1; /* recommended pill                    */
   --color-surface-tint-error: #FCECEA;   /* pill-down / error-block bg          */
-  --color-surface-tint-error-3: #E9E6DE; /* wheel track (neutral)               */
   --color-surface-dark-rail: #0A0A0A;
 
   /* ---- Borders ------------------------------------------------------------- */
@@ -206,9 +205,17 @@
 /* =============================================================================
    Dark mode — driven by `prefers-color-scheme: dark`. WebKit reads GTK/Qt
    theme settings on Linux and the system-appearance flag on macOS, so this
-   block is picked up automatically without JS. Every token defined in :root
-   above has a dark override here; anything that stays the same across modes
-   (typography scale, spacing, radii, motion) is deliberately omitted.
+   block is picked up automatically without JS.
+
+   Deliberately unchanged across modes:
+     * Typography scale, spacing, radii, motion.
+     * --color-status-* (live/online/configuring/conflict) — bright status
+       hues read on both light and dark backgrounds.
+     * --sys-* macOS Installer chrome — the wizard mimics the stock light
+       macOS Installer look; a dark variant would break the visual metaphor.
+     * --shadow-dock, --shadow-dock-icon, --shadow-toggle-knob,
+       --shadow-success-halo, --shadow-menubar-dot — mockup shadows tuned
+       to the wallpaper preview, not the paper surface.
 
    Design rules the overrides follow:
      * Paper flips near-black (#0F0F0E) — a hair off pure black so pure-black
@@ -252,7 +259,6 @@
     --color-surface-tint-green-2: #143923;
     --color-surface-tint-green-3: #164028;
     --color-surface-tint-error: #3A1E1B;
-    --color-surface-tint-error-3: #2A2925;
     --color-surface-dark-rail: #050505;
 
     --color-border-hairline: #262521;

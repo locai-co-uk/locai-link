@@ -478,9 +478,10 @@ class AgentRuntime:
                 daemon=True,
             )
             self._agent_workers[pipeline_id] = _AgentWorker(cancel_event, thread, command_id)
-
-        logger.info(f"Initiating deployment for command '{command_id}'...")
-        thread.start()
+            # Start under the lock so _cancel_deploy can't observe is_alive()==False
+            # between register and start and miss a pending CANCEL_DEPLOY.
+            logger.info(f"Initiating deployment for command '{command_id}'...")
+            thread.start()
 
     def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event) -> None:
         """Orchestrate download → publish → commit for a single DEPLOY_MODEL.

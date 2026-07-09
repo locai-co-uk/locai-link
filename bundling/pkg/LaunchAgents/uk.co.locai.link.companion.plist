@@ -26,10 +26,13 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Menubar apps are ephemeral UI — the user quitting should
-         stay quit. KeepAlive off matches that. -->
+    <!-- Restart on crash (non-zero exit), stay quit on user ⌘Q (exit 0).
+         Menu-bar app pattern: dead process → no tray icon → user is stuck. -->
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <key>StandardOutPath</key>
     <string>/Library/Locai/logs/companion.stdout.log</string>

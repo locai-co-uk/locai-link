@@ -42,7 +42,6 @@
   --color-surface-tint-green-2: #F6FCF9; /* downloaded card                     */
   --color-surface-tint-green-3: #EAF9F1; /* recommended pill                    */
   --color-surface-tint-error: #FCECEA;   /* pill-down / error-block bg          */
-  --color-surface-tint-error-3: #E9E6DE; /* wheel track (neutral)               */
   --color-surface-dark-rail: #0A0A0A;
 
   /* ---- Borders ------------------------------------------------------------- */
@@ -230,7 +229,7 @@
     --color-primary-pressed: #24D078;
     --color-error: #F26F60;
     --color-warning: #F0BE55;
-    --color-warning-text: #F0BE55;
+    --color-warning-text: #E5A63C;
 
     /* Text */
     --color-text-strong: #F5F5F3;
@@ -261,7 +260,6 @@
     --color-surface-tint-green-2: #143923;
     --color-surface-tint-green-3: #164028;
     --color-surface-tint-error: #3A1E1B;
-    --color-surface-tint-error-3: #2A2925;
     --color-surface-dark-rail: #050505;
 
     /* Borders — soft light-on-dark hairlines */

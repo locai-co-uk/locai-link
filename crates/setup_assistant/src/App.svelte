@@ -426,11 +426,17 @@
     } catch (e) {
       console.warn("wait_for_agent_ready timed out; proceeding anyway:", e);
     }
+    // Tick finish.done as each dispatch settles so the "N of M" counter
+    // reflects progress instead of jumping from 0 to N at the end.
     const results = await Promise.allSettled(
       selected.map((m) =>
         invoke<string>("deploy_model", {
           deviceId: registered.device_id,
           modelId: m.id,
+        }).finally(() => {
+          if (finish.kind === "deploying") {
+            finish = { ...finish, done: finish.done + 1 };
+          }
         })
       )
     );
@@ -677,8 +683,9 @@
           </p>
 
           {#if signIn.kind === "idle"}
-            <button class="btn btn--primary btn--wide" onclick={startSignIn}>
-              Sign in with Loc<span class="brand__accent">ai</span>
+            <button class="btn btn--primary btn--wide btn--with-logo" onclick={startSignIn}>
+              <span>Sign in with</span>
+              <img class="btn__logo" src={locaiLogo} alt="Locai" />
             </button>
           {:else if signIn.kind === "starting"}
             <div class="signin-block">
@@ -1269,6 +1276,19 @@
     align-self: flex-start;
     padding: 10px 22px;
     font-size: 14px;
+  }
+
+  /* Sign-in button: inline the same brand logo the sidebar uses, sized
+     to the button text baseline. */
+  .btn--with-logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn__logo {
+    height: 16px;
+    width: auto;
+    display: block;
   }
 
   /* --- Model catalog ------------------------------------------------------ */

@@ -86,6 +86,12 @@
   let deployments = $state<DeploymentProgress[]>([]);
 
   let prefs = $state<PrefsState | null>(null);
+  // Gate the Agent status pill until we've had at least one poll_status
+  // confirmation. get_prefs_state's /healthz probe occasionally returns
+  // Down on cold start (first WebView open + cold connection pool) even
+  // though the runtime is up; without this gate the pill flashed "Stopped"
+  // for ~one poll tick before self-correcting.
+  let hasPolled = $state(false);
   let loadError = $state<string | null>(null);
   let pending = $state<Set<string>>(new Set());
   let copyFlash = $state<boolean>(false);
@@ -131,6 +137,7 @@
       prefs.network = poll.network;
       models = poll.models;
       deployments = poll.deployments;
+      hasPolled = true;
     } catch {
       // Ignore polling errors — next tick tries again.
     }
@@ -370,10 +377,17 @@
       <div class="row">
         <span class="row__label">Status</span>
         <span class="row__value">
-          <span class="pill pill--{prefs.agent.status}">
-            <span class="dot"></span>
-            {prefs.agent.status === "up" ? "Running" : "Stopped"}
-          </span>
+          {#if !hasPolled}
+            <span class="pill pill--idle">
+              <span class="dot"></span>
+              Checking…
+            </span>
+          {:else}
+            <span class="pill pill--{prefs.agent.status}">
+              <span class="dot"></span>
+              {prefs.agent.status === "up" ? "Running" : "Stopped"}
+            </span>
+          {/if}
           {#if prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
             <span class="uptime">· {formatUptime(prefs.agent.uptime_seconds)}</span>
           {/if}
@@ -749,6 +763,7 @@
     border-radius: 50%;
     background: currentColor;
     display: inline-block;
+    flex-shrink: 0;
   }
   .uptime {
     color: var(--color-text-muted, #8A877F);

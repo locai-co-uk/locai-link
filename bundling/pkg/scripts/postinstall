@@ -59,12 +59,15 @@ chown root:wheel "$LAUNCHER"
 # sudo), otherwise fall back to the console user we detect for the
 # Setup Assistant handoff.
 INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
+# LaunchAgents write to $INSTALL_ROOT/logs/*.log — create it here so the
+# first launchctl kickstart doesn't fail on a fresh install.
+for d in versions state logs; do
+    mkdir -p "$INSTALL_ROOT/$d"
+done
 if [[ "$INSTALL_USER" != "root" ]]; then
     chown "$INSTALL_USER:staff" "$INSTALL_ROOT"
     for d in versions state logs; do
-        if [[ -e "$INSTALL_ROOT/$d" ]]; then
-            chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
-        fi
+        chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
     done
 fi
 log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
@@ -102,14 +105,20 @@ fi
 # signature, resource forks, and extended attributes that a plain
 # `cp -R` may drop. First remove any stale copy/symlink so a repeat
 # install lands cleanly.
+# lsregister lives outside PATH; used to force LaunchServices to pick up the
+# freshly-copied .app (Launchpad + `open -a` + Spotlight-via-LS all read this).
+# mdimport alone updates the Spotlight metadata store but not the LS database.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
 if [[ -d "$COMPANION_APP" ]]; then
     rm -rf "$COMPANION_SYMLINK"
     ditto "$COMPANION_APP" "$COMPANION_SYMLINK"
     log "companion copied: $COMPANION_APP -> $COMPANION_SYMLINK"
 
-    # Force Spotlight to index the freshly-copied .app now, otherwise a
-    # first-time user may not find it via ⌘-Space until the background
-    # mdworker scan catches up (can be minutes on some machines).
+    if [[ -x "$LSREGISTER" ]]; then
+        "$LSREGISTER" -f -R -trusted "$COMPANION_SYMLINK" 2>/dev/null || true
+        log "lsregister ran on $COMPANION_SYMLINK"
+    fi
     if command -v mdimport >/dev/null 2>&1; then
         mdimport "$COMPANION_SYMLINK" 2>/dev/null || true
         log "mdimport ran on $COMPANION_SYMLINK"
@@ -129,6 +138,10 @@ if [[ -d "$SETUP_ASSISTANT" ]]; then
     rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
     ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
     log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
+    if [[ -x "$LSREGISTER" ]]; then
+        "$LSREGISTER" -f -R -trusted "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
+        log "lsregister ran on $SETUP_ASSISTANT_IN_APPLICATIONS"
+    fi
     if command -v mdimport >/dev/null 2>&1; then
         mdimport "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
         log "mdimport ran on $SETUP_ASSISTANT_IN_APPLICATIONS"

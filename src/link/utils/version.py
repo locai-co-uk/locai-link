@@ -17,9 +17,10 @@ def resolve_agent_version() -> str | None:
 
     Resolution order:
         1. ``importlib.metadata`` (installed package).
-        2. ``pyproject.toml`` walk-up from this file (editable installs).
-        3. ``pyproject.toml`` walk-up from ``sys.argv[0]`` (frozen / script runs
-           where ``__file__`` points deep into site-packages).
+        2. ``manifest.json`` next to ``sys.executable`` (PyInstaller-frozen bundle).
+        3. ``pyproject.toml`` walk-up from this file (editable installs).
+        4. ``pyproject.toml`` walk-up from ``sys.argv[0]`` (script runs where
+           ``__file__`` points deep into site-packages).
 
     Cached on success only — an early ``None`` (e.g. before ``sys.argv`` is
     populated) doesn't pin the result; a later call can still recover.

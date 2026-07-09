@@ -51,7 +51,9 @@ const MENU_ID_QUIT: &str = "quit";
 /// Suffix after this prefix is the pipeline id.
 const MENU_ID_MODEL_PREFIX: &str = "model:";
 
-const STATUS_INITIAL: &str = "Locai Link — checking agent…";
+const STATUS_INITIAL: &str = "Locai Link · Checking…";
+const STATUS_UP: &str = "Locai Link · ONLINE";
+const STATUS_DOWN: &str = "Locai Link · OFFLINE";
 
 /// Malformed and Down collapse into `Down` — both mean "no usable data".
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -71,9 +73,12 @@ impl From<&HealthStatus> for TrayState {
 
 /// Mutated in place by the poll loop; the click handler reads `models` to
 /// pick start-vs-stop without an extra GET on the click path.
+/// `in_flight` blocks re-clicks on a pipeline while its Serve/Stop HTTP is
+/// outstanding — a rapid stop→start clobbered the runtime otherwise.
 struct MenuHandles {
     status_item: MenuItem<Wry>,
     models: Vec<ModelInfo>,
+    in_flight: std::collections::HashSet<String>,
 }
 
 type SharedHandles = Arc<Mutex<MenuHandles>>;
@@ -119,7 +124,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             thread::spawn(kickstart_runtime_if_installed);
 
-            let (menu, status_item) = build_tray_menu(app.handle(), &[], &[], STATUS_INITIAL)?;
+            let (menu, status_item) =
+                build_tray_menu(app.handle(), &[], &[], STATUS_INITIAL)?;
 
             let icon = Image::from_bytes(TRAY_ICON_UP)?;
             let tray = TrayIconBuilder::with_id("main")
@@ -134,6 +140,7 @@ pub fn run() {
             let handles: SharedHandles = Arc::new(Mutex::new(MenuHandles {
                 status_item,
                 models: Vec::new(),
+                in_flight: std::collections::HashSet::new(),
             }));
             app.manage(handles.clone());
             let app_handle = app.handle().clone();
@@ -153,9 +160,7 @@ pub fn run() {
 #[cfg(target_os = "macos")]
 fn kickstart_runtime_if_installed() {
     let uid = match std::process::Command::new("id").arg("-u").output() {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return,
     };
     let service = format!("gui/{uid}/uk.co.locai.link.agent");
@@ -194,13 +199,16 @@ fn spawn_ipc_listener(app: AppHandle) {
         }
         // Drain remaining headers to avoid RST-ing the client mid-write.
         let mut header = String::new();
-        while reader.read_line(&mut header).map(|n| n > 2).unwrap_or(false) {
+        while reader
+            .read_line(&mut header)
+            .map(|n| n > 2)
+            .unwrap_or(false)
+        {
             header.clear();
         }
 
-        let is_show =
-            request_line.starts_with("POST /preferences/show ")
-                || request_line.starts_with("POST /preferences/show?");
+        let is_show = request_line.starts_with("POST /preferences/show ")
+            || request_line.starts_with("POST /preferences/show?");
         let (status_line, do_show) = if is_show {
             ("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", true)
         } else {
@@ -248,10 +256,16 @@ fn build_tray_menu(
     let status = MenuItem::with_id(app, MENU_ID_STATUS, status_text, false, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
 
-    let control = MenuItem::with_id(app, MENU_ID_CONTROL, "Open Control", true, None::<&str>)?;
     let models_submenu = build_models_submenu(app, models, deployments)?;
 
     let sep2 = PredefinedMenuItem::separator(app)?;
+    let control = MenuItem::with_id(
+        app,
+        MENU_ID_CONTROL,
+        "Open Control Plane",
+        true,
+        None::<&str>,
+    )?;
     let preferences = MenuItem::with_id(
         app,
         MENU_ID_PREFERENCES,
@@ -263,7 +277,15 @@ fn build_tray_menu(
 
     let menu = Menu::with_items(
         app,
-        &[&status, &sep1, &control, &models_submenu, &sep2, &preferences, &quit],
+        &[
+            &status,
+            &sep1,
+            &models_submenu,
+            &sep2,
+            &control,
+            &preferences,
+            &quit,
+        ],
     )?;
     Ok((menu, status))
 }
@@ -275,15 +297,24 @@ fn build_models_submenu(
     models: &[ModelInfo],
     deployments: &[DeploymentProgress],
 ) -> tauri::Result<Submenu<Wry>> {
+    let serving_count = models.iter().filter(|m| m.is_serving).count();
+    // Right-aligned trailing text isn't possible in native menu items, so fold
+    // the serving summary into the parent label instead ("Models — 2 serving").
+    let submenu_label = if serving_count > 0 {
+        format!("Models - {serving_count} serving")
+    } else {
+        "Models".to_string()
+    };
+
     if models.is_empty() && deployments.is_empty() {
         let placeholder = MenuItem::with_id(
             app,
             MENU_ID_MODELS_PLACEHOLDER,
-            "(no models configured)",
+            "(no models serving)",
             false,
             None::<&str>,
         )?;
-        return Submenu::with_id_and_items(app, "models", "Models", true, &[&placeholder]);
+        return Submenu::with_id_and_items(app, "models", &submenu_label, true, &[&placeholder]);
     }
 
     // MenuItem and CheckMenuItem are distinct types; own them separately
@@ -301,6 +332,7 @@ fn build_models_submenu(
         })
         .collect::<tauri::Result<Vec<_>>>()?;
 
+    // Native checkmark = serving state.
     let items: Vec<CheckMenuItem<Wry>> = models
         .iter()
         .map(|m| {
@@ -315,13 +347,16 @@ fn build_models_submenu(
         })
         .collect::<tauri::Result<Vec<_>>>()?;
 
-    let mut refs: Vec<&dyn IsMenuItem<Wry>> =
-        deploy_items.iter().map(|i| i as &dyn IsMenuItem<Wry>).collect();
+    let mut refs: Vec<&dyn IsMenuItem<Wry>> = deploy_items
+        .iter()
+        .map(|i| i as &dyn IsMenuItem<Wry>)
+        .collect();
     refs.extend(items.iter().map(|i| i as &dyn IsMenuItem<Wry>));
-    Submenu::with_id_and_items(app, "models", "Models", true, &refs)
+    Submenu::with_id_and_items(app, "models", &submenu_label, true, &refs)
 }
 
-/// Label for a model row; port suffix disambiguates mixed-port llama-swap instances.
+/// Label for a model row; port suffix disambiguates mixed-port llama-swap
+/// instances. Serving state is shown via the leading icon on the IconMenuItem.
 fn model_label(m: &ModelInfo) -> String {
     match m.port {
         Some(port) => format!("{} · :{}", m.alias, port),
@@ -348,11 +383,20 @@ fn deployment_label(d: &DeploymentProgress) -> String {
 /// Digest of what the tray menu structure depends on. Progress is bucketed to
 /// 5% steps to match the runtime's reporter cadence; alias/port renames don't rebuild.
 fn menu_digest(models: &[ModelInfo], deployments: &[DeploymentProgress]) -> MenuDigest {
-    let mut m: Vec<(String, bool)> = models.iter().map(|m| (m.id.clone(), m.is_serving)).collect();
+    let mut m: Vec<(String, bool)> = models
+        .iter()
+        .map(|m| (m.id.clone(), m.is_serving))
+        .collect();
     m.sort();
     let mut d: Vec<(String, String, u32)> = deployments
         .iter()
-        .map(|dep| (dep.pipeline_id.clone(), dep.stage.clone(), (dep.progress_pct as u32) / 5))
+        .map(|dep| {
+            (
+                dep.pipeline_id.clone(),
+                dep.stage.clone(),
+                (dep.progress_pct as u32) / 5,
+            )
+        })
         .collect();
     d.sort();
     MenuDigest {
@@ -395,30 +439,52 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 /// Toggle a model's serving state. Runs the POST on a detached thread —
 /// the Tauri menu-event thread is UI-adjacent and blocking on HTTP freezes the menu.
 fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
-    let handles: tauri::State<'_, SharedHandles> = app.state();
-    let action = match handles.lock() {
-        Ok(guard) => guard.models.iter().find(|m| m.id == pipeline_id).map(|m| {
-            if m.is_serving {
-                ServingAction::Stop
-            } else {
-                ServingAction::Start
+    let handles_state: tauri::State<'_, SharedHandles> = app.state();
+    let shared = (*handles_state).clone();
+
+    // Lock once: read current state, claim the in-flight slot, flip is_serving
+    // optimistically so an immediate second click reads the new state.
+    let action = {
+        let mut guard = match shared.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("[companion] handles mutex poisoned: {e}");
+                return;
             }
-        }),
-        Err(e) => {
-            eprintln!("[companion] handles mutex poisoned: {e}");
+        };
+        if guard.in_flight.contains(&pipeline_id) {
+            // A prior click is still in flight; drop this one.
             return;
         }
-    };
-    let Some(action) = action else {
-        eprintln!("[companion] click on unknown pipeline: {pipeline_id}");
-        return;
+        let Some(model) = guard.models.iter_mut().find(|m| m.id == pipeline_id) else {
+            eprintln!("[companion] click on unknown pipeline: {pipeline_id}");
+            return;
+        };
+        let action = if model.is_serving {
+            ServingAction::Stop
+        } else {
+            ServingAction::Start
+        };
+        model.is_serving = !model.is_serving;
+        guard.in_flight.insert(pipeline_id.clone());
+        action
     };
 
     thread::spawn(move || {
-        if let Err(e) = toggle_serving(DEFAULT_MODEL_ACTION_BASE, &pipeline_id, action) {
+        let result = toggle_serving(DEFAULT_MODEL_ACTION_BASE, &pipeline_id, action);
+        if let Err(e) = &result {
             eprintln!("[companion] toggle_serving({pipeline_id}, {action:?}) failed: {e}");
         }
-        // No optimistic UI update — the next poll reconciles authoritatively.
+        // Release the slot. On failure, revert the optimistic flip so the next
+        // poll doesn't see a torn state; on success the poll reconciles anyway.
+        if let Ok(mut guard) = shared.lock() {
+            guard.in_flight.remove(&pipeline_id);
+            if result.is_err() {
+                if let Some(m) = guard.models.iter_mut().find(|m| m.id == pipeline_id) {
+                    m.is_serving = !m.is_serving;
+                }
+            }
+        }
     });
 }
 
@@ -427,6 +493,10 @@ fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
 fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>) {
     let mut current_tray = TrayState::Up;
     let mut current_digest = MenuDigest::default();
+    // Track the mounted header text so an Up↔Down transition (which doesn't
+    // touch the models digest) still forces a rebuild — IconMenuItem::set_text
+    // on Tauri 2.11 didn't reliably repaint the disabled header row.
+    let mut current_status_text = STATUS_INITIAL.to_string();
 
     loop {
         let health = agent_health(DEFAULT_HEALTH_URL);
@@ -448,6 +518,23 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
 
         let status_text = status_label(&health, &models);
 
+        // Tray tooltip mirrors serving state — Discord/Slack-style hover hint.
+        let tooltip = match (&health, &models) {
+            (HealthStatus::Up(_), ModelsStatus::Ok(list)) => {
+                let n = list.iter().filter(|m| m.is_serving).count();
+                match n {
+                    0 => "Locai Link".to_string(),
+                    1 => "Locai Link · Serving 1 model".to_string(),
+                    n => format!("Locai Link · Serving {n} models"),
+                }
+            }
+            (HealthStatus::Up(_), _) => "Locai Link".to_string(),
+            _ => "Locai Link · Offline".to_string(),
+        };
+        if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
+            eprintln!("[companion] tray.set_tooltip failed: {e}");
+        }
+
         // Treat transient /models Down/Malformed as "keep last-known empty"
         // rather than clearing — avoids flapping when /models is briefly out
         // but /healthz still works. TODO: dedicated "stale" state.
@@ -460,59 +547,36 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             HealthStatus::Down | HealthStatus::Malformed(_) => Vec::new(),
         };
         let new_digest = menu_digest(&new_models, &new_deployments);
+        let text_changed = status_text != current_status_text;
 
-        if new_digest != current_digest {
+        if new_digest != current_digest || text_changed {
             match build_tray_menu(&app, &new_models, &new_deployments, &status_text) {
                 Ok((new_menu, new_status_item)) => {
                     if let Err(e) = tray.set_menu(Some(new_menu)) {
                         eprintln!("[companion] tray.set_menu failed: {e}");
                     }
-                    // Repoint the status handle at the freshly-mounted header.
                     if let Ok(mut h) = handles.lock() {
                         h.status_item = new_status_item;
                         h.models = new_models.clone();
                     }
                     current_digest = new_digest;
+                    current_status_text = status_text.clone();
                 }
                 Err(e) => eprintln!("[companion] build_tray_menu failed: {e}"),
             }
-        } else {
-            // Steady state — update header text in place; aliases/ports
-            // may have shifted without flipping the digest.
-            if let Ok(mut h) = handles.lock() {
-                if let Err(e) = h.status_item.set_text(&status_text) {
-                    eprintln!("[companion] status_item.set_text failed: {e}");
-                }
-                h.models = new_models;
-            }
+        } else if let Ok(mut h) = handles.lock() {
+            h.models = new_models;
         }
 
         thread::sleep(POLL_INTERVAL);
     }
 }
 
-/// One-line summary for the status header. Serving state is derived from
-/// `/models[].is_serving` — `/healthz.currently_serving` misses multi-model
-/// llama-swap + inline START_MODEL configs.
-fn status_label(health: &HealthStatus, models: &ModelsStatus) -> String {
+/// Binary status header. Version + serving count live in Preferences and on
+/// the Models submenu label respectively — this row is a single "up or not" cue.
+fn status_label(health: &HealthStatus, _models: &ModelsStatus) -> String {
     match health {
-        HealthStatus::Up(h) => {
-            let state = match models {
-                ModelsStatus::Ok(list) => {
-                    let serving: Vec<&ModelInfo> = list.iter().filter(|m| m.is_serving).collect();
-                    match serving.len() {
-                        0 => "idle".to_string(),
-                        1 => format!("serving {}", serving[0].alias),
-                        n => format!("serving {n} models"),
-                    }
-                }
-                // /models unavailable → drop the suffix rather than
-                // misreporting as idle.
-                ModelsStatus::Down | ModelsStatus::Malformed(_) => return format!("Agent up · v{}", h.version),
-            };
-            format!("Agent up · v{} · {}", h.version, state)
-        }
-        HealthStatus::Down => "Agent down".to_string(),
-        HealthStatus::Malformed(_) => "Agent responded with malformed data".to_string(),
+        HealthStatus::Up(_) => STATUS_UP.to_string(),
+        HealthStatus::Down | HealthStatus::Malformed(_) => STATUS_DOWN.to_string(),
     }
 }
