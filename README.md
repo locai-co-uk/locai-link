@@ -1,67 +1,114 @@
-# Loc.ai:Link
-![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)
-![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)
+# Locai Link
 
-**The distributed edge runtime for the Loc.ai platform** <br>
-Loc.ai:Link is a lightweight, secure agent that turns any edge device—from a Raspberry Pi to an industrial GPU cluster—into a managed node within your Loc.ai fleet. It handles secure connectivity, model deployment, and local inference orchestration without relying on cloud dependency.
+**Self-hosted edge AI runtime for on-prem and private cloud deployments**
 
-## Quick Start
+[![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml) [![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE.md)
 
-One-line installer registers the device with Loc.ai Control and starts the agent. Plugins (`language_model`, `audio_transcriber`, `image_classifier`, `audio_classifier`) install on demand the first time a model that uses them is deployed — so a bare Link install is lightweight and useful even when no model is loaded (fleet monitoring, telemetry collection, OTA updates).
+Locai Link is the distributed edge runtime for the [Locai platform](https://locai.co.uk). It is a lightweight agent that turns any device, from a Raspberry Pi to an industrial GPU cluster, into a managed node in your AI fleet. Link handles secure connectivity, model deployment and local inference orchestration on your own hardware, with no cloud dependency. It runs LLMs, speech-to-text, image classification and audio classification on one runtime, air-gapped or connected.
+
+Full documentation is at [docs.locai.co.uk](https://docs.locai.co.uk).
+
+## Quick start
+
+The fastest way to get Link running is to download a pre-built binary from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest). No Python, git, or compilers required on the device. The macOS bundle is signed + notarised so it runs without Gatekeeper warnings.
+
+**macOS (Apple Silicon):**
+
+```
+curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-macos-arm64-$TAG.tar.gz | tar -xz
+./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+```
+
+**Linux (x86_64):**
+
+```
+curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-linux-x86_64-$TAG.tar.gz | tar -xz
+./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+```
+
+**Windows (PowerShell):**
+
+```
+Invoke-WebRequest https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-windows-x86_64-$TAG.zip -OutFile locai-link.zip
+Expand-Archive locai-link.zip
+.\locai-link\locai-link.exe run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+```
+
+Replace `$TAG` with the version you want (e.g. `v1.0.12`); the URLs on the Releases page list the exact filenames. Each release also publishes a `.sha256` sidecar so you can verify the download (`sha256sum -c locai-link-…sha256`).
+
+If your Locai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding flow](#onboarding-flow) for the full picture.
+
+## How Locai Link compares
+
+**Ollama** is a single-machine local LLM runner. Locai Link runs LLMs locally too (via llama.cpp), but adds fleet management: register hundreds of devices to one control plane, deploy models remotely, and run speech-to-text, image classification and audio classification alongside language models in composable pipelines. We published a [CUDA benchmark comparing Link and Ollama on Gemma](https://locai.co.uk/model-benchmarks/locai-link-vs-ollama) if you want raw numbers.
+
+**Microsoft Foundry Local** requires NVIDIA-certified OEM hardware and manages devices through Azure Arc, a US-controlled control plane. Locai Link runs on hardware you already own, loads any GGUF, ONNX or TFLite model, and the control plane ([Locai Control](https://locai.co.uk)) can be deployed on UK sovereign infrastructure.
+
+If you need AI inference inside a regulated or air-gapped environment where public cloud AI is not an option, that is the use case Link was built for.
+
+## Build from source
+
+The pre-built binaries above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
+
+One-line installer that clones the repo, sets up Python via `uv`, and runs the agent in a single command:
 
 **Linux / macOS:**
-```bash
+
+```
 curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
   --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
 **Windows (PowerShell):**
-```powershell
+
+```
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) `
   -DeviceName "my-edge-device-01" -Email "you@example.com" -RegistrationKey "YOUR_REG_KEY"
 ```
 
 **Windows (CMD):**
-```cmd
+
+```
 curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
 > `--ssl-no-revoke` is needed because Windows curl uses Schannel, which fails the connection with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` when it can't reach the certificate's revocation endpoint — common on corporate networks and strict firewalls. The flag skips the revocation lookup only; server certificate validation is unaffected.
 
-> **Tip — pin a branch.** Append `--branch <name>` (sh / cmd) or `-Branch <name>` (PowerShell) to install from a non-default branch. Handy for trying a feature branch, reproducing a bug from a PR, or pointing at a partner-specific fork.
+The installer prompts interactively for anything you omit, including your platform password.
 
-The installer prompts interactively for anything you omit, including your platform password. If your Loc.ai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding Flow](#onboarding-flow) for the full picture.
+### Plugin build prerequisites (source builds only)
 
-### Build prerequisites for native plugins
+Source builds compile native plugin binaries from upstream on first use (notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp — upstream does not publish prebuilts for Linux/macOS). The pre-built bundles ship these binaries pre-compiled, so this section only applies to the source-install path above.
 
-A few plugins compile native components on first use rather than shipping prebuilt binaries — most notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp because the upstream project doesn't publish Linux/macOS prebuilts. The on-demand build needs `git` and `cmake` on the host:
+Install `git` and `cmake` on the device before deploying a model that uses these plugins:
 
-| Platform | Command |
-|---|---|
-| macOS | `brew install cmake` (git ships with Xcode CLT) |
-| Debian/Ubuntu | `sudo apt install cmake git build-essential` |
-| Fedora/RHEL | `sudo dnf install cmake git gcc-c++` |
-| Arch | `sudo pacman -S cmake git base-devel` |
-| Windows | No action — prebuilt binaries are downloaded. |
-
-If you only intend to run the agent in monitoring / OTA-update mode (no model deployments), these aren't required. They install once and serve every model deployment thereafter.
+| Platform      | Command                                         |
+| ------------- | ----------------------------------------------- |
+| macOS         | `brew install cmake` (git ships with Xcode CLT) |
+| Debian/Ubuntu | `sudo apt install cmake git build-essential`    |
+| Fedora/RHEL   | `sudo dnf install cmake git gcc-c++`            |
+| Arch          | `sudo pacman -S cmake git base-devel`           |
+| Windows       | No action — prebuilt binaries are downloaded.   |
 
 ## Hacking on the codebase
-This guide covers setting up a device to run the Loc.ai agent from source (i.e. this repository).
+
+This guide covers setting up a device to run the Locai agent from source (i.e. this repository).
 
 ### Installation
+
 Clone the repository and install dependencies. `main.py setup` will install `uv` itself if needed.
 
-```bash
+```
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
 uv run main.py setup          # add --dev for testing/docs tools
 ```
 
-### Running the Agent
-Register a new device with a Registration Key from the Loc.ai dashboard:
+### Running the agent
 
-```bash
+Register a new device with a Registration Key from the Locai dashboard:
+
+```
 uv run main.py run \
   --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
@@ -72,42 +119,43 @@ If your account has no password (e.g. Google sign-up), the CLI seamlessly switch
 
 On subsequent runs, resume the saved session:
 
-```bash
+```
 uv run main.py run            # or --prod to install as a systemd/launchd/Windows service
 ```
 
-### CLI Reference
+### CLI reference
 
-| Command | Purpose |
-|---------|---------|
-| `setup [--dev]` | Install Python dependencies. |
-| `run [options]` | Resume an existing session, onboard a new device, or load a config. |
-| `install [options]` | Full one-liner flow: clone repo → setup → register → run. |
-| `stop` | Stop all running services (`locai-link`, `zenohd`). |
-| `reset [--hard]` | Clean up venv, caches, and (with `--hard`) session files. |
-| `install-plugin <name>` | Install a plugin by name. |
+| Command                 | Purpose                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| `setup [--dev]`         | Install Python dependencies.                                        |
+| `run [options]`         | Resume an existing session, onboard a new device, or load a config. |
+| `install [options]`     | Full one-liner flow: clone repo → setup → register → run.           |
+| `stop`                  | Stop all running services (`locai-link`, `zenohd`).                 |
+| `reset [--hard]`        | Clean up venv, caches, and (with `--hard`) session files.           |
+| `install-plugin <name>` | Install a plugin by name.                                           |
 
-### API Reference
+### API reference
+
 API docs are generated from source docstrings via `mkdocs` + `mkdocstrings` (part of the `--dev` extras):
 
-```bash
+```
 uv run mkdocs serve           # live-reload server at http://127.0.0.1:8000
 uv run mkdocs build           # static site in ./site/
 ```
 
-Narrative pages live under `docs/`; `docs/reference/` auto-populates from `src/link/` docstrings.
+Narrative pages live under `docs/`; `docs/reference/` auto-populates from `src/link/` docstrings. The published documentation is at [docs.locai.co.uk](https://docs.locai.co.uk).
 
-### Directory Structure
+### Directory structure
 
 ```
-src/link/    Application core — app/, components/, infra/, adapters/, config/, utils/
+src/link/     Application core — app/, components/, infra/, adapters/, config/, utils/
 plugins/     Extensions (language_model, audio_transcriber, image_classifier, audio_classifier)
 configs/     Runtime config and session state
 tests/       Unit tests (mocked, fast)
-docs/        mkdocs source (see API Reference above)
+docs/        mkdocs source (see API reference above)
 ```
 
-See the API Reference for per-module docs.
+See the API reference for per-module docs.
 
 ## Architecture
 
@@ -115,8 +163,10 @@ A modular, pipeline-based runtime. The **control plane** (lifecycle, configurati
 
 ```mermaid
 flowchart TB
+    %% --- External Entities (Top) ---
     User([User / CLI])
 
+    %% --- The Edge Device (Middle) ---
     subgraph Device["Edge Device"]
         direction TB
 
@@ -154,29 +204,25 @@ flowchart TB
         end
     end
 
-    Cloud([Loc.ai Control Plane])
+    %% --- External Entities (Bottom) ---
+    Cloud([Locai Control Plane])
 
-    %% Vertical chain (subgraph-level edges keep the layout narrow)
+    %% --- Flows (vertical chain) ---
     User --> Entry
     Entry --> App
     Entry -.-> Infra
     App --> Exec
-
-    %% Internal relationships — small plain lines that give each
-    %% node at least one edge so no node drops off the render.
-    Runtime --- State
-    Runtime --- Onboard
-    Pipe --> Source
-    Source --> Sink
     Source -.->|Load active only| Plugins
 
-    %% Upstream flows to the control plane
+    %% Two distinct upstream paths to the control plane:
+    %%  • Pipeline sinks: telemetry + inference results (data plane)
+    %%  • LinkReporter: logs, status, commands, model state, deployment progress (control plane reporting)
     Sink -->|Telemetry / Results| Cloud
     Runtime -->|Logs / Status / Reports| Cloud
     Onboard -->|Register / Activate| Cloud
     Updater -->|Manifest / Payload| Cloud
 
-    %% Optionality styling: dashed borders signal "any subset"
+    %% --- Optionality styling: dashed borders signal "any subset" ---
     style LM stroke-dasharray:5 5
     style AT stroke-dasharray:5 5
     style IC stroke-dasharray:5 5
@@ -184,10 +230,6 @@ flowchart TB
     style More stroke-dasharray:5 5,fill:none
 
     %% --- Force vertical stacking inside each layer + pin Cloud below Device ---
-    %% Intra-subgraph chains keep nodes in a vertical column;
-    %% `Runtime --- State` / `Runtime --- Onboard` above give those
-    %% two nodes a real edge each so they can't drop off GitHub's
-    %% renderer even if these invisible chains glitch.
     Runtime ~~~ State
     State ~~~ Onboard
     Zenoh ~~~ Service
@@ -205,7 +247,7 @@ flowchart TB
 
 > **Plugins are optional.** Each plugin under `plugins/` is a standalone installable package registering pipeline components via the `locai.plugins` entry point. The runtime only loads plugins referenced by the active config. A device deployment can run with zero plugins (telemetry-only), one (e.g. `language_model`), or any combination.
 
-### Over-The-Air Updates
+### Over-the-air updates
 
 When the control plane sends an `UPDATE_AGENT` command, the agent:
 
@@ -217,7 +259,7 @@ When the control plane sends an `UPDATE_AGENT` command, the agent:
 
 No separate supervisor is needed. The same `main.py run` command works for both development and headless service deployment.
 
-### Onboarding Flow
+### Onboarding flow
 
 On startup without a session, the agent resolves identity in this order:
 
@@ -240,16 +282,16 @@ Once authenticated, the registration key is exchanged for a device ID and API ke
 
 Plugins are standalone installable packages that register into the runtime via the `locai.plugins` entry point, each providing pipeline components (sources, sinks, or transformers).
 
-| Plugin | Role | Binary | Pinned |
-|--------|------|--------|--------|
-| `language_model` | Local LLM inference | `llama-server` | llama.cpp `b8808` |
-| `audio_transcriber` | Speech-to-text | `whisper-server` | whisper.cpp `v1.8.4` |
-| `image_classifier` | Vision models | TFLite runtime | — |
-| `audio_classifier` | Audio tagging | TFLite runtime | — |
+| Plugin              | Role                | Binary           | Pinned               |
+| ------------------- | ------------------- | ---------------- | -------------------- |
+| `language_model`    | Local LLM inference | `llama-server`   | llama.cpp `b8808`    |
+| `audio_transcriber` | Speech-to-text      | `whisper-server` | whisper.cpp `v1.8.4` |
+| `image_classifier`  | Vision models       | TFLite runtime   | —                    |
+| `audio_classifier`  | Audio tagging       | TFLite runtime   | —                    |
 
 Each plugin has its own `install.py` that fetches prebuilt binaries or builds from source (with CUDA toolkit detection on Linux).
 
-```bash
+```
 uv run main.py install-plugin language_model        # install a plugin by name
 
 # Or manually:
@@ -259,7 +301,7 @@ uv run python plugins/language_model/install.py
 
 ## Development
 
-```bash
+```
 uv run pytest                               # unit tests — mocked, fast
 uv run pytest plugins/<name>/ -m ""         # plugin integration tests (real binaries + model downloads)
 
@@ -272,27 +314,35 @@ uv run main.py reset --hard                 # also remove session files in confi
 
 The `ci` pytest marker gates tests needing external binaries or network — skipped locally, enabled in CI.
 
-## ⚠️ Data Privacy & Telemetry Notice
-Loc.ai:Link is designed on a "Zero Data Egress" principle.
-- **User Content:** No inference data, images, video feeds, or model inputs/outputs are ever transmitted to Loc.ai servers without your explicit configuration. Your data stays on your device.
-- **Operational Metadata:** To function, this software transmits minimal heartbeat data to the Loc.ai:Control plane. This includes:
-    - Device ID & IP Address (for connectivity)
-    - Loc.ai:Link Version
-    - System Health Status (CPU/RAM usage, Uptime)
+## Data privacy and telemetry
 
-By installing and using this software, you agree to the transmission of this Operational Metadata for the purpose of device health monitoring and fleet management.
+Locai Link is designed on a "zero data egress" principle.
 
-## 📄 Licensing
-Loc.ai:Link is licensed under the Business Source License 1.1 (BSL) see **licence.md** for details.<br>
+- **User content:** No inference data, images, video feeds, or model inputs/outputs are ever transmitted to Locai servers without your explicit configuration. Your data stays on your device.
+- **Operational metadata:** To function, this software transmits minimal heartbeat data to the Locai Control plane. This includes:
+  * Device ID & IP address (for connectivity)
+  * Locai Link version
+  * System health status (CPU/RAM usage, uptime)
+
+By installing and using this software, you agree to the transmission of this operational metadata for the purpose of device health monitoring and fleet management.
+
+## Licensing
+
+Locai Link is licensed under the Business Source License 1.1 (BUSL). See [LICENSE.md](LICENSE.md) for details.
+
 What this means for you:
-- ✅ Free to use: You can download, modify, and run this on as many devices as you like.
-- ✅ Free to distribute: You can include it in hardware products you ship to customers.
-- ✅ Source Available: The code is open for inspection and contribution.
-- 🚫 No Managed Services: You cannot take this code and sell a "Hosted Loc.ai Service" that competes with us.
 
-On January 17, 2030, this restriction lifts, and the code automatically becomes Apache 2.0.
-For full legal details, see LICENSE.md.
+- Free to use: you can download, modify, and run this on as many devices as you like.
+- Free to distribute: you can include it in hardware products you ship to customers.
+- Source available: the code is open for inspection and contribution.
+- No managed services: you cannot take this code and sell a hosted Locai service that competes with us.
 
-## 🤝 Contributing
-We welcome community contributions! Whether it's a bug fix, a new feature, or a documentation improvement.<br>
-Please read **CONTRIBUTING.md** for details on our code of conduct and the Contributor License Agreement (CLA) process.
+On January 17, 2030, this restriction lifts and the code automatically becomes Apache 2.0.
+
+## Contributing
+
+We welcome community contributions, whether it's a bug fix, a new feature, or a documentation improvement. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the Contributor License Agreement (CLA) process.
+
+## About Locai
+
+[Locai](https://locai.co.uk) builds sovereign AI infrastructure for organisations that can't use public cloud AI: financial services, healthcare, defence, national infrastructure and legal. Locai Link is the edge runtime; Locai Control is the management plane. Contact us at hello@locai.co.uk.
