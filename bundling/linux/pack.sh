@@ -36,12 +36,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUTPUT=""
+RELEASE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --output|-o)
             OUTPUT="$2"
             shift 2
+            ;;
+        --release)
+            # Strip the "-DEV" suffix from the asset name — used by CI so
+            # release-labelled artefacts don't carry the DEV tag.
+            RELEASE=1
+            shift
             ;;
         *)
             echo "unknown arg: $1" >&2
@@ -86,9 +93,13 @@ print(m["asset_name"], "v" + m["version"])
 
 [[ -n "$ASSET_STEM" && -n "$VERSION" ]] || err "manifest.json missing asset_name/version fields"
 
-# Include -DEV suffix when packing outside CI so we don't ever ship a
-# locally-built artefact with a canonical release name.
-NAME="${ASSET_STEM}-linux-x86_64-${VERSION}-DEV"
+# Local packs get a -DEV suffix so a hand-built tarball can't be mistaken
+# for the canonical CI release output. --release drops the suffix.
+if [[ $RELEASE -eq 1 ]]; then
+    NAME="${ASSET_STEM}-linux-x86_64-${VERSION}"
+else
+    NAME="${ASSET_STEM}-linux-x86_64-${VERSION}-DEV"
+fi
 OUTPUT="${OUTPUT:-$REPO_ROOT/dist/${NAME}.tar.gz}"
 
 log "asset name:  $NAME"

@@ -219,8 +219,8 @@ jobs:
           echo "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
           echo "APPLE_NOTARY_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
 
-      - name: Set up Node (macOS, for Tauri app builds)
-        if: runner.os == 'macOS'
+      - name: Set up Node (for Tauri app builds)
+        if: runner.os == 'macOS' || runner.os == 'Linux'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -229,6 +229,38 @@ jobs:
           cache-dependency-path: |
             crates/setup_assistant/package-lock.json
             crates/companion/package-lock.json
+
+      - name: Install Tauri Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Build Setup Assistant binary (Linux)
+        # --no-bundle: skip .deb/.rpm/AppImage — pack.sh ships the raw
+        # binary alongside the runtime bundle in the tarball layout.
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: crates/setup_assistant
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --no-bundle
+
+      - name: Build companion binary (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: crates/companion
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --no-bundle
 
       - name: Build Setup Assistant .app (macOS)
         # `tauri build` invokes the frontend build (npm run build)
@@ -445,20 +477,39 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
           rm -f "$RUNNER_TEMP/notary-key.p8" || true
 
-      - name: Package bundle
+      - name: Package bundle (Linux — via pack.sh)
+        # Ships the full pack.sh layout: frozen runtime + Tauri binaries +
+        # boot.json + systemd units + .desktop + icons + install/uninstall.
+        # The macOS leg publishes its .pkg + .pkg.sha256 upstream in the
+        # build+notarise step; Windows uses the "Package bundle (Windows)"
+        # step below to zip the frozen runtime.
+        if: runner.os == 'Linux'
         shell: bash
         env:
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          bash bundling/linux/pack.sh --release --output "release-assets/${ASSET}"
+          python - <<'EOF' > "release-assets/${ASSET}.sha256"
+          import hashlib, os, pathlib
+          name = os.environ["ASSET"]
+          p = pathlib.Path("release-assets") / name
+          digest = hashlib.sha256(p.read_bytes()).hexdigest()
+          print(f"{digest}  {name}")
+          EOF
+          ls -lah release-assets/
+
+      - name: Package bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
           ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
           cd dist
-          if [ "${ARCHIVE_EXT}" = "zip" ]; then
-            7z a -tzip -mx=9 "../release-assets/${ASSET}" locai-link
-          else
-            tar -czf "../release-assets/${ASSET}" locai-link
-          fi
+          7z a -tzip -mx=9 "../release-assets/${ASSET}" locai-link
           cd ..
           python - <<'EOF' > "release-assets/${ASSET}.sha256"
           import hashlib, os, pathlib

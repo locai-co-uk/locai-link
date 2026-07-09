@@ -29,6 +29,7 @@
 #     Locai Setup Assistant.app + /usr/local/bin/locai symlink
 #   • Per-user Tauri data: caches, WebKit storage, HTTPStorages,
 #     Preferences plists, Saved Application State
+#   • Pinned Dock tiles (best-effort — PlistBuddy on com.apple.dock.plist)
 #   • pkgutil receipt
 #
 # The device stays registered in Control after uninstall — operators
@@ -149,7 +150,33 @@ if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
     log "wiped per-user Tauri caches for $CONSOLE_USER"
 fi
 
-# --- 6. Forget the pkg receipt --------------------------------------
+# --- 6. Remove pinned Dock entries ----------------------------------
+# Users who dragged Locai Link / Setup Assistant to the Dock leave a
+# ghost tile after the .app is deleted. Iterate persistent-apps in
+# reverse order (deletions don't shift lower indices), then reload the
+# Dock. Best-effort — PlistBuddy edits directly bypass cfprefsd, so a
+# `killall cfprefsd` follows to drop the cached values.
+if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
+    DOCK_PLIST="/Users/$CONSOLE_USER/Library/Preferences/com.apple.dock.plist"
+    PB="/usr/libexec/PlistBuddy"
+    if [[ -f "$DOCK_PLIST" && -x "$PB" ]]; then
+        count=$(sudo -u "$CONSOLE_USER" "$PB" -c "Print :persistent-apps" "$DOCK_PLIST" 2>/dev/null | grep -c "^    Dict {")
+        removed=0
+        for ((i = count - 1; i >= 0; i--)); do
+            url=$(sudo -u "$CONSOLE_USER" "$PB" -c "Print :persistent-apps:$i:tile-data:file-data:_CFURLString" "$DOCK_PLIST" 2>/dev/null)
+            if [[ "$url" == *"Locai%20Link.app"* || "$url" == *"Locai%20Setup%20Assistant.app"* || "$url" == *"Locai Link.app"* || "$url" == *"Locai Setup Assistant.app"* ]]; then
+                sudo -u "$CONSOLE_USER" "$PB" -c "Delete :persistent-apps:$i" "$DOCK_PLIST" 2>/dev/null && removed=$((removed + 1))
+            fi
+        done
+        if (( removed > 0 )); then
+            sudo -u "$CONSOLE_USER" killall cfprefsd 2>/dev/null || true
+            sudo -u "$CONSOLE_USER" killall Dock     2>/dev/null || true
+            log "removed $removed pinned Dock entries and reloaded Dock"
+        fi
+    fi
+fi
+
+# --- 7. Forget the pkg receipt --------------------------------------
 # So `pkgutil --pkgs` no longer lists us and a future reinstall doesn't
 # see stale ownership records.
 pkgutil --forget "$PKG_RECEIPT" 2>/dev/null || true

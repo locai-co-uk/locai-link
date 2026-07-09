@@ -104,24 +104,23 @@ pub struct StatusPoll {
 
 // --- Commands ----------------------------------------------------------------
 
-// probe_runtime / probe_runtime_full / list_models are blocking HTTP calls.
-// Run them on the blocking pool so the WebView thread isn't stalled during
-// the poll (visible as tray/UI freezes on slow /healthz responses).
+// get_prefs_state does file-only reads — no HTTP. Dynamic fields (agent status,
+// uptime, network, models) come from poll_status right after mount. Kept on
+// spawn_blocking anyway because read_session_config_device/read_run_at_login
+// hit the disk and shouldn't stall the WebView thread.
 #[tauri::command]
 pub async fn get_prefs_state() -> PrefsState {
     tauri::async_runtime::spawn_blocking(|| {
-        let (agent_status, uptime, version, transport) = probe_runtime();
         let device = read_session_config_device();
-        let effective_version = version.clone().or_else(resolve_current_version);
         PrefsState {
             device,
             agent: AgentInfo {
-                status: agent_status,
-                uptime_seconds: uptime,
-                version: effective_version,
+                status: AgentStatus::Down,
+                uptime_seconds: None,
+                version: resolve_current_version(),
                 run_at_login: read_run_at_login(),
             },
-            network: transport,
+            network: None,
             advanced: AdvancedInfo {
                 log_file: runtime_log_file(),
                 install_root: install_root(),
@@ -304,12 +303,6 @@ pub fn open_control_device(app: AppHandle, device_id: Option<String>) -> Result<
 
 
 // --- Helpers -----------------------------------------------------------------
-
-/// Probe /healthz. Non-Up responses collapse to `(Down, None, None, None)`.
-fn probe_runtime() -> (AgentStatus, Option<u64>, Option<String>, Option<TransportHealth>) {
-    let (s, u, v, n, _d) = probe_runtime_full();
-    (s, u, v, n)
-}
 
 /// Full /healthz probe including in-flight deployments; used by `poll_status`.
 fn probe_runtime_full() -> (

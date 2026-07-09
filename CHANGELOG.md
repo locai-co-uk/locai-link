@@ -2,9 +2,174 @@
 
 ## [Unreleased]
 
-Companion menu-bar app groundwork — swaps both Tauri frontends off
-SvelteKit onto bare Svelte + Vite so future GUI work builds on the
-smallest possible frontend footprint.
+First end-to-end GUI install path for macOS + Linux: a `.pkg` (macOS)
+or tarball (Linux) drops the frozen runtime, LaunchAgents / systemd
+units, and two Tauri apps — a first-run **Setup Assistant** that signs
+in, registers with Control, and deploys the models you pick, and a
+menu-bar **companion** that runs after Finish showing agent health, the
+deployed-models list with live download progress, and a Preferences
+window. The scaffolding introduced in 1.0.17 (Cargo workspace, Tauri
+crates, `/healthz`) is now wired end-to-end.
+
+### Added — Setup Assistant (`crates/setup_assistant/`)
+
+- Full onboarding wizard: splash detects an existing install and
+  offers Continue / Re-register / Uninstall; new-install path walks
+  through sign-in (OAuth device-code flow), device naming, model
+  selection, and Finish. Runs unprivileged as the console user after
+  the .pkg postinstall hands off with `sudo -u`.
+- Model catalogue fetch from `GET /models/list_without_layers_info`
+  (Control) filters to the signed-in user's models. Selected models
+  are pre-registered via `mark_deployment_pending` so the companion's
+  Models panel shows every row at 0 % from t=0 instead of one-at-a-time
+  as the runtime processes deploys serially.
+- Registration payload includes the installed `agent_version` (read
+  from the installed manifest via `installed_version`), so Control no
+  longer shows a device as "Version unknown" between register and the
+  first lifecycle heartbeat.
+- Finish step calls `wait_for_agent_ready` (polls `/healthz` for
+  `transport.connected: true`, 15 s deadline + 400 ms settle) before
+  dispatching Control `deploy_model` calls — otherwise the first
+  DEPLOY_MODEL raced the agent's Zenoh subscriber setup and was
+  silently dropped.
+- Rejects empty / missing `access_token` in the OAuth poll response
+  (was previously stored as `Some("")`, letting `require_token` hand
+  out an empty bearer downstream).
+- Design system: tokens split into `src/lib/tokens/tokens.{json,css}`;
+  dark mode wired via `prefers-color-scheme` with per-token overrides;
+  sign-in button uses the shared brand logo asset.
+
+### Added — Menu-bar companion (`crates/companion/`)
+
+- Tray icon polls `/healthz` + `/models` every 2 s. Menu structure:
+  status header, Models submenu (in-flight downloads with % + deployed
+  models as toggleable CheckMenuItems), separator, Open Control Plane,
+  Preferences…, Quit. Dynamic tray tooltip mirrors serving state
+  ("Locai Link · Serving N models" / "Locai Link" / "Locai Link · Offline").
+- Preferences window (Svelte + `$state`): Device panel, Agent panel
+  with Running/Stopped pill + uptime + version, Network panel with
+  transport status, per-model rows with download progress wheel +
+  Cancel button, Advanced (log file reveal + install root). Status pill
+  gates on the first confirmed poll so a slow first `/healthz` doesn't
+  flash "Stopped" on window open.
+- Cancel-deploy plumbed end-to-end: Preferences Cancel button →
+  Tauri command → shared crate helper `cancel_deployment` → runtime
+  `POST /models/{pipeline_id}/cancel-deploy` → sets a `threading.Event`
+  and closes the streaming response so `iter_content` unblocks
+  immediately.
+- Model-toggle in-flight guard: clicking a serve/stop row twice in
+  quick succession no longer sends duplicate/conflicting requests —
+  a `HashSet<pipeline_id>` blocks re-clicks until the HTTP call
+  returns, and the optimistic local flip means the next click reads
+  the new state.
+
+### Added — Runtime deploy orchestration
+
+- `DEPLOY_MODEL` now runs on a per-pipeline worker thread rather than
+  blocking the command dispatcher, so parallel model deploys are
+  supported. `CANCEL_DEPLOY` command signals the worker's cancel event
+  and closes the in-flight streaming response.
+- Health server extensions: `POST /models/{pipeline_id}/{serve,stop-serving,cancel-deploy}`
+  action endpoints; `/healthz` now carries `deployments[]` (in-flight
+  progress) alongside `models[]` and `transport{}`.
+- Truncated-download guard: after the chunk loop, if `total > 0 &&
+  done != total` the partial is deleted and the deploy is reported as
+  failed rather than atomically publishing a short file.
+- Worker-level `except` block on `_deploy_worker` catches
+  mkdir / rename / commit failures so terminal status is always
+  emitted (was previously silent on late failures).
+- Deploy-lock race fix: `thread.start()` now runs inside the same
+  `with self.lock` block that registers the worker, so a
+  `CANCEL_DEPLOY` arriving between register and start can no longer
+  observe `thread.is_alive() == False` and short-circuit.
+
+### Added — macOS .pkg installer (`bundling/pkg/`)
+
+- `postinstall`: creates `versions/`, `state/`, `logs/` under
+  `/Library/Locai/`, chowns the runtime-writeable subtrees to the
+  invoking user, installs a `/usr/local/bin/locai` CLI symlink,
+  `ditto`s both `.app` bundles into `/Applications`, runs
+  `lsregister -f` + `mdimport` so LaunchServices + Spotlight index them
+  immediately, and hands off to the Setup Assistant as the console
+  user.
+- `uninstall.sh` (run as root; SA "Uninstall" button uses osascript
+  admin prompt; also runnable via `sudo /Library/Locai/uninstall.sh`):
+  bootstraps out both LaunchAgents, `pkill`s stragglers, `lsregister -u`
+  on both `.app`s, `rm -rf` on `/Library/Locai/`, `/Applications/*.app`,
+  `/usr/local/bin/locai`, wipes per-user Tauri caches under
+  `~/Library/{Caches,WebKit,HTTPStorages,Preferences,Saved
+  Application State,Application Support}/uk.co.locai.link.{companion,setup}/`,
+  removes pinned Dock tiles from `com.apple.dock.plist` (best-effort),
+  and forgets the pkg receipt.
+- Guards against silent no-ops: hard `$EUID != 0` check on uninstall
+  with an actionable message; `sed`-based version stamp of
+  `Distribution.xml` verified with `grep -q` so a placeholder drift
+  fails the build rather than shipping a `.pkg` labelled "0.0.0".
+- LaunchAgent `KeepAlive` set to `{ SuccessfulExit = false }`: crash
+  → launchd restarts; user ⌘Q → stays quit.
+
+### Added — Linux tarball installer (`bundling/linux/`)
+
+- `install.sh`: unpacks the bundle into `${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}`,
+  installs `systemd --user` unit files, drops `.desktop` entries under
+  `$HOME/.local/share/applications/` (with `@HOME@` sentinel
+  substitution so KDE + GNOME both resolve `Exec=`), copies hicolor
+  icons at 32/128 px, and starts the agent + companion via `systemctl
+  --user`.
+- `uninstall.sh`: reverse — stop units, remove `.desktop` entries and
+  hicolor icons, `rm -rf` the install root.
+- `pack.sh`: local packing helper that assembles the release tarball
+  from an already-frozen runtime layout.
+
+### Added — Shared Rust crate (`crates/shared/`)
+
+- `agent_health(url)` / `list_models(url)` / `toggle_serving(base, id, action)`
+  / `cancel_deployment(base, id)` — thin blocking-HTTP helpers over
+  the loopback health API, so SA + companion don't duplicate ureq
+  wiring.
+- `installed_version(&install_root)` reads `current -> versions/<v>/manifest.json`
+  (symlink or text pointer) and returns the resolved path + version.
+- `read_boot_json` with strict field-type validation on `boot.json`.
+- `autostart` module (macOS + Linux) exposing user-scope enable /
+  disable helpers via `launchctl` and `systemctl --user`.
+- `DeploymentProgress` + `ModelInfo` + `TransportHealth` — shared
+  serde types with matching TypeScript definitions on both Tauri
+  fronts.
+
+### Changed — Release artifacts (`.github/workflows/release.yml`)
+
+- **macOS**: publishes `.pkg` + `.pkg.sha256` only. The runtime-only
+  `.tar.gz` previously produced by the macOS leg is dropped — the
+  `.pkg` is the intended install path and the tarball was redundant.
+- **Linux**: `.tar.gz` + `.tar.gz.sha256` is now the full
+  `bundling/linux/pack.sh` layout — frozen runtime under `bundle/`,
+  Setup Assistant + companion Tauri binaries, `boot.json`, systemd
+  units, `.desktop` entries, hicolor icons, `install.sh`,
+  `uninstall.sh`. Was previously just `dist/locai-link/` (the frozen
+  runtime by itself). CI builds the Tauri binaries with
+  `npm run tauri build -- --no-bundle` on `ubuntu-latest` after
+  installing webkit2gtk-4.1 + gtk3 + libsoup deps.
+- **Windows**: unchanged — `.zip` + `.zip.sha256` of the frozen
+  runtime.
+- Source archives (`.zip` + `.tar.gz`) are attached automatically by
+  GitHub's Releases as before.
+
+### Added — CI — Installers workflow (`.github/workflows/installers.yml`)
+
+- Standalone workflow gated by `paths: [bundling/**, .github/workflows/installers.yml]`
+  so unrelated PRs don't burn macOS-runner minutes. Concurrency
+  group cancels overlapping runs on the same ref.
+- Three jobs: `shellcheck` (all shipped shell scripts),
+  `macos-roundtrip` (synthesises the .pkg install layout including
+  per-user Tauri data, runs `uninstall.sh` as non-root — must fail
+  with system paths intact — then as root, verifies every artefact is
+  gone), `linux-roundtrip` (stages a synthetic tarball, runs
+  `install.sh` against a scratch root, asserts systemd units +
+  `.desktop` entries + icons + `@HOME@` substitution, then
+  `uninstall.sh` + assert-gone).
+- Would have caught (retroactively): the `uninstall.tool` typo, the
+  silent-EACCES exit-0 non-root uninstall, missing user-data wipe,
+  and `@HOME@` substitution failures.
 
 ### Changed — Tauri frontends
 
@@ -19,6 +184,16 @@ smallest possible frontend footprint.
   `1420`) so both apps can be run concurrently during dev; companion
   HMR moved to `1423` to sidestep setup_assistant's HMR port.
 
+### Changed — Companion Preferences performance
+
+- `get_prefs_state` no longer probes `/healthz` (was redundant with
+  `poll_status`); it now returns static/on-disk fields only. Cold-start
+  cost drops to a single localhost RTT.
+- `get_prefs_state` + `poll_status` are `async` on Tauri's
+  `spawn_blocking` pool so slow HTTP responses don't stall the
+  WebView main thread.
+- Poll interval tightened from 4 s to 2 s.
+
 ### Removed — TUI
 
 - `src/link/ui/` deleted, along with the `tui` subcommand, the
@@ -26,6 +201,16 @@ smallest possible frontend footprint.
   The GUI installer (setup assistant + menu-bar companion) supersedes
   the Textual-based agent-management interface, which never made it
   past a niche developer utility.
+
+### Fixed
+
+- `resolve_agent_version`: docstring now lists the PyInstaller-frozen
+  `manifest.json` lookup step (the code path already existed; docs
+  were stale).
+- Dependency and CI hygiene: dependabot ignore list for the GTK3-rs
+  family (blocked upstream on wry publishing a webkitgtk6/GTK4
+  backend); `cargo update` refreshes tauri 2.11.5, plist 1.10, quick-xml
+  0.41, time 0.3.53, zbus 5.17.
 
 ### Fixed — Editor-only diagnostics
 

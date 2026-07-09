@@ -96,15 +96,14 @@
   let pending = $state<Set<string>>(new Set());
   let copyFlash = $state<boolean>(false);
 
-  const POLL_INTERVAL_MS = 4000;
+  const POLL_INTERVAL_MS = 2000;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   onMount(async () => {
+    // get_prefs_state is now file-reads only (no HTTP), so load completes fast;
+    // refreshStatus then makes the single /healthz round-trip that populates
+    // status + models. Cold-start UI paints one HTTP RTT after open.
     await load();
-    // Kick a poll immediately so the Models panel + Agent panel don't
-    // sit at "empty / stale" for up to POLL_INTERVAL_MS on open —
-    // `get_prefs_state` doesn't carry models/deployments, only
-    // `poll_status` does.
     await refreshStatus();
     pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);
   });
