@@ -32,7 +32,12 @@ jobs:
     permissions:
       contents: write
     outputs:
+      # Symbolic label for asset filenames — "v1.0.19" or the dispatch-input tag.
       tag: ${{ steps.tag.outputs.name }}
+      # Actual git ref bundle jobs check out. On dry_run this is the commit
+      # SHA (the tag hasn't been minted); on real releases it's the tag,
+      # which by then softprops has created.
+      checkout_ref: ${{ steps.tag.outputs.checkout_ref }}
     steps:
       - uses: actions/checkout@v7
 
@@ -44,12 +49,24 @@ jobs:
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           if [ -n "$INPUT_TAG" ]; then
-            echo "name=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            NAME="$INPUT_TAG"
           else
             VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-            echo "name=v$VERSION" >> "$GITHUB_OUTPUT"
+            NAME="v$VERSION"
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+          # On dry_run we don't create the tag, so bundle jobs must check out
+          # the workflow's commit SHA instead — otherwise `git fetch v1.0.19`
+          # fails ("A branch or tag with the name 'v1.0.19' could not be found").
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "checkout_ref=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=$NAME" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub release
@@ -86,7 +103,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          # `checkout_ref` is the tag on a real release, or the commit SHA
+          # on dry_run (when the tag hasn't been minted).
+          ref: ${{ needs.release.outputs.checkout_ref }}
 
       - uses: astral-sh/setup-uv@v5
         with:
