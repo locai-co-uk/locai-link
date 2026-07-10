@@ -95,6 +95,19 @@ class AgentRuntime:
             models_provider=self._snapshot_models,
             command_handler=self.handle_command,
         )
+        # Populate the transport diagnostic. The session is opened
+        # before AgentRuntime is constructed (`get_or_create_zenoh_session`
+        # in main.py) — if we hold one here, `connected=True` is a fair
+        # first-order truth. The runtime doesn't observe silent
+        # mid-session disconnects today; `shutdown()` flips this back
+        # to False when we tear down.
+        if zenoh_session is not None:
+            endpoints = agent_config.transport.args.get("endpoints", []) if agent_config.transport else []
+            self.health_state.set_transport(
+                transport_type=agent_config.transport.type if agent_config.transport else None,
+                endpoint=endpoints[0] if endpoints else None,
+                connected=True,
+            )
         self.health_server = HealthServer(self.health_state)
 
         if threading.current_thread() is threading.main_thread():
@@ -275,7 +288,7 @@ class AgentRuntime:
         logger.info("Agent Runtime active...")
         self.status_logger.report_lifecycle("online")
         # Lazy-start the health server here (not in __init__) so tests
-        # that construct an AgentRuntime in-process don't race for port 8101.
+        # that construct an AgentRuntime in-process don't race for port 20505.
         self.health_server.start()
 
         # 1. Try Recovery First
@@ -465,9 +478,10 @@ class AgentRuntime:
                 daemon=True,
             )
             self._agent_workers[pipeline_id] = _AgentWorker(cancel_event, thread, command_id)
-
-        logger.info(f"Initiating deployment for command '{command_id}'...")
-        thread.start()
+            # Start under the lock so _cancel_deploy can't observe is_alive()==False
+            # between register and start and miss a pending CANCEL_DEPLOY.
+            logger.info(f"Initiating deployment for command '{command_id}'...")
+            thread.start()
 
     def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event) -> None:
         """Orchestrate download → publish → commit for a single DEPLOY_MODEL.
@@ -505,10 +519,12 @@ class AgentRuntime:
 
             logger.info(f"Pipeline '{pipeline_id}' deployed successfully.")
             self.status_logger.report_deployment_progress(pipeline_id, "completed", 100.0, 0, 0)
+            self.health_state.set_deployment_progress(pipeline_id, "completed", 100.0, cmd.model_name)
             self.status_logger.report_command(command_id, "completed", f"Model {cmd.model_name} deployed successfully.")
         except Exception as e:
             logger.error(f"Deploy '{pipeline_id}' failed: {e}", exc_info=True)
             self.status_logger.report_command(command_id, "failed", str(e))
+            self.health_state.set_deployment_progress(pipeline_id, "completed", 0.0, cmd.model_name)
         finally:
             with self.lock:
                 worker = self._agent_workers.get(pipeline_id)
@@ -558,6 +574,7 @@ class AgentRuntime:
                 total = int(r.headers.get("content-length", 0))
                 last_reported = -1
                 self.status_logger.report_deployment_progress(pipeline_id, "downloading", 0.0, 0, total)
+                self.health_state.set_deployment_progress(pipeline_id, "downloading", 0.0, cmd.model_name)
                 with open(partial_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         if cancel_event.is_set():
@@ -571,6 +588,9 @@ class AgentRuntime:
                                 self.status_logger.report_deployment_progress(
                                     pipeline_id, "downloading", float(pct), done, total
                                 )
+                                self.health_state.set_deployment_progress(
+                                    pipeline_id, "downloading", float(pct), cmd.model_name
+                                )
                                 last_reported = pct
         except Exception as e:
             if cancel_event.is_set():
@@ -580,6 +600,8 @@ class AgentRuntime:
                 msg = f"Failed to download model: {e}"
                 logger.error(msg)
                 self.status_logger.report_command(command_id, "failed", msg)
+                # Drop the in-flight row so the UI doesn't leave a stuck progress bar.
+                self.health_state.set_deployment_progress(pipeline_id, "completed", 0.0, cmd.model_name)
                 return False
         finally:
             self._attach_response(pipeline_id, command_id, None)
@@ -599,6 +621,7 @@ class AgentRuntime:
             msg = f"incomplete download: {done}/{total} bytes"
             logger.error(msg)
             self.status_logger.report_command(command_id, "failed", msg)
+            self.health_state.set_deployment_progress(pipeline_id, "completed", 0.0, cmd.model_name)
             return False
 
         # Guard the rename: a cancel arriving after the last chunk but
@@ -626,6 +649,7 @@ class AgentRuntime:
             arrived after acquiring the lock (caller should report).
         """
         self.status_logger.report_deployment_progress(cmd.pipeline_id, "configuring", 95.0, 0, 0)
+        self.health_state.set_deployment_progress(cmd.pipeline_id, "configuring", 95.0, cmd.model_name)
         with self.lock:
             if cancel_event.is_set():
                 return False
@@ -654,6 +678,8 @@ class AgentRuntime:
         """Emit the cancelled progress + failed command pair for `cmd`."""
         logger.info(f"Deploy '{cmd.pipeline_id}' cancelled {when}.")
         self.status_logger.report_deployment_progress(cmd.pipeline_id, "cancelled", 0.0, 0, 0)
+        # Clear the in-flight row so the UI drops the progress wheel.
+        self.health_state.set_deployment_progress(cmd.pipeline_id, "completed", 0.0, cmd.model_name)
         self.status_logger.report_command(cmd.id, "failed", "cancelled")
 
     def _cancel_deploy(self, cmd: CancelDeployCommand) -> None:
@@ -933,7 +959,15 @@ class AgentRuntime:
                     pipe.join(timeout=1.0)
             self.pipelines.clear()
 
-        # Tear down the health server last
+        # Flip transport.connected=false so a companion mid-poll sees the disconnect.
+        if self.health_state.transport_type is not None:
+            self.health_state.set_transport(
+                transport_type=self.health_state.transport_type,
+                endpoint=self.health_state.transport_endpoint,
+                connected=False,
+            )
+
+        # Tear down the health server last.
         self.health_server.stop()
 
 

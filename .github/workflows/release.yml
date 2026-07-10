@@ -10,6 +10,11 @@ on:
         description: "Existing tag to re-attach assets to (leave blank to create a new release from pyproject.toml)"
         required: false
         type: string
+      dry_run:
+        description: "Build the .pkg / .tar.gz / .zip but skip the release-create + asset-attach steps. Bundles are still uploaded to the workflow run as artifacts (14-day retention)."
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -27,7 +32,12 @@ jobs:
     permissions:
       contents: write
     outputs:
+      # Symbolic label for asset filenames — "v1.0.19" or the dispatch-input tag.
       tag: ${{ steps.tag.outputs.name }}
+      # Actual git ref bundle jobs check out. On dry_run this is the commit
+      # SHA (the tag hasn't been minted); on real releases it's the tag,
+      # which by then softprops has created.
+      checkout_ref: ${{ steps.tag.outputs.checkout_ref }}
     steps:
       - uses: actions/checkout@v7
 
@@ -39,17 +49,31 @@ jobs:
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           if [ -n "$INPUT_TAG" ]; then
-            echo "name=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            NAME="$INPUT_TAG"
           else
             VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-            echo "name=v$VERSION" >> "$GITHUB_OUTPUT"
+            NAME="v$VERSION"
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+          # On dry_run we don't create the tag, so bundle jobs must check out
+          # the workflow's commit SHA instead — otherwise `git fetch v1.0.19`
+          # fails ("A branch or tag with the name 'v1.0.19' could not be found").
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "checkout_ref=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "checkout_ref=$NAME" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub release
-        # Skip when re-attaching to an existing release (workflow_dispatch with tag input).
-        if: inputs.tag == ''
+        # Skip when re-attaching to an existing release (workflow_dispatch
+        # with tag input), and skip entirely when dry_run is true — dry-run
+        # builds go to workflow-run artifacts, not to a release.
+        if: inputs.tag == '' && !inputs.dry_run
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
@@ -62,6 +86,11 @@ jobs:
     name: Bundle on ${{ matrix.os }}
     needs: release
     runs-on: ${{ matrix.os }}
+    # Release channel — baked into the Tauri frontends via VITE_CHANNEL at
+    # build time. Shows in the SA sidebar as "· Alpha - Build" (or Beta,
+    # etc.). Set to "prod" (or empty) to hide the label when going GA.
+    env:
+      VITE_CHANNEL: alpha
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +108,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          # `checkout_ref` is the tag on a real release, or the commit SHA
+          # on dry_run (when the tag hasn't been minted).
+          ref: ${{ needs.release.outputs.checkout_ref }}
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -149,13 +180,23 @@ jobs:
           APPLE_DEVELOPER_ID_APPLICATION_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_P12_BASE64 }}
           APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
           APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
         run: |
+          # We need BOTH signing identities on macOS:
+          #   - Developer ID Application → codesign the .app / Mach-O binaries.
+          #   - Developer ID Installer   → productsign the outer .pkg.
+          # Missing either means we can't publish a usable macOS release.
           if [ -n "$APPLE_DEVELOPER_ID_APPLICATION_CERT_P12_BASE64" ] \
              && [ -n "$APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD" ] \
              && [ -n "$APPLE_DEVELOPER_ID_APPLICATION" ] \
+             && [ -n "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" ] \
+             && [ -n "$APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD" ] \
+             && [ -n "$APPLE_DEVELOPER_ID_INSTALLER" ] \
              && [ -n "$APPLE_NOTARY_KEY_ID" ] \
              && [ -n "$APPLE_NOTARY_ISSUER_ID" ] \
              && [ -n "$APPLE_NOTARY_KEY_P8_BASE64" ]; then
@@ -165,24 +206,40 @@ jobs:
             exit 1
           fi
 
-      - name: Import signing cert into ephemeral keychain
+      - name: Import signing certs into ephemeral keychain
         if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
         env:
-          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
+          APP_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_P12_BASE64 }}
+          APP_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
+          INSTALLER_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          INSTALLER_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          CERT_PATH="$RUNNER_TEMP/cert.p12"
-          echo "$P12_BASE64" | base64 --decode > "$CERT_PATH"
+          APP_CERT="$RUNNER_TEMP/app-cert.p12"
+          INSTALLER_CERT="$RUNNER_TEMP/installer-cert.p12"
+          echo "$APP_P12_BASE64" | base64 --decode > "$APP_CERT"
+          echo "$INSTALLER_P12_BASE64" | base64 --decode > "$INSTALLER_CERT"
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+
+          # Both p12s land in the same ephemeral keychain. -A allows any
+          # tool to access them (codesign, productsign) without a
+          # per-tool prompt; the partition-list step below is what
+          # actually authorises tools once the keychain is unlocked.
+          security import "$APP_CERT" -P "$APP_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security import "$INSTALLER_CERT" -P "$INSTALLER_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-          rm -f "$CERT_PATH"
+
+          # Wipe the p12 files immediately — the keychain has what it
+          # needs and the base64 secrets shouldn't live on disk longer
+          # than necessary.
+          rm -f "$APP_CERT" "$INSTALLER_CERT"
 
       - name: Write notary API key
         if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
@@ -193,13 +250,258 @@ jobs:
           echo "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$KEY_PATH"
           echo "APPLE_NOTARY_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
 
-      - name: Sign + notarise bundle (macOS)
+      - name: Set up Node (for Tauri app builds)
+        if: runner.os == 'macOS' || runner.os == 'Linux'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          # Cache both apps' node_modules — both build in this job.
+          cache: "npm"
+          cache-dependency-path: |
+            crates/setup_assistant/package-lock.json
+            crates/companion/package-lock.json
+
+      - name: Install Tauri Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Build Setup Assistant binary (Linux)
+        # --no-bundle: skip .deb/.rpm/AppImage — pack.sh ships the raw
+        # binary alongside the runtime bundle in the tarball layout.
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: crates/setup_assistant
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --no-bundle
+
+      - name: Build companion binary (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: crates/companion
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --no-bundle
+
+      - name: Build Setup Assistant .app (macOS)
+        # `tauri build` invokes the frontend build (npm run build)
+        # first via tauri.conf.json's beforeBuildCommand, then compiles
+        # the Rust side. Output lands under crates/target/release/bundle/macos/.
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: crates/setup_assistant
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --bundles app
+
+      - name: Codesign Setup Assistant .app (macOS)
+        # Reuses the same sign_macos.py runner as the runtime bundle,
+        # pointed at the .app and the SA-specific entitlements (which
+        # only ask for allow-jit — see crates/setup_assistant/src-tauri/
+        # entitlements.plist for why).
         if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
         env:
           APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Setup Assistant.app is the only .app in the SA crate's
+          # target/bundle/macos — but the companion build below will
+          # add another. Scope this find to just the SA sub-tree by
+          # naming the productName ("setup_assistant" from
+          # crates/setup_assistant/src-tauri/tauri.conf.json).
+          SA_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "setup_assistant.app" | head -n 1)
+          if [ -z "$SA_APP" ]; then
+            echo "::error::Setup Assistant .app not found after tauri build"
+            exit 1
+          fi
+          echo "Signing $SA_APP"
+          uv run python bundling/sign_macos.py \
+            --bundle "$SA_APP" \
+            --entitlements crates/setup_assistant/src-tauri/entitlements.plist \
+            --skip-notarise
+          echo "SA_APP_PATH=$SA_APP" >> "$GITHUB_ENV"
+
+      - name: Build companion .app (macOS)
+        # Same pattern as the Setup Assistant build above. Companion's
+        # productName is "Locai Link" (with space) so its .app basename
+        # is "Locai Link.app" — that's exactly what we want in
+        # /Applications so it's the user-facing entry point.
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: crates/companion
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --bundles app
+
+      - name: Codesign companion .app (macOS)
+        # Reuses the SA's entitlements.plist — allow-jit is the only
+        # relaxation the WebKit view needs. Same signing chain as the
+        # SA. If the companion needs different entitlements later
+        # (e.g. Login Items via SMAppService), split out to a
+        # companion-specific entitlements file.
+        if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMPANION_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "Locai Link.app" | head -n 1)
+          if [ -z "$COMPANION_APP" ]; then
+            echo "::error::companion .app (Locai Link.app) not found after tauri build"
+            exit 1
+          fi
+          echo "Signing $COMPANION_APP"
+          uv run python bundling/sign_macos.py \
+            --bundle "$COMPANION_APP" \
+            --entitlements crates/setup_assistant/src-tauri/entitlements.plist \
+            --skip-notarise
+          echo "COMPANION_APP_PATH=$COMPANION_APP" >> "$GITHUB_ENV"
+
+      - name: Codesign runtime bundle (macOS)
+        # Signs the Python runtime tree (dist/locai-link/) but skips
+        # notarisation — the outer .pkg gets notarised end-to-end
+        # below, and Apple's notarisation ticket propagates to everything
+        # inside the .pkg on stapling.
+        if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        run: uv run python bundling/sign_macos.py --bundle dist/locai-link --skip-notarise
+
+      - name: Build + notarise .pkg (macOS)
+        # pkgbuild → productbuild → productsign → notarytool → stapler.
+        # See bundling/pkg/README.md for the reference sequence; this
+        # step is the CI mirror of those commands.
+        if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
+        env:
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-        run: uv run python bundling/sign_macos.py --bundle dist/locai-link
+          TAG: ${{ needs.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1. Assemble the payload tree under /Library/Locai (the
+          #    postinstall's expected layout).
+          STAGING="$RUNNER_TEMP/pkg-staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+
+          # The Python runtime tree — copy the whole dist/locai-link/
+          # directory contents into the staging root. This mirrors what
+          # `.pkg --root` will lay down on the target.
+          cp -R dist/locai-link/. "$STAGING/"
+
+          # boot.json — canonical production channel config.
+          cp bundling/pkg/boot.json "$STAGING/boot.json"
+
+          # Setup Assistant .app — path was stashed by the codesign step.
+          cp -R "$SA_APP_PATH" "$STAGING/Setup Assistant.app"
+
+          # Companion menubar .app — the user-facing "Locai Link" in
+          # /Applications post-install (postinstall symlinks it there).
+          cp -R "$COMPANION_APP_PATH" "$STAGING/Locai Link.app"
+
+          # LaunchAgent plists — bundled but NOT bootstrapped at
+          # install time. The Setup Assistant registers them on
+          # Finish (always) and toggles RunAtLoad based on the
+          # "Start at login" checkbox on the Permissions step.
+          mkdir -p "$STAGING/LaunchAgents"
+          cp bundling/pkg/LaunchAgents/uk.co.locai.link.agent.plist \
+             "$STAGING/LaunchAgents/uk.co.locai.link.agent.plist"
+          cp bundling/pkg/LaunchAgents/uk.co.locai.link.companion.plist \
+             "$STAGING/LaunchAgents/uk.co.locai.link.companion.plist"
+
+          # Uninstaller script — invoked from the companion tray menu
+          # ("Uninstall Locai Link…") via osascript with admin
+          # privileges, and by any user with `sudo /Library/Locai/uninstall.sh`
+          # from Terminal. postinstall re-chmods 755 defensively.
+          cp bundling/pkg/uninstall.sh "$STAGING/uninstall.sh"
+          chmod 755 "$STAGING/uninstall.sh"
+
+          # 2. Version-stamp Distribution.xml. The skeleton ships
+          #    "0.0.0" as a placeholder; productbuild wants the real
+          #    version so users see it in the wizard header.
+          #    TAG is like "v1.0.17" — strip leading "v" for the pkg-ref.
+          VERSION="${TAG#v}"
+          DIST_XML="$RUNNER_TEMP/Distribution.xml"
+          sed "s/version=\"0.0.0\"/version=\"$VERSION\"/" \
+            bundling/pkg/Distribution.xml > "$DIST_XML"
+          # Guard against silent no-op if the placeholder in the source XML
+          # ever drifts — otherwise we ship a .pkg still labelled 0.0.0.
+          if ! grep -q "version=\"$VERSION\"" "$DIST_XML"; then
+            echo "::error::Failed to stamp version into Distribution.xml"
+            exit 1
+          fi
+
+          # 3. Build the component .pkg with the postinstall wired in.
+          COMPONENT_PKG="$RUNNER_TEMP/locai-link-runtime.pkg"
+          pkgbuild \
+            --root "$STAGING" \
+            --scripts bundling/pkg/scripts \
+            --install-location /Library/Locai \
+            --identifier uk.co.locai.link.runtime \
+            --version "$VERSION" \
+            "$COMPONENT_PKG"
+
+          # 4. Wrap in the distribution .pkg with the wizard UI.
+          #    productbuild references locai-link-runtime.pkg relative
+          #    to --package-path.
+          UNSIGNED_PKG="$RUNNER_TEMP/Locai-Link-unsigned.pkg"
+          productbuild \
+            --distribution "$DIST_XML" \
+            --package-path "$RUNNER_TEMP" \
+            --resources bundling/pkg \
+            "$UNSIGNED_PKG"
+
+          # 5. Sign the outer .pkg with the Installer cert.
+          SIGNED_PKG="$RUNNER_TEMP/Locai-Link.pkg"
+          productsign \
+            --sign "$APPLE_DEVELOPER_ID_INSTALLER" \
+            "$UNSIGNED_PKG" \
+            "$SIGNED_PKG"
+          rm -f "$UNSIGNED_PKG"
+
+          # 6. Notarise via App Store Connect API key + block until
+          #    Apple's servers finish (typically 3–10 minutes; longer
+          #    on bad days).
+          xcrun notarytool submit "$SIGNED_PKG" \
+            --key "$APPLE_NOTARY_KEY_PATH" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait
+
+          # 7. Staple the notarisation ticket so the .pkg works
+          #    offline on first-run.
+          xcrun stapler staple "$SIGNED_PKG"
+
+          # 8. Copy into release-assets/ with a name matching the
+          #    ${asset_base}-${platform}-${TAG}.${ext} pattern used by
+          #    the tar.gz / zip legs so all release assets look uniform.
+          mkdir -p release-assets
+          FINAL_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.pkg"
+          cp "$SIGNED_PKG" "release-assets/$FINAL_NAME"
+
+          python - <<EOF > "release-assets/${FINAL_NAME}.sha256"
+          import hashlib, pathlib
+          p = pathlib.Path("release-assets/${FINAL_NAME}")
+          digest = hashlib.sha256(p.read_bytes()).hexdigest()
+          print(f"{digest}  ${FINAL_NAME}")
+          EOF
+          ls -lah release-assets/
 
       - name: Wipe ephemeral keychain + notary key
         if: always() && runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
@@ -207,20 +509,39 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
           rm -f "$RUNNER_TEMP/notary-key.p8" || true
 
-      - name: Package bundle
+      - name: Package bundle (Linux — via pack.sh)
+        # Ships the full pack.sh layout: frozen runtime + Tauri binaries +
+        # boot.json + systemd units + .desktop + icons + install/uninstall.
+        # The macOS leg publishes its .pkg + .pkg.sha256 upstream in the
+        # build+notarise step; Windows uses the "Package bundle (Windows)"
+        # step below to zip the frozen runtime.
+        if: runner.os == 'Linux'
         shell: bash
         env:
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          bash bundling/linux/pack.sh --release --output "release-assets/${ASSET}"
+          python - <<'EOF' > "release-assets/${ASSET}.sha256"
+          import hashlib, os, pathlib
+          name = os.environ["ASSET"]
+          p = pathlib.Path("release-assets") / name
+          digest = hashlib.sha256(p.read_bytes()).hexdigest()
+          print(f"{digest}  {name}")
+          EOF
+          ls -lah release-assets/
+
+      - name: Package bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
           ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
           cd dist
-          if [ "${ARCHIVE_EXT}" = "zip" ]; then
-            7z a -tzip -mx=9 "../release-assets/${ASSET}" locai-link
-          else
-            tar -czf "../release-assets/${ASSET}" locai-link
-          fi
+          7z a -tzip -mx=9 "../release-assets/${ASSET}" locai-link
           cd ..
           python - <<'EOF' > "release-assets/${ASSET}.sha256"
           import hashlib, os, pathlib
@@ -245,7 +566,8 @@ jobs:
     # Run even if one bundle matrix leg failed — the surviving legs
     # still produced usable artifacts and shouldn't be held hostage.
     # `release` still has to succeed (no tag = nothing to attach to).
-    if: always() && needs.release.result == 'success'
+    # Skip entirely on dry_run — bundles stay in the run's artifacts only.
+    if: always() && needs.release.result == 'success' && !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -268,6 +590,7 @@ jobs:
           files: |
             release-assets/*.tar.gz
             release-assets/*.zip
+            release-assets/*.pkg
             release-assets/*.sha256
           # Don't abort the whole release when one platform's leg
           # failed to produce its artifact; the other platforms are

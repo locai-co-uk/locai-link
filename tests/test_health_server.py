@@ -36,6 +36,20 @@ def _post_no_body(port: int, path: str) -> Any:
     return urllib.request.urlopen(req, timeout=2)
 
 
+def _post_json(port: int, path: str, body: dict[str, Any]) -> Any:
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://{HEALTH_HOST}:{port}{path}",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        return urllib.request.urlopen(req, timeout=2)
+    except urllib.error.HTTPError as e:
+        return e
+
+
 @pytest.fixture
 def server():
     """Yield a fresh, started HealthServer on an ephemeral port."""
@@ -54,6 +68,112 @@ def test_idle_state_reports_not_serving(server):
     assert body["currently_serving"] is False
     assert body["model_id"] is None
     assert body["uptime_seconds"] >= 0
+    # transport is null until `set_transport` is called (unit tests
+    # construct HealthState standalone without a Zenoh session).
+    assert body["transport"] is None
+
+
+def test_set_transport_surfaces_in_response(server):
+    _, state, port = server
+    state.set_transport(
+        transport_type="zenoh",
+        endpoint="tls/zenoh.example.com:7448",
+        connected=True,
+    )
+    body = _get_health(port)
+    assert body["transport"] == {
+        "type": "zenoh",
+        "endpoint": "tls/zenoh.example.com:7448",
+        "connected": True,
+    }
+
+
+def test_set_transport_disconnect_flips_connected_only(server):
+    _, state, port = server
+    state.set_transport("zenoh", "tls/zenoh.example.com:7448", connected=True)
+    state.set_transport("zenoh", "tls/zenoh.example.com:7448", connected=False)
+    body = _get_health(port)
+    assert body["transport"] == {
+        "type": "zenoh",
+        "endpoint": "tls/zenoh.example.com:7448",
+        "connected": False,
+    }
+
+
+def test_deployments_empty_when_none_in_flight(server):
+    _, _, port = server
+    body = _get_health(port)
+    assert body["deployments"] == []
+
+
+def test_set_deployment_progress_surfaces_row(server):
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 42.0, model_name="foo.gguf")
+    body = _get_health(port)
+    assert body["deployments"] == [
+        {
+            "pipeline_id": "p-1",
+            "model_name": "foo.gguf",
+            "stage": "downloading",
+            "progress_pct": 42.0,
+        }
+    ]
+
+
+def test_queued_does_not_overwrite_active_progress(server):
+    # Setup Assistant fires pre-registration POSTs in parallel with real
+    # deploys — a late "queued" write must not stomp active progress.
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 30.0, model_name="foo.gguf")
+    state.set_deployment_progress("p-1", "queued", 0.0, model_name="foo.gguf")
+    body = _get_health(port)
+    assert body["deployments"][0]["stage"] == "downloading"
+    assert body["deployments"][0]["progress_pct"] == 30.0
+
+
+def test_pending_endpoint_registers_queued_row(server):
+    _, state, port = server
+    resp = _post_json(
+        port,
+        "/deployments/pending",
+        {"pipeline_id": "p-1", "model_name": "foo.gguf"},
+    )
+    assert resp.status == 202
+    # `created_at` is set by set_deployment_progress; check the stable
+    # fields only.
+    row = {k: v for k, v in state.deployments["p-1"].items() if k != "created_at"}
+    assert row == {
+        "pipeline_id": "p-1",
+        "model_name": "foo.gguf",
+        "stage": "queued",
+        "progress_pct": 0.0,
+    }
+    assert "created_at" in state.deployments["p-1"]
+
+
+def test_pending_endpoint_rejects_missing_pipeline_id(server):
+    _, _, port = server
+    resp = _post_json(port, "/deployments/pending", {"model_name": "foo.gguf"})
+    assert resp.status == 400
+
+
+def test_completed_deployment_clears_row(server):
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 42.0, model_name="foo.gguf")
+    state.set_deployment_progress("p-1", "completed", 100.0)
+    body = _get_health(port)
+    assert body["deployments"] == []
+
+
+def test_deployment_progress_carries_model_name_across_ticks(server):
+    # First tick sets model_name; later ticks (throttled 5%-step deltas)
+    # only pass pct + stage. Row should still carry the original name.
+    _, state, port = server
+    state.set_deployment_progress("p-1", "downloading", 0.0, model_name="foo.gguf")
+    state.set_deployment_progress("p-1", "downloading", 50.0)
+    body = _get_health(port)
+    assert body["deployments"][0]["model_name"] == "foo.gguf"
+    assert body["deployments"][0]["progress_pct"] == 50.0
 
 
 def test_set_serving_surfaces_in_response(server):
@@ -269,6 +389,23 @@ def test_post_unknown_pipeline_returns_404():
     finally:
         srv.stop()
     assert received == [], "no command should dispatch for an unknown pipeline"
+
+
+def test_post_cancel_deploy_dispatches_cancel_command():
+    # cancel-deploy targets an in-flight deploy that isn't in state.models()
+    # yet, so no existence check is required.
+    srv, port, received = _server_with_handlers([])
+    try:
+        resp = _post_no_body(port, "/models/llm_server/cancel-deploy")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+
+    assert len(received) == 1
+    cmd = received[0]
+    assert cmd["type"] == "CANCEL_DEPLOY"
+    assert cmd["pipeline_id"] == "llm_server"
+    assert cmd["id"].startswith("loopback-")
 
 
 def test_post_serve_falls_back_to_defaults_when_config_is_bare():

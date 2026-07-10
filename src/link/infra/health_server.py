@@ -21,7 +21,16 @@ from typing_extensions import override
 logger = logging.getLogger(__name__)
 
 HEALTH_HOST = "127.0.0.1"
-HEALTH_PORT = 8101
+HEALTH_PORT = 20505
+
+# Queued deployment rows time out into `failed` after this many seconds
+# if the runtime never advances them (e.g. Control DEPLOY_MODEL was lost).
+# 5 minutes accommodates slow first-deploy cold starts while capping how
+# long the UI can be stuck on "Queued".
+QUEUED_TTL_SECONDS = 300
+
+_MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving|cancel-deploy)$")
+_LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
 
 
 class HealthState:
@@ -44,24 +53,52 @@ class HealthState:
         self._boot_time = time.monotonic()
         self.currently_serving = False
         self.model_id: str | None = None
-        # Runtime hands us a callable that snapshots pipeline state on
-        # demand. Kept as a callable (not a stored list) so the /models
-        # response always reflects "now" without the runtime having to
-        # push updates on every pipeline mutation.
+
         self._models_provider = models_provider
-        # Runtime also hands us its command dispatch entry point. The
-        # POST /models/... handlers build a command dict (same schema
-        # as commands over the Zenoh wire) and call this — the runtime
-        # then routes through its normal validation + dispatch path,
-        # so the loopback API and the backend share one code path.
         self._command_handler = command_handler
 
+        self.transport_type: str | None = None
+        self.transport_endpoint: str | None = None
+        self.transport_connected: bool = False
+
+        self.deployments: dict[str, dict[str, Any]] = {}
+        # Protects `deployments` — mutated by worker threads via
+        # `set_deployment_progress`, iterated by the handler thread via
+        # `snapshot`; without a lock `dict.values()` iteration can raise
+        # `RuntimeError: dictionary changed size during iteration`.
+        self._deploy_lock = threading.Lock()
+
     def snapshot(self) -> dict[str, Any]:
+        transport: dict[str, Any] | None = None
+        if self.transport_type is not None:
+            transport = {
+                "type": self.transport_type,
+                "endpoint": self.transport_endpoint,
+                "connected": self.transport_connected,
+            }
+        # One time.monotonic() call feeds both the uptime field and the
+        # queued-row TTL sweep so the two are consistent with each other
+        # (and so tests that patch monotonic with a fixed side-effect list
+        # don't need to know how many internal calls we make).
+        now = time.monotonic()
+        # Queued rows older than QUEUED_TTL_SECONDS are flipped to `failed`
+        # so the UI can drop the "Queued" spinner — otherwise a dropped
+        # Control dispatch leaves it stuck until the runtime restarts.
+        with self._deploy_lock:
+            for dep in self.deployments.values():
+                if dep.get("stage") == "queued" and now - dep.get("created_at", now) > QUEUED_TTL_SECONDS:
+                    dep["stage"] = "failed"
+                    dep["progress_pct"] = 0.0
+            deployments_snapshot = [
+                {k: v for k, v in dep.items() if k != "created_at"} for dep in self.deployments.values()
+            ]
         return {
             "version": self.version,
-            "uptime_seconds": int(time.monotonic() - self._boot_time),
+            "uptime_seconds": int(now - self._boot_time),
             "currently_serving": self.currently_serving,
             "model_id": self.model_id,
+            "transport": transport,
+            "deployments": deployments_snapshot,
         }
 
     def models(self) -> list[dict[str, Any]]:
@@ -96,11 +133,52 @@ class HealthState:
             self.currently_serving = True
             self.model_id = model_id
 
+    def set_deployment_progress(
+        self,
+        pipeline_id: str,
+        stage: str,
+        progress_pct: float,
+        model_name: str | None = None,
+    ) -> None:
+        """Record in-flight deployment progress for ``pipeline_id``.
 
-_MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving)$")
+        ``stage`` vocabulary: ``queued`` (SA pre-registered, download not
+        started yet), ``downloading``, ``configuring``, ``completed``.
+        On ``completed`` the row is removed so the UI can drop it.
+        """
+        with self._deploy_lock:
+            if stage == "completed":
+                self.deployments.pop(pipeline_id, None)
+                return
+            existing = self.deployments.get(pipeline_id)
+            if stage == "queued" and existing is not None and existing.get("stage") != "queued":
+                return
+            existing = existing or {}
+            self.deployments[pipeline_id] = {
+                "pipeline_id": pipeline_id,
+                "model_name": model_name or existing.get("model_name"),
+                "stage": stage,
+                "progress_pct": progress_pct,
+                # Timestamp lets snapshot() age stale queued rows out — a
+                # queued row whose Control DEPLOY_MODEL never arrived would
+                # otherwise linger until the runtime restarted.
+                "created_at": existing.get("created_at", time.monotonic()),
+            }
 
-
-_LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
+    def set_transport(
+        self,
+        transport_type: str | None,
+        endpoint: str | None,
+        connected: bool,
+    ) -> None:
+        """Record the runtime's transport state for the ``/healthz``
+        response's ``transport`` block. Called by whichever component
+        owns the transport lifecycle — for Zenoh that's the runtime,
+        which sets ``connected=True`` right after ``zenoh.open()``
+        returns and ``connected=False`` on close/shutdown."""
+        self.transport_type = transport_type
+        self.transport_endpoint = endpoint
+        self.transport_connected = connected
 
 
 def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
@@ -113,12 +191,6 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
             browser can still POST to loopback with a "simple request"
             (no preflight). Without an Origin/Host guard, such a page
             could trigger START_SERVING / STOP_SERVING remotely.
-
-            Two guards:
-              * Host must be a loopback name. Blocks DNS-rebinding, where
-                an attacker's hostname briefly resolves to 127.0.0.1.
-              * Origin, when present, must also be loopback. Native
-                clients (Tauri, curl) omit Origin and are accepted.
             """
             host = (self.headers.get("Host") or "").lower().split(":")[0]
             if host not in _LOOPBACK_HOSTS:
@@ -160,6 +232,10 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             if not self._check_loopback():
                 return
+
+            if self.path == "/deployments/pending":
+                self._handle_pending_deployment()
+                return
             match = _MODEL_ACTION_RE.match(self.path)
             if not match:
                 self.send_error(404, "Not Found")
@@ -168,36 +244,37 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 self.send_error(503, "Command handler not wired")
                 return
             pipeline_id, action = match.group(1), match.group(2)
-            # We read the pipeline's current args from the models
-            # snapshot instead of accepting overrides in the POST
-            # body. Rationale: the intent of a loopback toggle is
-            # "resume serving this thing with its existing config" —
-            # a port/host change is a structural config edit that
-            # belongs in Control, not a one-shot local POST.
-            model = next((m for m in state.models() if m["id"] == pipeline_id), None)
-            if model is None:
-                self.send_error(404, f"Unknown pipeline: {pipeline_id}")
-                return
 
             command: dict[str, Any]
-            if action == "serve":
+            if action == "cancel-deploy":
+                # An in-flight deploy isn't in state.models() yet, so skip the
+                # existence check — the runtime treats a missing worker as a
+                # completed-with-note no-op.
                 command = {
                     "id": f"loopback-{uuid.uuid4().hex[:8]}",
-                    "type": "START_SERVING",
-                    "pipeline_id": pipeline_id,
-                    # Fall back to the StartServingCommand defaults if
-                    # the config hasn't set them yet (freshly-deployed
-                    # pipelines without prior serve).
-                    "port": model.get("port") or 8100,
-                    "host": model.get("host") or "0.0.0.0",
-                    "model_display_name": model.get("alias") or pipeline_id,
-                }
-            else:  # stop-serving
-                command = {
-                    "id": f"loopback-{uuid.uuid4().hex[:8]}",
-                    "type": "STOP_SERVING",
+                    "type": "CANCEL_DEPLOY",
                     "pipeline_id": pipeline_id,
                 }
+            else:
+                model = next((m for m in state.models() if m["id"] == pipeline_id), None)
+                if model is None:
+                    self.send_error(404, f"Unknown pipeline: {pipeline_id}")
+                    return
+                if action == "serve":
+                    command = {
+                        "id": f"loopback-{uuid.uuid4().hex[:8]}",
+                        "type": "START_SERVING",
+                        "pipeline_id": pipeline_id,
+                        "port": model.get("port") or 8100,
+                        "host": model.get("host") or "0.0.0.0",
+                        "model_display_name": model.get("alias") or pipeline_id,
+                    }
+                else:  # stop-serving
+                    command = {
+                        "id": f"loopback-{uuid.uuid4().hex[:8]}",
+                        "type": "STOP_SERVING",
+                        "pipeline_id": pipeline_id,
+                    }
 
             try:
                 state.dispatch(command)
@@ -206,20 +283,36 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 self.send_error(500, "Command dispatch failed")
                 return
 
-            # 202 Accepted — dispatch fired; the caller polls /models
-            # to observe the state change on the next tick. We don't
-            # block on the runtime finishing.
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _handle_pending_deployment(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > 4096:
+                self.send_error(400, "Empty or oversized body")
+                return
+            try:
+                raw = self.rfile.read(length)
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_error(400, "Malformed JSON")
+                return
+            pipeline_id = payload.get("pipeline_id")
+            model_name = payload.get("model_name")
+            if not isinstance(pipeline_id, str) or not pipeline_id:
+                self.send_error(400, "pipeline_id required")
+                return
+            if model_name is not None and not isinstance(model_name, str):
+                self.send_error(400, "model_name must be a string or omitted")
+                return
+            state.set_deployment_progress(pipeline_id, "queued", 0.0, model_name)
             self.send_response(202)
             self.send_header("Content-Length", "0")
             self.end_headers()
 
         @override
         def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
-            # /healthz and /models are polled every few seconds — the
-            # default access log would drown out real events. Only
-            # log_request (successful access lines) is silenced; errors
-            # still flow through log_error → log_message → stderr, so
-            # send_error(404/500/...) responses are still surfaced.
             pass
 
     return HealthHandler
@@ -241,16 +334,10 @@ class HealthServer:
         try:
             self._server = ThreadingHTTPServer((self.host, self.port), _make_handler(self.state))
         except OSError as exc:
-            # Port already in use — most likely a stale agent. We don't
-            # raise because the agent's own startup shouldn't fail over
-            # a non-critical telemetry endpoint.
             logger.warning(f"Health server could not bind to {self.host}:{self.port}: {exc}")
             self._server = None
             return
-        # poll_interval bounds the max blocking wait inside stop() —
-        # tests that spin the server up and down pay this per teardown.
-        # 50ms is still well below any human-perceptible shutdown delay
-        # in production and cuts the test suite by several seconds.
+
         self._thread = threading.Thread(
             target=lambda: self._server.serve_forever(poll_interval=0.05) if self._server else None,
             name="health-server",

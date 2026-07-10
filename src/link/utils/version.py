@@ -17,9 +17,10 @@ def resolve_agent_version() -> str | None:
 
     Resolution order:
         1. ``importlib.metadata`` (installed package).
-        2. ``pyproject.toml`` walk-up from this file (editable installs).
-        3. ``pyproject.toml`` walk-up from ``sys.argv[0]`` (frozen / script runs
-           where ``__file__`` points deep into site-packages).
+        2. ``manifest.json`` next to ``sys.executable`` (PyInstaller-frozen bundle).
+        3. ``pyproject.toml`` walk-up from this file (editable installs).
+        4. ``pyproject.toml`` walk-up from ``sys.argv[0]`` (script runs where
+           ``__file__`` points deep into site-packages).
 
     Cached on success only — an early ``None`` (e.g. before ``sys.argv`` is
     populated) doesn't pin the result; a later call can still recover.
@@ -40,8 +41,27 @@ def _resolve() -> str | None:
             return v
     except (PackageNotFoundError, Exception):
         # Metadata unavailable (editable installs, frozen bundles, broken
-        # site-packages). Fall through to the pyproject.toml walk-up.
+        # site-packages). Fall through.
         pass
+
+    # PyInstaller-frozen runtime: build.py drops manifest.json next to the
+    # ELF (versions/<v>/manifest.json). Preferred over pyproject walk-up
+    # in frozen mode because the source tree isn't shipped.
+    if getattr(sys, "frozen", False):
+        try:
+            import json
+
+            manifest = Path(sys.executable).resolve().parent / "manifest.json"
+            if manifest.is_file():
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                v = data.get("version")
+                if isinstance(v, str) and v:
+                    return v
+        except Exception:
+            # Best-effort manifest read/parse in frozen mode; any failure
+            # (missing file, unreadable, malformed JSON) falls through to
+            # the pyproject walk-up below.
+            pass
 
     try:
         import tomllib

@@ -26,5 +26,6 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+ureq = { workspace = true }
 locai-link-shared = { path = "../../shared" }
 

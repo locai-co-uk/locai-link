@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# systemd user service for the Locai Link companion (menubar tray).
+#
+# Installed to ~/.config/systemd/user/ by the Setup Assistant on
+# Finish. Auto-starts at graphical login when enabled via:
+#
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now locai-link-companion.service
+#
+# The `Environment=` block bakes in the two workarounds our WebKit
+# runtime needs on modern Linux — DMABUF renderer off (Nvidia + some
+# Intel drivers throw GBM errors otherwise) and X11 backend forced
+# (Wayland's tray-icon story is DE-dependent; XWayland + AppIndicator
+# is the universally-working path). Users who want to try native
+# Wayland can override with a drop-in file.
+
+[Unit]
+Description=Locai Link Companion (menubar)
+Documentation=https://control.locai.co.uk
+# Companion is a GUI tray app — only starts once a graphical session
+# is up. Without this it would race the graphical session on bring-up
+# and fail to attach to the tray.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=WEBKIT_DISABLE_DMABUF_RENDERER=1
+Environment=GDK_BACKEND=x11
+ExecStart=%h/.local/share/locai/companion
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:%h/.local/share/locai/logs/companion.stdout.log
+StandardError=append:%h/.local/share/locai/logs/companion.stderr.log
+
+[Install]
+WantedBy=graphical-session.target

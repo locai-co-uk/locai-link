@@ -9,8 +9,9 @@
 <html lang="en">
 <head>
     <meta charset="utf-8"/>
-    <title>Welcome to Loc.ai Link</title>
+    <title>Welcome to Locai Link</title>
     <style>
+        :root { color-scheme: light dark; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
             font-size: 13px;
@@ -41,14 +42,17 @@
             color: #00B85A;
             margin-bottom: 6px;
         }
+        @media (prefers-color-scheme: dark) {
+            body { color: #f5f5f7; }
+        }
     </style>
 </head>
 <body>
-    <div class="eyebrow">Loc.ai Link</div>
-    <h1>Welcome to the Loc.ai Link Installer</h1>
+    <div class="eyebrow">Locai Link</div>
+    <h1>Welcome to the Locai Link Installer</h1>
 
     <p>
-        Loc.ai Link is the on-device Agent runtime that turns this Mac
+        Locai Link is the on-device Agent runtime that turns this Mac
         into an inference node on your local network.
     </p>
 

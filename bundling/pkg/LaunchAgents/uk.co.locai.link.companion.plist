@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+    SPDX-License-Identifier: BUSL-1.1
+
+    LaunchAgent for the Locai Link menubar companion. Bundled into the
+    .pkg payload; the Setup Assistant always bootstraps it into the
+    user's domain on Finish. The "Start at login" checkbox on the
+    Permissions step controls only the RunAtLoad key below.
+
+    ProgramArguments points at the .app's binary rather than
+    `open -a Locai\ Link.app` so launchd owns the process directly.
+    That lets the companion be started/stopped via launchctl
+    kickstart/bootout without racing with Launch Services.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>uk.co.locai.link.companion</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Locai Link.app/Contents/MacOS/Locai Link</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash (non-zero exit), stay quit on user ⌘Q (exit 0).
+         Menu-bar app pattern: dead process → no tray icon → user is stuck. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Locai/logs/companion.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Locai/logs/companion.stderr.log</string>
+</dict>
+</plist>

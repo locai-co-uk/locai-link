@@ -27,3 +27,30 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+
+  # ── Rust (Tauri apps + shared crate + launcher) ─────────────
+  - package-ecosystem: "cargo"
+    directory: "/crates"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps-cargo)"
+    labels:
+      - "dependencies"
+      - "ci"
+    open-pull-requests-limit: 10
+    ignore:
+      # Transitively pinned by gtk 0.18.x → Tauri 2.x's webkit2gtk stack.
+      # Moving glib to ≥0.20 requires the gtk4-rs bindings, which lands
+      # with Tauri 3. Suppress the "security_update_not_possible" PR
+      # loop until that migration is scheduled.
+      - dependency-name: "glib"
+      - dependency-name: "gtk"
+      - dependency-name: "gdk"
+      - dependency-name: "gdk-pixbuf"
+      - dependency-name: "gdkx11"
+      - dependency-name: "gio"
+      - dependency-name: "pango"
+      - dependency-name: "cairo-rs"
+      - dependency-name: "atk"

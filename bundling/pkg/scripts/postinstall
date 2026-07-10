@@ -32,6 +32,10 @@ INSTALL_ROOT="/Library/Locai"
 LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
 SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
+SETUP_ASSISTANT_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
+COMPANION_APP="${INSTALL_ROOT}/Locai Link.app"
+COMPANION_SYMLINK="/Applications/Locai Link.app"
+UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
 
 log() {
     echo "[postinstall] $*"
@@ -55,12 +59,15 @@ chown root:wheel "$LAUNCHER"
 # sudo), otherwise fall back to the console user we detect for the
 # Setup Assistant handoff.
 INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
+# LaunchAgents write to $INSTALL_ROOT/logs/*.log — create it here so the
+# first launchctl kickstart doesn't fail on a fresh install.
+for d in versions state logs; do
+    mkdir -p "$INSTALL_ROOT/$d"
+done
 if [[ "$INSTALL_USER" != "root" ]]; then
     chown "$INSTALL_USER:staff" "$INSTALL_ROOT"
     for d in versions state logs; do
-        if [[ -e "$INSTALL_ROOT/$d" ]]; then
-            chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
-        fi
+        chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
     done
 fi
 log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
@@ -73,7 +80,77 @@ mkdir -p "$(dirname "$CLI_SYMLINK")"
 ln -sf "$LAUNCHER" "$CLI_SYMLINK"
 log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
 
-# --- 3. Launch Setup Assistant ---------------------------------------
+# --- 3. Uninstaller script -------------------------------------------
+# uninstall.sh is shipped in the payload but permissions on files
+# copied by pkgbuild aren't guaranteed to be executable. Force 755 so
+# both the tray menu ("Uninstall Locai Link…" via osascript) and
+# `sudo /Library/Locai/uninstall.sh` from Terminal can invoke it.
+if [[ -f "$UNINSTALLER" ]]; then
+    chmod 755 "$UNINSTALLER"
+    chown root:wheel "$UNINSTALLER"
+    log "uninstaller ready at $UNINSTALLER"
+else
+    log "WARN: uninstaller not found at $UNINSTALLER"
+fi
+
+# --- 4. /Applications/Locai Link.app ---------------------------------
+# The companion menubar app is the user-facing entry point ("open
+# Locai Link" in Applications / Spotlight / Launchpad). We used to
+# symlink from /Applications back into /Library/Locai; macOS's Launch
+# Services doesn't index symlinked .apps into Applications the same
+# way it does real bundles, so Spotlight can't find the app and the
+# Finder Applications sidebar view misses it.
+#
+# `ditto` is the macOS-native copy for .apps — preserves the code
+# signature, resource forks, and extended attributes that a plain
+# `cp -R` may drop. First remove any stale copy/symlink so a repeat
+# install lands cleanly.
+# lsregister lives outside PATH; used to force LaunchServices to pick up the
+# freshly-copied .app (Launchpad + `open -a` + Spotlight-via-LS all read this).
+# mdimport alone updates the Spotlight metadata store but not the LS database.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+if [[ -d "$COMPANION_APP" ]]; then
+    rm -rf "$COMPANION_SYMLINK"
+    ditto "$COMPANION_APP" "$COMPANION_SYMLINK"
+    log "companion copied: $COMPANION_APP -> $COMPANION_SYMLINK"
+
+    if [[ -x "$LSREGISTER" ]]; then
+        "$LSREGISTER" -f -R -trusted "$COMPANION_SYMLINK" 2>/dev/null || true
+        log "lsregister ran on $COMPANION_SYMLINK"
+    fi
+    if command -v mdimport >/dev/null 2>&1; then
+        mdimport "$COMPANION_SYMLINK" 2>/dev/null || true
+        log "mdimport ran on $COMPANION_SYMLINK"
+    fi
+else
+    log "companion app not found at $COMPANION_APP — skipping /Applications copy"
+fi
+
+# --- 4b. /Applications/Locai Setup Assistant.app ---------------------
+# The SA is also copied into /Applications so it's discoverable via
+# Spotlight / Launchpad / the Applications sidebar. Users who quit the
+# auto-launched SA before completing setup would otherwise have no way
+# to reopen it (the /Library/Locai copy isn't indexed by Launch
+# Services). Same ditto pattern as the companion — preserves the code
+# signature — followed by mdimport so Spotlight sees it immediately.
+if [[ -d "$SETUP_ASSISTANT" ]]; then
+    rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
+    ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
+    log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
+    if [[ -x "$LSREGISTER" ]]; then
+        "$LSREGISTER" -f -R -trusted "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
+        log "lsregister ran on $SETUP_ASSISTANT_IN_APPLICATIONS"
+    fi
+    if command -v mdimport >/dev/null 2>&1; then
+        mdimport "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
+        log "mdimport ran on $SETUP_ASSISTANT_IN_APPLICATIONS"
+    fi
+else
+    log "setup assistant not found at $SETUP_ASSISTANT — skipping /Applications copy"
+fi
+
+# --- 5. Launch Setup Assistant ---------------------------------------
 # The postinstall runs as root; the Setup Assistant must run as the
 # actual user for LaunchAgent registration and Keychain access to work
 # correctly. Resolve the console user (the person driving Installer.app)
@@ -87,15 +164,24 @@ if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     exit 0
 fi
 
-if [[ -d "$SETUP_ASSISTANT" ]]; then
+# Prefer the /Applications copy so LaunchServices registers the .app
+# by its indexed bundle identity; fall back to the /Library/Locai copy
+# if the copy step above failed.
+SA_TO_LAUNCH=""
+if [[ -d "$SETUP_ASSISTANT_IN_APPLICATIONS" ]]; then
+    SA_TO_LAUNCH="$SETUP_ASSISTANT_IN_APPLICATIONS"
+elif [[ -d "$SETUP_ASSISTANT" ]]; then
+    SA_TO_LAUNCH="$SETUP_ASSISTANT"
+fi
+if [[ -n "$SA_TO_LAUNCH" ]]; then
     # `open` returns immediately once the .app is dispatched to
     # launchd; the postinstall doesn't hold the Installer.app UI thread.
-    sudo -u "$CONSOLE_USER" open -a "$SETUP_ASSISTANT" || {
-        log "WARN: failed to launch Setup Assistant.app; user must launch it manually"
+    sudo -u "$CONSOLE_USER" open -a "$SA_TO_LAUNCH" || {
+        log "WARN: failed to launch $SA_TO_LAUNCH; user must launch it manually"
     }
-    log "Setup Assistant handed off to $CONSOLE_USER"
+    log "Setup Assistant handed off to $CONSOLE_USER (from $SA_TO_LAUNCH)"
 else
-    log "Setup Assistant.app not found at $SETUP_ASSISTANT — user must launch it manually"
+    log "Setup Assistant.app not found; user must launch it manually"
 fi
 
 exit 0

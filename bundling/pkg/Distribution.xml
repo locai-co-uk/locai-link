@@ -10,7 +10,7 @@
   bundling/pkg/README.md for the full build sequence.
 -->
 <installer-gui-script minSpecVersion="2">
-    <title>Loc.ai Link</title>
+    <title>Locai Link</title>
     <organization>uk.co.locai</organization>
 
     <!-- System-wide install to /Library/Locai. Users can't relocate. -->
@@ -44,7 +44,7 @@
 
     <choice id="uk.co.locai.link.runtime"
             visible="false"
-            title="Loc.ai Link"
+            title="Locai Link"
             description="On-device inference agent"
             start_selected="true">
         <pkg-ref id="uk.co.locai.link.runtime"/>

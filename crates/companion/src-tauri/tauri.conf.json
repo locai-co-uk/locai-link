@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "companion",
+  "productName": "Locai Link",
   "version": "0.1.0",
   "identifier": "uk.co.locai.link.companion",
   "build": {
@@ -12,15 +12,20 @@
   "app": {
     "windows": [
       {
-        "title": "companion",
-        "width": 800,
-        "height": 600,
+        "label": "main",
+        "title": "Locai Link Preferences",
+        "width": 572,
+        "height": 682,
+        "minWidth": 528,
+        "minHeight": 616,
+        "resizable": true,
         "visible": false,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "titleBarStyle": "Visible"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8101; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:20505; font-src 'self' data:"
     }
   },
   "bundle": {
