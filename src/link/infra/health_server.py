@@ -85,7 +85,7 @@ class HealthState:
         # so the UI can drop the "Queued" spinner — otherwise a dropped
         # Control dispatch leaves it stuck until the runtime restarts.
         with self._deploy_lock:
-            for pipeline_id, dep in list(self.deployments.items()):
+            for dep in self.deployments.values():
                 if dep.get("stage") == "queued" and now - dep.get("created_at", now) > QUEUED_TTL_SECONDS:
                     dep["stage"] = "failed"
                     dep["progress_pct"] = 0.0
