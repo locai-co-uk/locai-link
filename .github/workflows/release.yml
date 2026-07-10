@@ -86,6 +86,11 @@ jobs:
     name: Bundle on ${{ matrix.os }}
     needs: release
     runs-on: ${{ matrix.os }}
+    # Release channel — baked into the Tauri frontends via VITE_CHANNEL at
+    # build time. Shows in the SA sidebar as "· Alpha - Build" (or Beta,
+    # etc.). Set to "prod" (or empty) to hide the label when going GA.
+    env:
+      VITE_CHANNEL: alpha
     strategy:
       fail-fast: false
       matrix:

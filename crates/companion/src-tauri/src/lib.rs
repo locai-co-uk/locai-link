@@ -51,9 +51,34 @@ const MENU_ID_QUIT: &str = "quit";
 /// Suffix after this prefix is the pipeline id.
 const MENU_ID_MODEL_PREFIX: &str = "model:";
 
-const STATUS_INITIAL: &str = "Locai Link · Checking…";
-const STATUS_UP: &str = "Locai Link · ONLINE";
-const STATUS_DOWN: &str = "Locai Link · OFFLINE";
+/// Release-channel suffix baked in from VITE_CHANNEL at compile time
+/// (defaults to "alpha" when unset — matches the SA side). "prod" or
+/// empty → the suffix is empty and no channel marker renders.
+static CHANNEL_SUFFIX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let raw = option_env!("VITE_CHANNEL").unwrap_or("alpha").to_ascii_lowercase();
+    if raw.is_empty() || raw == "prod" {
+        String::new()
+    } else {
+        let mut chars = raw.chars();
+        let capitalized: String = chars
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+            .into_iter()
+            .chain(chars)
+            .collect();
+        format!(" · {capitalized}")
+    }
+});
+
+fn status_text_initial() -> String {
+    format!("Locai Link{} · Checking…", *CHANNEL_SUFFIX)
+}
+fn status_text_up() -> String {
+    format!("Locai Link{} · ONLINE", *CHANNEL_SUFFIX)
+}
+fn status_text_down() -> String {
+    format!("Locai Link{} · OFFLINE", *CHANNEL_SUFFIX)
+}
 
 /// Malformed and Down collapse into `Down` — both mean "no usable data".
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -125,7 +150,7 @@ pub fn run() {
             thread::spawn(kickstart_runtime_if_installed);
 
             let (menu, status_item) =
-                build_tray_menu(app.handle(), &[], &[], STATUS_INITIAL)?;
+                build_tray_menu(app.handle(), &[], &[], &status_text_initial())?;
 
             let icon = Image::from_bytes(TRAY_ICON_UP)?;
             let tray = TrayIconBuilder::with_id("main")
@@ -498,7 +523,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
     // Track the mounted header text so an Up↔Down transition (which doesn't
     // touch the models digest) still forces a rebuild — IconMenuItem::set_text
     // on Tauri 2.11 didn't reliably repaint the disabled header row.
-    let mut current_status_text = STATUS_INITIAL.to_string();
+    let mut current_status_text = status_text_initial();
 
     loop {
         let health = agent_health(DEFAULT_HEALTH_URL);
@@ -521,17 +546,18 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         let status_text = status_label(&health, &models);
 
         // Tray tooltip mirrors serving state — Discord/Slack-style hover hint.
+        let brand = format!("Locai Link{}", *CHANNEL_SUFFIX);
         let tooltip = match (&health, &models) {
             (HealthStatus::Up(_), ModelsStatus::Ok(list)) => {
                 let n = list.iter().filter(|m| m.is_serving).count();
                 match n {
-                    0 => "Locai Link".to_string(),
-                    1 => "Locai Link · Serving 1 model".to_string(),
-                    n => format!("Locai Link · Serving {n} models"),
+                    0 => brand.clone(),
+                    1 => format!("{brand} · Serving 1 model"),
+                    n => format!("{brand} · Serving {n} models"),
                 }
             }
-            (HealthStatus::Up(_), _) => "Locai Link".to_string(),
-            _ => "Locai Link · Offline".to_string(),
+            (HealthStatus::Up(_), _) => brand.clone(),
+            _ => format!("{brand} · Offline"),
         };
         if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
             eprintln!("[companion] tray.set_tooltip failed: {e}");
@@ -578,7 +604,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
 /// the Models submenu label respectively — this row is a single "up or not" cue.
 fn status_label(health: &HealthStatus, _models: &ModelsStatus) -> String {
     match health {
-        HealthStatus::Up(_) => STATUS_UP.to_string(),
-        HealthStatus::Down | HealthStatus::Malformed(_) => STATUS_DOWN.to_string(),
+        HealthStatus::Up(_) => status_text_up(),
+        HealthStatus::Down | HealthStatus::Malformed(_) => status_text_down(),
     }
 }

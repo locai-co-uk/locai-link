@@ -4,6 +4,17 @@
   import locaiLogo from "./lib/locai-logo.png";
   import { onMount } from "svelte";
 
+  // Release-channel marker shown next to the version in the sidebar foot.
+  // Read at build time from VITE_CHANNEL (defaults to "alpha" if unset —
+  // covers local dev + workflows that forget to set it, safer than
+  // silently shipping without a label). Set VITE_CHANNEL=prod in the
+  // release workflow when going GA to drop the label entirely.
+  const CHANNEL = (import.meta.env.VITE_CHANNEL ?? "alpha").toLowerCase();
+  const channelLabel =
+    CHANNEL === "prod" || CHANNEL === ""
+      ? ""
+      : `${CHANNEL.charAt(0).toUpperCase()}${CHANNEL.slice(1)}`;
+
   // Post-install user configuration flow. The .pkg installer has
   // already placed files and registered LaunchAgents; this wizard's
   // job is Sign in → Models → Serving → Permissions → Finish.
@@ -601,7 +612,7 @@
       </div>
       {#if bootstrap.install.installed && bootstrap.install.version}
         <div class="rail-foot">
-          v{bootstrap.install.version}
+          v{bootstrap.install.version}{channelLabel ? ` · ${channelLabel}` : ""}
         </div>
       {/if}
     </aside>
@@ -690,7 +701,7 @@
 
       {#if bootstrap.install.installed && bootstrap.install.version}
         <div class="rail-foot">
-          v{bootstrap.install.version}
+          v{bootstrap.install.version}{channelLabel ? ` · ${channelLabel}` : ""}
         </div>
       {/if}
     </aside>

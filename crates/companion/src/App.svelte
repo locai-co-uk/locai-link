@@ -97,6 +97,15 @@
   let copyFlash = $state<boolean>(false);
 
   const POLL_INTERVAL_MS = 2000;
+
+  // Release-channel marker shown next to the version. Matches the SA
+  // side; read from VITE_CHANNEL at build time (default "alpha" so local
+  // dev + missing env still labels correctly). "prod" or empty hides it.
+  const CHANNEL = (import.meta.env.VITE_CHANNEL ?? "alpha").toLowerCase();
+  const channelLabel =
+    CHANNEL === "prod" || CHANNEL === ""
+      ? ""
+      : `${CHANNEL.charAt(0).toUpperCase()}${CHANNEL.slice(1)}`;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   onMount(async () => {
@@ -358,7 +367,9 @@
         </div>
         <div class="row">
           <span class="row__label">Version</span>
-          <span class="row__value mono">{prefs.agent.version ?? "—"}</span>
+          <span class="row__value mono">
+            {prefs.agent.version ?? "—"}{channelLabel ? ` · ${channelLabel}` : ""}
+          </span>
         </div>
         <div class="row row--action">
           <button class="btn btn--secondary" onclick={openControl}>
