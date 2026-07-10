@@ -86,15 +86,11 @@ class HealthState:
         # Control dispatch leaves it stuck until the runtime restarts.
         with self._deploy_lock:
             for pipeline_id, dep in list(self.deployments.items()):
-                if (
-                    dep.get("stage") == "queued"
-                    and now - dep.get("created_at", now) > QUEUED_TTL_SECONDS
-                ):
+                if dep.get("stage") == "queued" and now - dep.get("created_at", now) > QUEUED_TTL_SECONDS:
                     dep["stage"] = "failed"
                     dep["progress_pct"] = 0.0
             deployments_snapshot = [
-                {k: v for k, v in dep.items() if k != "created_at"}
-                for dep in self.deployments.values()
+                {k: v for k, v in dep.items() if k != "created_at"} for dep in self.deployments.values()
             ]
         return {
             "version": self.version,
