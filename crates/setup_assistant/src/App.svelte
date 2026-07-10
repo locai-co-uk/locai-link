@@ -139,7 +139,16 @@
         config_path: string | null;
         deployed_count: number;
       }
-    | { kind: "error"; message: string; registered?: RegisteredDevice };
+    | {
+        kind: "error";
+        message: string;
+        registered?: RegisteredDevice;
+        // Which phase of completeSetup failed — drives the fine-print
+        // suggestion under the error message so we don't tell the user
+        // "the local config couldn't be written" when it was actually a
+        // deploy that failed after the config was already on disk.
+        phase?: "minting" | "registering" | "writing" | "bootstrapping" | "deploying";
+      };
 
   let bootstrap = $state<Bootstrap>({ kind: "checking" });
   let current = $state(0);
@@ -323,7 +332,11 @@
       try {
         registrationKey = await invoke<string>("mint_registration_key");
       } catch (e) {
-        finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+        finish = {
+          kind: "error",
+          phase: "minting",
+          message: e instanceof Error ? e.message : String(e),
+        };
         return;
       }
 
@@ -335,7 +348,11 @@
       try {
         deviceName = await invoke<string>("suggest_device_name");
       } catch (e) {
-        finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+        finish = {
+          kind: "error",
+          phase: "registering",
+          message: e instanceof Error ? e.message : String(e),
+        };
         return;
       }
 
@@ -346,7 +363,11 @@
           registrationKey,
         });
       } catch (e) {
-        finish = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+        finish = {
+          kind: "error",
+          phase: "registering",
+          message: e instanceof Error ? e.message : String(e),
+        };
         return;
       }
     }
@@ -366,6 +387,7 @@
       // exists on the server side either way.
       finish = {
         kind: "error",
+        phase: "writing",
         message: e instanceof Error ? e.message : String(e),
         registered,
       };
@@ -450,6 +472,7 @@
       const first = failures[0].reason;
       finish = {
         kind: "error",
+        phase: "deploying",
         message: `Deploy failed for ${failures.length} of ${selected.length} models: ${
           first instanceof Error ? first.message : String(first)
         }`,
@@ -914,12 +937,20 @@
               <div class="signin-block__msg signin-block__msg--error">
                 {finish.message}
               </div>
-              {#if finish.registered}
+              {#if finish.phase === "writing" && finish.registered}
                 <p class="fine-print">
                   The device was registered on Control
                   (<span class="mono">{finish.registered.device_id}</span>)
                   but the local config couldn't be written. You can
                   re-run this step or hand the config off manually.
+                </p>
+              {:else if finish.phase === "deploying" && finish.registered}
+                <p class="fine-print">
+                  The device was registered on Control
+                  (<span class="mono">{finish.registered.device_id}</span>)
+                  and the config is in place — only the model deploy step
+                  failed. You can retry, or deploy the models from Control
+                  later.
                 </p>
               {/if}
               <button

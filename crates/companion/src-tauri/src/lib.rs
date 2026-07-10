@@ -169,8 +169,10 @@ fn kickstart_runtime_if_installed() {
         .output();
 }
 
-/// Companion IPC port, adjacent to the health server's 50505.
-const IPC_PORT: u16 = 50506;
+/// Companion IPC port, adjacent to the health server's 20505. Both live
+/// below the ephemeral range floor (32768 on Linux / 49152 on macOS) so the
+/// OS can't grab them for an outgoing connection before we bind.
+const IPC_PORT: u16 = 20506;
 
 /// Loopback listener so other processes can ask the companion to open
 /// Preferences. One endpoint: `POST /preferences/show` → 204; anything else → 404.

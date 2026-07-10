@@ -101,11 +101,13 @@ fi
 # --- 2. Kill any stragglers -----------------------------------------
 # Belt-and-braces: bootout SIGTERMs each service, but a runtime spawned
 # outside launchd (e.g. `locai run` from a terminal) wouldn't be
-# covered. Match on install path so we don't hit unrelated processes.
-pkill -f "$INSTALL_ROOT/locai-link"     2>/dev/null || true
-pkill -f "Locai Link.app"               2>/dev/null || true
-pkill -f "Locai Setup Assistant.app"    2>/dev/null || true
-pkill -f "Setup Assistant.app"          2>/dev/null || true
+# covered. Match against `/<name>.app/` (with leading + trailing slashes)
+# so we don't hit macOS's own /System/.../Setup Assistant.app.
+# SA is killed LAST because it's typically the process that invoked us
+# via osascript — killing it earlier cuts off our own error path.
+pkill -f "$INSTALL_ROOT/locai-link"                 2>/dev/null || true
+pkill -f "/Locai Link.app/"                         2>/dev/null || true
+pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
 
 # --- 3. Unregister the .apps from LaunchServices --------------------
 # Even after removing the .app bundle, LaunchServices can keep an

@@ -288,7 +288,7 @@ class AgentRuntime:
         logger.info("Agent Runtime active...")
         self.status_logger.report_lifecycle("online")
         # Lazy-start the health server here (not in __init__) so tests
-        # that construct an AgentRuntime in-process don't race for port 50505.
+        # that construct an AgentRuntime in-process don't race for port 20505.
         self.health_server.start()
 
         # 1. Try Recovery First

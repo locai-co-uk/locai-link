@@ -139,12 +139,16 @@ def test_pending_endpoint_registers_queued_row(server):
         {"pipeline_id": "p-1", "model_name": "foo.gguf"},
     )
     assert resp.status == 202
-    assert state.deployments["p-1"] == {
+    # `created_at` is set by set_deployment_progress; check the stable
+    # fields only.
+    row = {k: v for k, v in state.deployments["p-1"].items() if k != "created_at"}
+    assert row == {
         "pipeline_id": "p-1",
         "model_name": "foo.gguf",
         "stage": "queued",
         "progress_pct": 0.0,
     }
+    assert "created_at" in state.deployments["p-1"]
 
 
 def test_pending_endpoint_rejects_missing_pipeline_id(server):

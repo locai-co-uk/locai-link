@@ -21,7 +21,13 @@ from typing_extensions import override
 logger = logging.getLogger(__name__)
 
 HEALTH_HOST = "127.0.0.1"
-HEALTH_PORT = 50505
+HEALTH_PORT = 20505
+
+# Queued deployment rows time out into `failed` after this many seconds
+# if the runtime never advances them (e.g. Control DEPLOY_MODEL was lost).
+# 5 minutes accommodates slow first-deploy cold starts while capping how
+# long the UI can be stuck on "Queued".
+QUEUED_TTL_SECONDS = 300
 
 _MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving|cancel-deploy)$")
 _LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
@@ -70,11 +76,29 @@ class HealthState:
                 "endpoint": self.transport_endpoint,
                 "connected": self.transport_connected,
             }
+        # One time.monotonic() call feeds both the uptime field and the
+        # queued-row TTL sweep so the two are consistent with each other
+        # (and so tests that patch monotonic with a fixed side-effect list
+        # don't need to know how many internal calls we make).
+        now = time.monotonic()
+        # Queued rows older than QUEUED_TTL_SECONDS are flipped to `failed`
+        # so the UI can drop the "Queued" spinner — otherwise a dropped
+        # Control dispatch leaves it stuck until the runtime restarts.
         with self._deploy_lock:
-            deployments_snapshot = list(self.deployments.values())
+            for pipeline_id, dep in list(self.deployments.items()):
+                if (
+                    dep.get("stage") == "queued"
+                    and now - dep.get("created_at", now) > QUEUED_TTL_SECONDS
+                ):
+                    dep["stage"] = "failed"
+                    dep["progress_pct"] = 0.0
+            deployments_snapshot = [
+                {k: v for k, v in dep.items() if k != "created_at"}
+                for dep in self.deployments.values()
+            ]
         return {
             "version": self.version,
-            "uptime_seconds": int(time.monotonic() - self._boot_time),
+            "uptime_seconds": int(now - self._boot_time),
             "currently_serving": self.currently_serving,
             "model_id": self.model_id,
             "transport": transport,
@@ -139,6 +163,10 @@ class HealthState:
                 "model_name": model_name or existing.get("model_name"),
                 "stage": stage,
                 "progress_pct": progress_pct,
+                # Timestamp lets snapshot() age stale queued rows out — a
+                # queued row whose Control DEPLOY_MODEL never arrived would
+                # otherwise linger until the runtime restarted.
+                "created_at": existing.get("created_at", time.monotonic()),
             }
 
     def set_transport(

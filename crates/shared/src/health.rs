@@ -9,10 +9,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Loopback-only endpoint the local agent exposes.
-pub const DEFAULT_HEALTH_URL: &str = "http://127.0.0.1:50505/healthz";
+pub const DEFAULT_HEALTH_URL: &str = "http://127.0.0.1:20505/healthz";
 
 /// Endpoint for listing servable-model pipelines.
-pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:50505/models";
+pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:20505/models";
 
 /// Base for per-model action endpoints, combined with
 /// `/{pipeline_id}/{serve,stop-serving,cancel-deploy}`. Same string as

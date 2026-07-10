@@ -23,16 +23,14 @@ log() {
     echo "[locai-uninstall] $*"
 }
 
-# Refuse to run `rm -rf` on anything that looks unsafe — empty, root,
-# or a top-level directory. A user who unset $HOME then invoked the
-# uninstaller could otherwise wipe /.local/share/locai (technically an
-# absolute path) or worse. Belt-and-braces since $HOME is normally safe.
-case "$INSTALL_ROOT" in
-    ""|"/"|"/root"|"/home"|"/Users"|"/var"|"/opt"|"/etc"|"/tmp"|"/usr"|"/bin"|"/sbin")
-        log "refusing to remove unsafe INSTALL_ROOT: '$INSTALL_ROOT'"
-        exit 1
-        ;;
-esac
+# Refuse to run `rm -rf` unless the directory looks like an actual Locai
+# install root — must contain boot.json (dropped by install.sh). Positive
+# check catches arbitrary paths like LOCAI_INSTALL_ROOT=$HOME/... that a
+# blocklist can't enumerate.
+if [[ ! -f "$INSTALL_ROOT/boot.json" ]]; then
+    log "refusing to remove '$INSTALL_ROOT': not a Locai install root (no boot.json)"
+    exit 1
+fi
 
 # --- 1. Stop + disable user services (best-effort) --------------------
 # `disable --now` stops and prevents auto-start in one call. Failures

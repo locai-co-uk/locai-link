@@ -258,57 +258,75 @@ pub struct SignInState {
 /// the first post-boot call to `/auth/device/code` has been observed to time
 /// out on macOS (DNS/TLS cold start) with an immediate retry succeeding.
 #[tauri::command]
-fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
-    let payload = serde_json::json!({
-        "client_metadata": {
-            "os": std::env::consts::OS,
-            "source": "setup_assistant",
-        }
-    });
+async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
+    // HTTP + optional retry sleep runs on the blocking pool so the SA
+    // window doesn't freeze during the device-code request.
+    let (device_code, start) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, DeviceCodeStart), String> {
+        let payload = serde_json::json!({
+            "client_metadata": {
+                "os": std::env::consts::OS,
+                "source": "setup_assistant",
+            }
+        });
+        let send = || {
+            http_agent()
+                .post(&format!("{CONTROL_API_URL}/auth/device/code"))
+                .set("Accept", "application/json")
+                .send_json(payload.clone())
+        };
+        let resp = match send() {
+            Ok(r) => r,
+            Err(ureq::Error::Transport(t)) => {
+                eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying once");
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                send().map_err(|e| describe_ureq_err("device code request", e))?
+            }
+            Err(e) => return Err(describe_ureq_err("device code request", e)),
+        };
 
-    let send = || {
-        http_agent()
-            .post(&format!("{CONTROL_API_URL}/auth/device/code"))
-            .set("Accept", "application/json")
-            .send_json(payload.clone())
-    };
-    let resp = match send() {
-        Ok(r) => r,
-        Err(ureq::Error::Transport(t)) => {
-            eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying once");
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            send().map_err(|e| describe_ureq_err("device code request", e))?
-        }
-        Err(e) => return Err(describe_ureq_err("device code request", e)),
-    };
+        let body: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| format!("device code response malformed: {e}"))?;
 
-    let body: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| format!("device code response malformed: {e}"))?;
+        let device_code = body
+            .get("device_code")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "device_code missing from response".to_string())?
+            .to_string();
+        let user_code = body
+            .get("user_code")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "user_code missing from response".to_string())?
+            .to_string();
+        let verification_uri = body
+            .get("verification_uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "verification_uri missing from response".to_string())?
+            .to_string();
+        let verification_uri_complete = body
+            .get("verification_uri_complete")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&verification_uri)
+            .to_string();
+        let interval = body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
+        let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(600);
 
-    let device_code = body
-        .get("device_code")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "device_code missing from response".to_string())?
-        .to_string();
-    let user_code = body
-        .get("user_code")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "user_code missing from response".to_string())?
-        .to_string();
-    let verification_uri = body
-        .get("verification_uri")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "verification_uri missing from response".to_string())?
-        .to_string();
-    let verification_uri_complete = body
-        .get("verification_uri_complete")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&verification_uri)
-        .to_string();
-    let interval = body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
-    let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(600);
+        Ok((
+            device_code,
+            DeviceCodeStart {
+                user_code,
+                verification_uri,
+                verification_uri_complete,
+                interval,
+                expires_in,
+            },
+        ))
+    })
+    .await
+    .expect("sign_in_start panicked")?;
 
+    // Persist the device_code into shared state on return — held only
+    // during the (fast) mutex critical section, safe from the main thread.
     *state.inner.lock().expect("SignInState poisoned") = Some(Session {
         device_code,
         access_token: None,
@@ -317,13 +335,7 @@ fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, Strin
         email: None,
     });
 
-    Ok(DeviceCodeStart {
-        user_code,
-        verification_uri,
-        verification_uri_complete,
-        interval,
-        expires_in,
-    })
+    Ok(start)
 }
 
 /// Poll the token endpoint once. Front-end paces polls by `interval` from
@@ -710,7 +722,7 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
         pipeline_id: &pipeline_id,
         model_name: model_name.as_deref(),
     };
-    let url = "http://127.0.0.1:50505/deployments/pending";
+    let url = "http://127.0.0.1:20505/deployments/pending";
     let payload = serde_json::to_value(&body).unwrap();
 
     // `install_launchagents` returns as soon as fork() succeeds, but the
@@ -743,46 +755,48 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
 /// on macOS but PyInstaller unpack + zenoh handshake can burn more on
 /// a slow disk.
 #[tauri::command]
-#[allow(unused_assignments)]
-fn wait_for_agent_ready() -> Result<(), String> {
-    let url = "http://127.0.0.1:50505/healthz";
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    // Every loop iteration overwrites this before the deadline check reads
-    // it, so the initial value would only surface if the loop never ran
-    // (unreachable). `#[allow(unused_assignments)]` is on the fn so the
-    // dead-store warning doesn't fire on that unreachable initialisation.
-    let mut last_err = String::from("agent never came up");
-    loop {
-        match http_agent().get(url).call() {
-            Ok(resp) => match resp.into_json::<serde_json::Value>() {
-                Ok(body) => {
-                    let connected = body
-                        .get("transport")
-                        .and_then(|t| t.get("connected"))
-                        .and_then(|c| c.as_bool())
-                        .unwrap_or(false);
-                    if connected {
-                        // A small settle delay so Zenoh queryable/subscriber
-                        // registrations propagate to the Control side before
-                        // the next `deploy_model` call races them.
-                        std::thread::sleep(std::time::Duration::from_millis(400));
-                        return Ok(());
+async fn wait_for_agent_ready() -> Result<(), String> {
+    // 15 s of polling on the main thread froze the SA window; hop onto the
+    // blocking pool so the WebView stays responsive during the wait.
+    tauri::async_runtime::spawn_blocking(|| {
+        let url = "http://127.0.0.1:20505/healthz";
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        #[allow(unused_assignments)]
+        let mut last_err = String::from("agent never came up");
+        loop {
+            match http_agent().get(url).call() {
+                Ok(resp) => match resp.into_json::<serde_json::Value>() {
+                    Ok(body) => {
+                        let connected = body
+                            .get("transport")
+                            .and_then(|t| t.get("connected"))
+                            .and_then(|c| c.as_bool())
+                            .unwrap_or(false);
+                        if connected {
+                            // Settle delay so Zenoh queryable/subscriber
+                            // registrations propagate to Control before the
+                            // next `deploy_model` call races them.
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                            return Ok(());
+                        }
+                        last_err = "transport not connected yet".to_string();
                     }
-                    last_err = "transport not connected yet".to_string();
-                }
+                    Err(e) => {
+                        last_err = format!("malformed /healthz: {e}");
+                    }
+                },
                 Err(e) => {
-                    last_err = format!("malformed /healthz: {e}");
+                    last_err = format!("{e}");
                 }
-            },
-            Err(e) => {
-                last_err = format!("{e}");
             }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("wait_for_agent_ready: {last_err}"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("wait_for_agent_ready: {last_err}"));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-    }
+    })
+    .await
+    .expect("wait_for_agent_ready panicked")
 }
 
 /// Queue a deploy of `model_id` onto `device_id`; returns the deployment id.
@@ -1228,7 +1242,7 @@ fn open_companion_preferences() -> Result<(), String> {
 
 fn try_show_preferences_now() -> Result<(), String> {
     match http_agent()
-        .post("http://127.0.0.1:50506/preferences/show")
+        .post("http://127.0.0.1:20506/preferences/show")
         .send_bytes(&[])
     {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
