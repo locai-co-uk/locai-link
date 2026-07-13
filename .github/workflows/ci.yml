@@ -231,7 +231,8 @@ jobs:
           fi
           OUT="$("$BIN" --version 2>&1)"
           echo "$OUT"
-          if ! echo "$OUT" | grep -q "version: $EXPECTED_TAG"; then
+          # llama-swap prints a v-prefixed tag ("version: v239"); accept both.
+          if ! echo "$OUT" | grep -Eq "version: v?$EXPECTED_TAG([^0-9]|$)"; then
             echo "::error::llama-swap version mismatch — expected tag '$EXPECTED_TAG', got: $OUT"
             exit 1
           fi
