@@ -34,8 +34,8 @@ const TRAY_ICON_UP: &[u8] = include_bytes!("../icons/32x32.png");
 #[cfg(not(target_os = "macos"))]
 const TRAY_ICON_DOWN: &[u8] = include_bytes!("../icons/32x32.png");
 
-/// macOS treats the tray icon as a template (auto-tinted); others render as-is.
-const TRAY_ICON_IS_TEMPLATE: bool = cfg!(target_os = "macos");
+/// The brand tray icon is a filled badge not a monochrome glyph
+const TRAY_ICON_IS_TEMPLATE: bool = false;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -55,7 +55,9 @@ const MENU_ID_MODEL_PREFIX: &str = "model:";
 /// (defaults to "alpha" when unset — matches the SA side). "prod" or
 /// empty → the suffix is empty and no channel marker renders.
 static CHANNEL_SUFFIX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    let raw = option_env!("VITE_CHANNEL").unwrap_or("alpha").to_ascii_lowercase();
+    let raw = option_env!("VITE_CHANNEL")
+        .unwrap_or("alpha")
+        .to_ascii_lowercase();
     if raw.is_empty() || raw == "prod" {
         String::new()
     } else {
