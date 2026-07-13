@@ -31,6 +31,9 @@ dev = [
     "pytest>=9.0.0",
     "pytest-mock>=3.15.0",
     "pytest-cov>=7.0.0",
+    # Profiling / benchmarking (local dev only)
+    "pytest-benchmark>=5.0.0",
+    "py-spy>=0.4.0",
     # Documentation
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.7.0",
@@ -74,7 +77,7 @@ minversion = "8.0"
 addopts = "-ra -q -m 'not ci'"
 pythonpath = ["src", "bundling"]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
+python_files = ["test_*.py", "bench_*.py"]
 markers = [
     "ci: marks tests that require external binaries or network (skipped locally, run in CI)",
 ]

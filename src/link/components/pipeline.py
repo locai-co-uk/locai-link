@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 class Pipeline(threading.Thread):
     """A process that connects a source to a sink."""
 
+    # Idle backoff bounds (s): sleep grows from MIN to MAX while a source keeps
+    # returning None, avoiding a ~100Hz spin on an idle pipeline.
+    _IDLE_SLEEP_MIN = 0.01
+    _IDLE_SLEEP_MAX = 0.2
+
     def __init__(self, pipeline_id: str, source: Any, sink: Any):
         """Initialise the pipeline.
 
@@ -39,6 +44,7 @@ class Pipeline(threading.Thread):
         Continuously fetches data from source and passes it to sink.
         """
         logger.info(f"Pipeline '{self.pipeline_id}' started.")
+        idle_sleep = self._IDLE_SLEEP_MIN
         try:
             while self.running:
                 if not self.active_event.is_set():
@@ -53,11 +59,13 @@ class Pipeline(threading.Thread):
                 try:
                     data = self.source()
                     if data is not None:
+                        idle_sleep = self._IDLE_SLEEP_MIN  # active — reset backoff
                         if not self.sink(data):
                             logger.warning(f"Sink is returning False, something went wrong '{self.pipeline_id}'")
                     else:
-                        # Prevent tight loop if source returns None (e.g. empty queue)
-                        time.sleep(0.01)
+                        # No data — back off up to the cap.
+                        time.sleep(idle_sleep)
+                        idle_sleep = min(idle_sleep * 2, self._IDLE_SLEEP_MAX)
 
                 except StopIteration as e:
                     logger.info(f"Pipeline '{self.pipeline_id}' source stopped: {e}")

@@ -46,6 +46,7 @@ class LanguageModel:
         port=8100,
         alias="locai-model",
         cors_allowed_origins: list[str] | None = None,
+        ttl: int | None = None,
         **kwargs,
     ):
         self.mode = mode
@@ -58,6 +59,8 @@ class LanguageModel:
         self.model_id = alias or self.model_path.stem
         self.n_gpu_layers = int(n_gpu_layers or 35)
         self.n_ctx = int(n_ctx or 2048)
+        # Idle-unload timeout (s) for llama-swap; None uses the default.
+        self.ttl = int(ttl) if ttl is not None else None
         self.host = host
         self.port = int(port)
         self._cors_allowed_origins = list(cors_allowed_origins or [])
@@ -75,7 +78,9 @@ class LanguageModel:
                     on_telemetry=self._on_proxy_telemetry,
                 )
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
-                self._swap_manager.add_model(self.model_id, str(self.model_path), extra_args, self._build_serve_env())
+                self._swap_manager.add_model(
+                    self.model_id, str(self.model_path), extra_args, self._build_serve_env(), ttl=self.ttl
+                )
             else:
                 logger.warning("llama-swap not installed — falling back to single-model direct serve")
                 self.server = ModelServer(

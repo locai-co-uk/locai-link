@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -472,6 +473,34 @@ def stop():
             pass
 
 
+def _find_link_repo_root(start: Path) -> Path | None:
+    """Locate the locai-link repository root at or above ``start``.
+
+    Walks upward looking for a ``pyproject.toml`` that positively identifies
+    the locai-link project (project name ``locai-link``, or an ``src/link``
+    package alongside it as a structural fallback).
+
+    Args:
+        start (Path): Directory to begin the upward search from.
+
+    Returns:
+        Path | None: The repo root, or None if it cannot be identified.
+    """
+    for candidate in (start, *start.parents):
+        pyproject = candidate / "pyproject.toml"
+        if not pyproject.exists():
+            continue
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if data.get("project", {}).get("name") == "locai-link":
+            return candidate
+        if (candidate / "src" / "link").is_dir():
+            return candidate
+    return None
+
+
 def reset(hard: bool = False):
     """Nukes the environment recursively.
 
@@ -488,11 +517,20 @@ def reset(hard: bool = False):
     except Exception:
         pass
 
+    # Anchor the destructive walk to the locai-link repo root
+    root = _find_link_repo_root(Path.cwd().absolute())
+    if root is None:
+        logger.critical(
+            "reset refused: current directory is not inside a locai-link repository "
+            "(no locai-link pyproject.toml here or in any parent). "
+            "cd into the repo checkout and retry."
+        )
+        sys.exit(1)
+
+    logger.info(f"Resetting environment under {root}")
+
     # Configuration
-    # Do NOT descend into these — third-party dependency trees whose
-    # own `dist/`/`build/` subdirs are load-bearing (Vite's compiled
-    # entrypoint, Cargo's cached artifacts, etc.). Walking them just
-    # wastes time and breaks the Tauri apps.
+    # Do NOT descend into these
     exclude_dirs = {".git", ".vscode", ".github", "docs", "node_modules", "target"}
 
     # Directories to nuke (exact matches)
@@ -516,10 +554,9 @@ def reset(hard: bool = False):
         target_files.add("session_*.json")
 
     count = 0
-    cwd = Path.cwd()
 
     # Efficient Recursive Walk
-    for root, dirs, files in os.walk(cwd, topdown=True):
+    for dirpath, dirs, files in os.walk(root, topdown=True):
         # 1. Prune Exclusions (Modify dirs in-place to skip traversing ignored trees)
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
 
@@ -528,7 +565,7 @@ def reset(hard: bool = False):
         for d in list(dirs):
             if d in target_dirs:
                 try:
-                    shutil.rmtree(Path(root) / d)
+                    shutil.rmtree(Path(dirpath) / d)
                     count += 1
                     # Vital: Remove from 'dirs' so os.walk doesn't try to enter it
                     dirs.remove(d)
@@ -539,7 +576,7 @@ def reset(hard: bool = False):
         for f in files:
             if any(fnmatch(f, pattern) for pattern in target_files):
                 try:
-                    (Path(root) / f).unlink()
+                    (Path(dirpath) / f).unlink()
                     count += 1
                 except Exception:
                     pass

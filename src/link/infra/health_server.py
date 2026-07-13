@@ -29,7 +29,7 @@ HEALTH_PORT = 20505
 # long the UI can be stuck on "Queued".
 QUEUED_TTL_SECONDS = 300
 
-_MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving|cancel-deploy)$")
+_MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving|cancel-deploy|uninstall)$")
 _LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
 
 
@@ -269,10 +269,19 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                         "host": model.get("host") or "0.0.0.0",
                         "model_display_name": model.get("alias") or pipeline_id,
                     }
-                else:  # stop-serving
+                elif action == "stop-serving":
                     command = {
                         "id": f"loopback-{uuid.uuid4().hex[:8]}",
                         "type": "STOP_SERVING",
+                        "pipeline_id": pipeline_id,
+                    }
+                else:  # uninstall
+                    # force_stop omitted -> schema default False: refuses if the
+                    # pipeline is running, matching the backend default. Stop it
+                    # first, then uninstall.
+                    command = {
+                        "id": f"loopback-{uuid.uuid4().hex[:8]}",
+                        "type": "UNINSTALL_MODEL",
                         "pipeline_id": pipeline_id,
                     }
 
