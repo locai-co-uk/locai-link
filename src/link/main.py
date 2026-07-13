@@ -494,7 +494,8 @@ def _find_link_repo_root(start: Path) -> Path | None:
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
             continue
-        if data.get("project", {}).get("name") == "locai-link":
+        project = data.get("project")
+        if isinstance(project, dict) and project.get("name") == "locai-link":
             return candidate
         if (candidate / "src" / "link").is_dir():
             return candidate

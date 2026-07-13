@@ -531,6 +531,7 @@ jobs:
         shell: bash
         env:
           ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
+          STABLE: locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -544,9 +545,8 @@ jobs:
           EOF
 
           # Stable-named copy for the permanent "latest" download URL (INFRA-348).
-          STABLE="locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}"
           cp "release-assets/${ASSET}" "release-assets/${STABLE}"
-          STABLE="$STABLE" python - <<'EOF' > "release-assets/${STABLE}.sha256"
+          python - <<'EOF' > "release-assets/${STABLE}.sha256"
           import hashlib, os, pathlib
           name = os.environ["STABLE"]
           p = pathlib.Path("release-assets") / name
@@ -559,6 +559,7 @@ jobs:
         shell: bash
         env:
           ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
+          STABLE: locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -574,9 +575,8 @@ jobs:
           EOF
 
           # Stable-named copy for the permanent "latest" download URL (INFRA-348).
-          STABLE="locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}"
           cp "release-assets/${ASSET}" "release-assets/${STABLE}"
-          STABLE="$STABLE" python - <<'EOF' > "release-assets/${STABLE}.sha256"
+          python - <<'EOF' > "release-assets/${STABLE}.sha256"
           import hashlib, os, pathlib
           name = os.environ["STABLE"]
           p = pathlib.Path("release-assets") / name

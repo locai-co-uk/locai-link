@@ -5,7 +5,7 @@
 
 import pytest
 
-from link.main import reset
+from link.main import _find_link_repo_root, reset
 
 
 @pytest.fixture(autouse=True)
@@ -146,3 +146,27 @@ def test_reset_does_not_touch_repo_metadata_dirs(link_repo_root):
     for name in protected:
         keep = link_repo_root / name / "dist" / "keep"
         assert keep.exists(), f"reset should not descend into {name}/"
+
+
+# --- _find_link_repo_root edge cases (repo-root detection) -------------------
+
+
+def test_find_root_via_src_link_structural_fallback(tmp_path):
+    """A pyproject whose project name isn't locai-link still resolves when the
+    `src/link` package sits alongside it."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "something-else"\n')
+    (tmp_path / "src" / "link").mkdir(parents=True)
+    assert _find_link_repo_root(tmp_path) == tmp_path
+
+
+def test_find_root_skips_malformed_pyproject(tmp_path):
+    """A malformed pyproject.toml on the path must be skipped, not crash."""
+    (tmp_path / "pyproject.toml").write_text("this is not = valid toml [[[")
+    assert _find_link_repo_root(tmp_path) is None
+
+
+def test_find_root_survives_non_mapping_project_table(tmp_path):
+    """`project` present but not a table (e.g. `project = "x"`) must not raise —
+    the candidate is skipped rather than crashing reset()."""
+    (tmp_path / "pyproject.toml").write_text('project = "x"\n')
+    assert _find_link_repo_root(tmp_path) is None

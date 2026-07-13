@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import requests
 from colorama import Fore, Style
@@ -36,19 +37,19 @@ logger = logging.getLogger(__name__)
 class LanguageModel:
     def __init__(
         self,
-        model_path,
-        mode="chat",
-        n_gpu_layers=35,
-        n_ctx=2048,
-        new_terminal=False,
-        system_prompt="You are a helpful assistant.",
-        host="127.0.0.1",
-        port=8100,
-        alias="locai-model",
+        model_path: str | Path,
+        mode: str = "chat",
+        n_gpu_layers: int = 35,
+        n_ctx: int = 2048,
+        new_terminal: bool = False,
+        system_prompt: str = "You are a helpful assistant.",
+        host: str = "127.0.0.1",
+        port: int = 8100,
+        alias: str = "locai-model",
         cors_allowed_origins: list[str] | None = None,
         ttl: int | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         self.mode = mode
         self.queue = queue.Queue(maxsize=10)
         self.running = True

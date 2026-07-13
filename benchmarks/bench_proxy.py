@@ -71,6 +71,7 @@ def proxy():
     finally:
         p.stop()
         upstream.shutdown()
+        upstream.server_close()  # shutdown() stops serving; this frees the socket fd
 
 
 def test_proxy_get_latency(benchmark, proxy):

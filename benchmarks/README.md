@@ -19,9 +19,11 @@ baseline, make your change, compare.
 | `bench_swap_config.py` | llama-swap multi-model config generation |
 | `bench_proxy.py` | Proxy GET round-trip **and** upstream connection reuse (2.2) |
 | `bench_pipeline_idle.py` | Idle pipeline wakeup rate (2.5) |
+| `bench_runtime_contention.py` | Control-plane read responsiveness + lock-split deadlock guard (2.1) |
 
-`bench_proxy.py` and `bench_pipeline_idle.py` also carry a plain assertion that
-doubles as a regression guard (connection reuse; bounded idle wakeups).
+`bench_proxy.py`, `bench_pipeline_idle.py`, and `bench_runtime_contention.py`
+also carry plain assertions that double as regression guards (connection reuse;
+bounded idle wakeups; responsive reads + no deadlock under a slow start).
 
 ## Run
 

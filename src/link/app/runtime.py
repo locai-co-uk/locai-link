@@ -401,13 +401,20 @@ class AgentRuntime:
                     logger.error(f"Cannot start '{pipeline_id}': No configuration found.")
                     return False
 
+                # Snapshot under the lock: the slow section below reads
+                # source.args off-lock while a concurrent StartServingCommand
+                # mutates the stored config's args dict in place.
+                p_conf = p_conf.model_copy(deep=True)
+
                 needs_restart = pipeline_id in self.pipelines
 
             # Slow: stop old pipeline + build components. Serialized by the ops
             # lock but NOT under self.lock, so reads (_snapshot_models) stay live.
             if needs_restart:
                 logger.info(f"Restarting pipeline '{pipeline_id}'...")
-                self._stop_pipeline(pipeline_id)
+                if not self._stop_pipeline(pipeline_id):
+                    logger.error(f"Cannot restart '{pipeline_id}': previous instance still running.")
+                    return False
 
             try:
                 source = self._create_component(p_conf.source)
@@ -452,6 +459,12 @@ class AgentRuntime:
                 pipe.join(timeout=2.0)
             except Exception as e:
                 logger.error(f"Error stopping pipeline: {e}")
+
+            if pipe.is_alive():
+                # Cooperative stop didn't take within the timeout; keep it
+                # tracked rather than orphan a thread still holding resources.
+                logger.error(f"Pipeline '{pipeline_id}' did not stop within timeout.")
+                return False
 
             with self.lock:
                 self.pipelines.pop(pipeline_id, None)
@@ -636,10 +649,7 @@ class AgentRuntime:
             return False
 
         # Guard the rename: `iter_content` can return normally on a short
-        # read (server closes early, proxy truncates, etc.), so we must
-        # verify the byte count before publishing — otherwise a truncated
-        # file would land at `target_path` and later deploys would hit the
-        # `target_path.exists()` cache branch and skip the redownload.
+        # read (server closes early, proxy truncates, etc.)
         if total and done != total:
             self._cleanup_partial(partial_path)
             msg = f"incomplete download: {done}/{total} bytes"
