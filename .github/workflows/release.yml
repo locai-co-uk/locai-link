@@ -501,6 +501,18 @@ jobs:
           digest = hashlib.sha256(p.read_bytes()).hexdigest()
           print(f"{digest}  ${FINAL_NAME}")
           EOF
+
+          # Stable-named copy for the permanent "latest" download URL (INFRA-348).
+          # Version- and plugin-agnostic so the URL never changes across releases:
+          #   .../releases/latest/download/locai-link-macos-arm64.pkg
+          # Assumes one canonical bundle per platform per release.
+          STABLE_NAME="locai-link-macos-arm64.pkg"
+          cp "$SIGNED_PKG" "release-assets/$STABLE_NAME"
+          python - <<EOF > "release-assets/${STABLE_NAME}.sha256"
+          import hashlib, pathlib
+          p = pathlib.Path("release-assets/${STABLE_NAME}")
+          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  ${STABLE_NAME}")
+          EOF
           ls -lah release-assets/
 
       - name: Wipe ephemeral keychain + notary key
@@ -530,6 +542,16 @@ jobs:
           digest = hashlib.sha256(p.read_bytes()).hexdigest()
           print(f"{digest}  {name}")
           EOF
+
+          # Stable-named copy for the permanent "latest" download URL (INFRA-348).
+          STABLE="locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}"
+          cp "release-assets/${ASSET}" "release-assets/${STABLE}"
+          STABLE="$STABLE" python - <<'EOF' > "release-assets/${STABLE}.sha256"
+          import hashlib, os, pathlib
+          name = os.environ["STABLE"]
+          p = pathlib.Path("release-assets") / name
+          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {name}")
+          EOF
           ls -lah release-assets/
 
       - name: Package bundle (Windows)
@@ -549,6 +571,16 @@ jobs:
           p = pathlib.Path("release-assets") / name
           digest = hashlib.sha256(p.read_bytes()).hexdigest()
           print(f"{digest}  {name}")
+          EOF
+
+          # Stable-named copy for the permanent "latest" download URL (INFRA-348).
+          STABLE="locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}"
+          cp "release-assets/${ASSET}" "release-assets/${STABLE}"
+          STABLE="$STABLE" python - <<'EOF' > "release-assets/${STABLE}.sha256"
+          import hashlib, os, pathlib
+          name = os.environ["STABLE"]
+          p = pathlib.Path("release-assets") / name
+          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {name}")
           EOF
           ls -lah release-assets/
 

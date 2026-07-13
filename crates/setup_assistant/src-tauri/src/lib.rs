@@ -22,12 +22,22 @@ const COMPANION_LABEL: &str = "uk.co.locai.link.companion";
 /// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The first post-boot call can wake a scaled-to-zero backend instance, and a
+/// cold start can exceed HTTP_TIMEOUT — which surfaced as a sign-in "timed out
+/// reading response" that only cleared on manual retry. Give the device-code
+/// request a longer per-attempt budget so a cold start completes in one go.
+const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Google-fronted endpoints have been observed to stall on requests without an explicit UA.
 const USER_AGENT: &str = "locai-link-setup-assistant/0.1.0";
 
 fn http_agent() -> ureq::Agent {
+    http_agent_with_timeout(HTTP_TIMEOUT)
+}
+
+fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout(HTTP_TIMEOUT)
+        .timeout(timeout)
         .user_agent(USER_AGENT)
         .build()
 }
@@ -254,9 +264,12 @@ pub struct SignInState {
     inner: Mutex<Option<Session>>,
 }
 
-/// Kick off RFC 8628 device authorization. Retries once on transport errors —
-/// the first post-boot call to `/auth/device/code` has been observed to time
-/// out on macOS (DNS/TLS cold start) with an immediate retry succeeding.
+/// Kick off RFC 8628 device authorization. The first post-boot call to
+/// `/auth/device/code` can hit a cold (scaled-to-zero) backend instance and
+/// time out; uses a longer per-attempt timeout (DEVICE_CODE_TIMEOUT) plus one
+/// backed-off retry on transport errors so a cold start doesn't surface as a
+/// sign-in failure. An *immediate* retry doesn't help — the instance is still
+/// warming — so the retry waits first.
 #[tauri::command]
 async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
     // HTTP + optional retry sleep runs on the blocking pool so the SA
@@ -269,7 +282,7 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
             }
         });
         let send = || {
-            http_agent()
+            http_agent_with_timeout(DEVICE_CODE_TIMEOUT)
                 .post(&format!("{CONTROL_API_URL}/auth/device/code"))
                 .set("Accept", "application/json")
                 .send_json(payload.clone())
@@ -277,8 +290,8 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
         let resp = match send() {
             Ok(r) => r,
             Err(ureq::Error::Transport(t)) => {
-                eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying once");
-                std::thread::sleep(std::time::Duration::from_millis(1500));
+                eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying after backoff");
+                std::thread::sleep(std::time::Duration::from_secs(4));
                 send().map_err(|e| describe_ureq_err("device code request", e))?
             }
             Err(e) => return Err(describe_ureq_err("device code request", e)),
