@@ -120,21 +120,34 @@ CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 # user when there is one (headless installs fall back to root).
 register_app() {
     local app="$1"
+    # Best-effort: registration failure must NOT abort the install (the bundle
+    # is already in /Applications and macOS indexes it on the next rescan), but
+    # log the real outcome rather than a blanket "ran".
     if [[ -x "$LSREGISTER" ]]; then
-        # -trusted isn't documented on every macOS release; retry without it
-        # so a rejected flag can't silently skip registration.
+        local ok=1
+        # Per-user LS DB (INFRA-351) → prefer the console user, fall back to
+        # root. -trusted isn't accepted on every macOS release, so try it then
+        # plain before giving up.
         if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
             sudo -u "$CONSOLE_USER" "$LSREGISTER" -f -R -trusted "$app" 2>/dev/null \
-                || sudo -u "$CONSOLE_USER" "$LSREGISTER" -f -R "$app" 2>/dev/null || true
+                || sudo -u "$CONSOLE_USER" "$LSREGISTER" -f -R "$app" 2>/dev/null \
+                || "$LSREGISTER" -f -R "$app" 2>/dev/null || ok=0
         else
             "$LSREGISTER" -f -R -trusted "$app" 2>/dev/null \
-                || "$LSREGISTER" -f -R "$app" 2>/dev/null || true
+                || "$LSREGISTER" -f -R "$app" 2>/dev/null || ok=0
         fi
-        log "lsregister ran on $app (user: ${CONSOLE_USER:-root})"
+        if [[ "$ok" -eq 1 ]]; then
+            log "lsregister registered $app (user: ${CONSOLE_USER:-root})"
+        else
+            log "WARN: lsregister failed for $app — Spotlight may lag until the next rescan"
+        fi
     fi
     if command -v mdimport >/dev/null 2>&1; then
-        mdimport "$app" 2>/dev/null || true
-        log "mdimport ran on $app"
+        if mdimport "$app" 2>/dev/null; then
+            log "mdimport ran on $app"
+        else
+            log "WARN: mdimport failed for $app"
+        fi
     fi
 }
 

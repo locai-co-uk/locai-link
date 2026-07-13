@@ -538,11 +538,10 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 TrayState::Down => TRAY_ICON_DOWN,
             };
             if let Ok(img) = Image::from_bytes(bytes) {
-                if let Err(e) = tray.set_icon(Some(img)) {
+                // Atomic swap keeps the template flag in sync with the new image.
+                if let Err(e) = tray.set_icon_with_as_template(Some(img), TRAY_ICON_IS_TEMPLATE) {
                     eprintln!("[companion] tray.set_icon failed: {e}");
                 }
-                // set_icon replaces the image; re-apply the template flag.
-                let _ = tray.set_icon_as_template(TRAY_ICON_IS_TEMPLATE);
             }
             current_tray = next_tray;
         }
