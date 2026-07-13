@@ -101,8 +101,7 @@ struct GhAsset {
 /// success; Err mapped to an exit code on failure. Emits LOCAI_STATUS
 /// records throughout.
 pub fn bootstrap_from_boot(install_root: &Path) -> Result<String, BootstrapError> {
-    let config = crate::boot::read_boot_config(install_root)
-        .map_err(BootstrapError::Operation)?;
+    let config = crate::boot::read_boot_config(install_root).map_err(BootstrapError::Operation)?;
     let asset = resolve_asset(&config)?;
     emit(&Status::BootstrapStarted {
         stage: "download",
@@ -141,9 +140,8 @@ fn resolve_asset(config: &BootConfig) -> Result<AssetTarget, BootstrapError> {
         config.asset_repo
     );
     let body = http_get_string(&url)?;
-    let release: GhRelease = serde_json::from_str(&body).map_err(|e| {
-        BootstrapError::Operation(format!("malformed releases response: {e}"))
-    })?;
+    let release: GhRelease = serde_json::from_str(&body)
+        .map_err(|e| BootstrapError::Operation(format!("malformed releases response: {e}")))?;
     let version = release.tag_name.trim_start_matches('v').to_string();
     let basename = config.asset_basename();
     let want = format!("{basename}-v{version}.tar.gz");
@@ -158,12 +156,16 @@ fn resolve_asset(config: &BootConfig) -> Result<AssetTarget, BootstrapError> {
             ))
         })?;
     let sha_name = format!("{want}.sha256");
-    let sha_asset = release.assets.iter().find(|a| a.name == sha_name).ok_or_else(|| {
-        BootstrapError::Operation(format!(
-            "release {} is missing sidecar {sha_name}",
-            release.tag_name
-        ))
-    })?;
+    let sha_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == sha_name)
+        .ok_or_else(|| {
+            BootstrapError::Operation(format!(
+                "release {} is missing sidecar {sha_name}",
+                release.tag_name
+            ))
+        })?;
     Ok(AssetTarget {
         version,
         asset_name: asset.name.clone(),
@@ -182,10 +184,11 @@ fn resolve_direct(url: &str) -> Result<AssetTarget, BootstrapError> {
         .next()
         .map(|s| s.to_string())
         .ok_or_else(|| BootstrapError::Operation(format!("asset_url has no filename: {url}")))?;
-    let version = parse_version_from_asset_name(&asset_name)
-        .ok_or_else(|| BootstrapError::Operation(format!(
+    let version = parse_version_from_asset_name(&asset_name).ok_or_else(|| {
+        BootstrapError::Operation(format!(
             "could not parse -v<version>- out of asset filename: {asset_name}"
-        )))?;
+        ))
+    })?;
     Ok(AssetTarget {
         version,
         asset_name,
@@ -212,8 +215,7 @@ fn parse_version_from_asset_name(name: &str) -> Option<String> {
 fn ensure_staging(install_root: &Path) -> Result<PathBuf, String> {
     let staging = install_root.join(STAGING_DIR);
     if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|e| format!("remove stale staging dir: {e}"))?;
+        fs::remove_dir_all(&staging).map_err(|e| format!("remove stale staging dir: {e}"))?;
     }
     fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
     Ok(staging)
@@ -221,7 +223,7 @@ fn ensure_staging(install_root: &Path) -> Result<PathBuf, String> {
 
 fn download(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<(), BootstrapError> {
     let resp = http_get_reader(url)?;
-    let total = expected_size.or_else(|| resp.content_length);
+    let total = expected_size.or(resp.content_length);
     let mut reader = resp.body;
     let tmp = dest.with_extension("partial");
     let mut out = File::create(&tmp)
@@ -287,7 +289,9 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("read for hash: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("read for hash: {e}"))?;
         if n == 0 {
             break;
         }
@@ -313,18 +317,17 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
 fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
     if target.exists() {
         // A previous failed bootstrap may have left a partial dir; nuke it.
-        fs::remove_dir_all(target).map_err(|e| format!("remove stale {}: {e}", target.display()))?;
+        fs::remove_dir_all(target)
+            .map_err(|e| format!("remove stale {}: {e}", target.display()))?;
     }
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let target_name = target
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .ok_or_else(|| format!("target has no file name: {}", target.display()))?;
-    let tarball =
-        File::open(archive).map_err(|e| format!("open {}: {e}", archive.display()))?;
+    let tarball = File::open(archive).map_err(|e| format!("open {}: {e}", archive.display()))?;
     let mut arch = Archive::new(GzDecoder::new(BufReader::new(tarball)));
     arch.set_preserve_permissions(true);
     let mut any = false;
@@ -341,7 +344,10 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         if etype.is_symlink() || etype.is_hard_link() {
             return Err(format!(
                 "tarball rejected: unsafe entry type {etype:?} at {}",
-                entry.path().map(|p| p.display().to_string()).unwrap_or_default(),
+                entry
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
             ));
         }
         let path = entry
@@ -353,7 +359,9 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         if first.as_os_str() != VERSIONS_DIR {
             continue;
         }
-        let Some(version_dir) = parts.next() else { continue };
+        let Some(version_dir) = parts.next() else {
+            continue;
+        };
         if version_dir.as_os_str() != target_name.as_str() {
             continue;
         }
@@ -364,7 +372,10 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         // simply cannot escape `target`.
         let rel_parts: Vec<std::path::Component> = parts.collect();
         for comp in &rel_parts {
-            if !matches!(comp, std::path::Component::Normal(_) | std::path::Component::CurDir) {
+            if !matches!(
+                comp,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            ) {
                 return Err(format!(
                     "tarball rejected: unsafe path component {comp:?} in entry {}",
                     path.display(),

@@ -541,6 +541,8 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 if let Err(e) = tray.set_icon(Some(img)) {
                     eprintln!("[companion] tray.set_icon failed: {e}");
                 }
+                // set_icon replaces the image; re-apply the template flag.
+                let _ = tray.set_icon_as_template(TRAY_ICON_IS_TEMPLATE);
             }
             current_tray = next_tray;
         }

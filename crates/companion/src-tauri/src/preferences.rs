@@ -301,7 +301,6 @@ pub fn open_control_device(app: AppHandle, device_id: Option<String>) -> Result<
         .map_err(|e| format!("open_url {url}: {e}"))
 }
 
-
 // --- Helpers -----------------------------------------------------------------
 
 /// Full /healthz probe including in-flight deployments; used by `poll_status`.
@@ -341,7 +340,7 @@ fn read_session_config_device() -> Option<DeviceInfo> {
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
+        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
             newest = Some((mtime, entry.path()));
         }
     }

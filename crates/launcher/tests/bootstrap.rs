@@ -112,10 +112,8 @@ fn bootstrap_happy_path_extracts_then_execs_runtime() {
     let original_launcher_size = fs::metadata(LAUNCHER).unwrap().len();
     install_launcher(tmp.path());
     let marker = tmp.path().join("ran.flag");
-    let (tarball, sha) = build_release_tarball(
-        "1.0.16",
-        &format!("touch {} && exit 0", marker.display()),
-    );
+    let (tarball, sha) =
+        build_release_tarball("1.0.16", &format!("touch {} && exit 0", marker.display()));
 
     let mut server = mockito::Server::new();
     let asset_path = "/locai-link-base-test-arch-v1.0.16.tar.gz";
@@ -171,7 +169,10 @@ fn bootstrap_happy_path_extracts_then_execs_runtime() {
     );
 
     // Staging dir is cleaned up.
-    assert!(!tmp.path().join("staging").exists(), "staging dir should be removed");
+    assert!(
+        !tmp.path().join("staging").exists(),
+        "staging dir should be removed"
+    );
 }
 
 #[test]
@@ -198,12 +199,19 @@ fn bootstrap_sha_mismatch_exits_2_and_emits_failed() {
 
     let out = run_launcher(&mut Command::new(tmp.path().join("locai-link")));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "sha mismatch should exit 2; stderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "sha mismatch should exit 2; stderr:\n{stderr}"
+    );
     assert!(
         stderr.contains("\"event\":\"bootstrap_failed\""),
         "stderr should include bootstrap_failed; got:\n{stderr}"
     );
-    assert!(stderr.contains("sha256"), "failure message should mention sha256; got:\n{stderr}");
+    assert!(
+        stderr.contains("sha256"),
+        "failure message should mention sha256; got:\n{stderr}"
+    );
     assert!(
         !tmp.path().join("current").exists() && !tmp.path().join("CURRENT").exists(),
         "current must NOT be written when bootstrap failed"
@@ -224,7 +232,11 @@ fn bootstrap_missing_asset_exits_2() {
 
     let out = run_launcher(&mut Command::new(tmp.path().join("locai-link")));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "404 asset should exit 2; stderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "404 asset should exit 2; stderr:\n{stderr}"
+    );
     assert!(stderr.contains("\"event\":\"bootstrap_failed\""));
 }
 
@@ -237,7 +249,11 @@ fn bootstrap_no_internet_exits_3() {
 
     let out = run_launcher(&mut Command::new(tmp.path().join("locai-link")));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(3), "connect-refused should exit 3; stderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "connect-refused should exit 3; stderr:\n{stderr}"
+    );
     assert!(stderr.contains("\"event\":\"bootstrap_failed\""));
 }
 

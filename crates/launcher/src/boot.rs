@@ -82,8 +82,7 @@ impl BootConfig {
 
 pub fn read_boot_config(install_root: &Path) -> Result<BootConfig, String> {
     let path = install_root.join(BOOT_JSON);
-    let body = fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     serde_json::from_str(&body).map_err(|e| format!("parse {}: {}", path.display(), e))
 }
 
@@ -178,10 +177,9 @@ mod tests {
 
     #[test]
     fn asset_basename_uses_canonical_plugin_order() {
-        let b: BootConfig = serde_json::from_str(
-            r#"{"host_app":"X","plugin_set":["stt","llm"],"asset_repo":"r"}"#,
-        )
-        .unwrap();
+        let b: BootConfig =
+            serde_json::from_str(r#"{"host_app":"X","plugin_set":["stt","llm"],"asset_repo":"r"}"#)
+                .unwrap();
         // PLUGIN_ORDER hardcodes "llm" before "stt" to mirror
         // bundling/manifest.py — same name regardless of input order.
         assert!(
@@ -193,10 +191,9 @@ mod tests {
 
     #[test]
     fn asset_basename_unknown_plugins_appended_in_order() {
-        let b: BootConfig = serde_json::from_str(
-            r#"{"host_app":"X","plugin_set":["zzz","llm"],"asset_repo":"r"}"#,
-        )
-        .unwrap();
+        let b: BootConfig =
+            serde_json::from_str(r#"{"host_app":"X","plugin_set":["zzz","llm"],"asset_repo":"r"}"#)
+                .unwrap();
         // Known plugin first, unknown trailing.
         assert!(
             b.asset_basename().starts_with("locai-link-llm-zzz-"),
@@ -207,10 +204,8 @@ mod tests {
 
     #[test]
     fn asset_basename_empty_plugins_uses_base() {
-        let b: BootConfig = serde_json::from_str(
-            r#"{"host_app":"X","plugin_set":[],"asset_repo":"r"}"#,
-        )
-        .unwrap();
+        let b: BootConfig =
+            serde_json::from_str(r#"{"host_app":"X","plugin_set":[],"asset_repo":"r"}"#).unwrap();
         assert!(
             b.asset_basename().starts_with("locai-link-base-"),
             "got: {}",

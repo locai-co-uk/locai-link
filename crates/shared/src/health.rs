@@ -135,7 +135,11 @@ fn post_action(base_url: &str, pipeline_id: &str, path: &str) -> Result<(), Stri
 
 /// Ask the agent to start or stop serving `pipeline_id`. `base_url` is combined
 /// as `{base}/{pipeline_id}/{action}`.
-pub fn toggle_serving(base_url: &str, pipeline_id: &str, action: ServingAction) -> Result<(), String> {
+pub fn toggle_serving(
+    base_url: &str,
+    pipeline_id: &str,
+    action: ServingAction,
+) -> Result<(), String> {
     post_action(base_url, pipeline_id, action.path())
 }
 
@@ -198,7 +202,10 @@ mod tests {
         );
         let status = agent_health(&format!("http://127.0.0.1:{port}/healthz"));
         handle.join().unwrap();
-        assert!(matches!(status, HealthStatus::Malformed(_)), "got {status:?}");
+        assert!(
+            matches!(status, HealthStatus::Malformed(_)),
+            "got {status:?}"
+        );
     }
 
     #[test]
@@ -240,14 +247,21 @@ mod tests {
         );
         let status = list_models(&format!("http://127.0.0.1:{port}/models"));
         handle.join().unwrap();
-        assert!(matches!(status, ModelsStatus::Malformed(_)), "got {status:?}");
+        assert!(
+            matches!(status, ModelsStatus::Malformed(_)),
+            "got {status:?}"
+        );
     }
 
     #[test]
     fn toggle_serving_hits_serve_path_and_reports_ok() {
         let (port, handle, captured) =
             serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        let res = toggle_serving(&format!("http://127.0.0.1:{port}/models"), "llm_server", ServingAction::Start);
+        let res = toggle_serving(
+            &format!("http://127.0.0.1:{port}/models"),
+            "llm_server",
+            ServingAction::Start,
+        );
         handle.join().unwrap();
         assert!(res.is_ok(), "got {res:?}");
         let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
@@ -261,7 +275,11 @@ mod tests {
     fn toggle_serving_hits_stop_serving_path() {
         let (port, handle, captured) =
             serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        let res = toggle_serving(&format!("http://127.0.0.1:{port}/models"), "llm_server", ServingAction::Stop);
+        let res = toggle_serving(
+            &format!("http://127.0.0.1:{port}/models"),
+            "llm_server",
+            ServingAction::Stop,
+        );
         handle.join().unwrap();
         assert!(res.is_ok(), "got {res:?}");
         let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
@@ -273,17 +291,24 @@ mod tests {
 
     #[test]
     fn toggle_serving_returns_err_on_non_2xx() {
-        let (port, handle, _) = serve_once_capturing(
-            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+        let (port, handle, _) =
+            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        let res = toggle_serving(
+            &format!("http://127.0.0.1:{port}/models"),
+            "ghost",
+            ServingAction::Start,
         );
-        let res = toggle_serving(&format!("http://127.0.0.1:{port}/models"), "ghost", ServingAction::Start);
         handle.join().unwrap();
         assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
     }
 
     #[test]
     fn toggle_serving_returns_err_on_connection_refused() {
-        let res = toggle_serving("http://127.0.0.1:1/models", "anything", ServingAction::Start);
+        let res = toggle_serving(
+            "http://127.0.0.1:1/models",
+            "anything",
+            ServingAction::Start,
+        );
         assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
     }
 
@@ -345,7 +370,10 @@ mod tests {
             let (mut sock, _) = listener.accept().expect("accept");
             let mut buf = [0u8; 1024];
             let n = sock.read(&mut buf).unwrap_or(0);
-            captured_for_thread.lock().unwrap().extend_from_slice(&buf[..n]);
+            captured_for_thread
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buf[..n]);
             sock.write_all(response.as_bytes()).expect("write");
         });
         (port, handle, captured)

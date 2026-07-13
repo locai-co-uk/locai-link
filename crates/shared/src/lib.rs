@@ -7,12 +7,13 @@ pub mod autostart;
 pub mod health;
 pub mod install;
 
-pub use health::{
-    agent_health, cancel_deployment, list_models, toggle_serving, AgentHealth, DeploymentProgress, HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth,
-    DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
-};
 pub use autostart::{AGENT_APP_ID, COMPANION_APP_ID};
-pub use install::{read_boot_json, BootConfig, InstalledVersion, installed_version};
+pub use health::{
+    agent_health, cancel_deployment, list_models, toggle_serving, AgentHealth, DeploymentProgress,
+    HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL,
+    DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
+};
+pub use install::{installed_version, read_boot_json, BootConfig, InstalledVersion};
 
 #[cfg(test)]
 mod tests {

@@ -211,7 +211,8 @@ fn now_unix() -> u64 {
 /// file shape on platforms where symlink creation isn't permitted.
 fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), String> {
     let symlink_path = install_root.join(CURRENT_SYMLINK);
-    let prefer_symlink = symlink_path.is_symlink() || !install_root.join(CURRENT_POINTER_FILE).is_file();
+    let prefer_symlink =
+        symlink_path.is_symlink() || !install_root.join(CURRENT_POINTER_FILE).is_file();
 
     if prefer_symlink {
         let target = PathBuf::from(VERSIONS_DIR).join(version);
