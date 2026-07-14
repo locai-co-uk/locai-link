@@ -1049,20 +1049,41 @@ def _version_gt(a: str, b: str) -> bool:
     return Version(a) > Version(b)
 
 
-def check_update_available(install_root: Path | None = None) -> tuple[bool, str | None]:
+# Control's public version-check endpoint (INFRA-363); appended to the device's
+# api_url. DEFAULT mirrors main.DEFAULT_API_URL.
+LATEST_VERSION_PATH = "/devices/agent/latest-version"
+DEFAULT_CONTROL_API_BASE = "https://api.locai.co.uk/api/v1"
+
+
+def latest_version_from_control(base_url: str, *, session: _HttpGetter | None = None) -> str:
+    """Latest published agent version from Control's cached endpoint (rate-limit
+    safe for fleets, vs. polling GitHub per device). Returns e.g. ``1.1.0``."""
+    http = session or requests
+    url = f"{base_url.rstrip('/')}{LATEST_VERSION_PATH}"
+    resp = http.get(url, timeout=_GH_API_TIMEOUT, headers={"Accept": "application/json"})
+    resp.raise_for_status()
+    version = str((resp.json() or {}).get("latest_version") or "")
+    if not version:
+        raise ReleaseNotFound(f"latest-version response missing 'latest_version': {url}")
+    return version
+
+
+def check_update_available(
+    install_root: Path | None = None, control_base_url: str | None = None
+) -> tuple[bool, str | None]:
     """Whether a newer bundle is published (frozen installs only).
 
-    Returns ``(update_available, latest_version)``. Best-effort: any failure
-    (offline, source install, GitHub error) yields ``(False, None)`` — the
-    check must never take the agent down.
+    Version check hits Control's endpoint; the OTA download still resolves the
+    per-platform asset from GitHub in ``swap_bundle``. Best-effort: any failure
+    (offline, source install, Control error) yields ``(False, None)``.
     """
     if not running_frozen_bundle():
         return (False, None)
     try:
         root = install_root or discover_install_root()
         manifest = read_manifest(root)
-        release = latest_release_for(manifest.asset_name)
-        return (_version_gt(release.version, manifest.version), release.version)
+        latest = latest_version_from_control(control_base_url or DEFAULT_CONTROL_API_BASE)
+        return (_version_gt(latest, manifest.version), latest)
     except Exception as e:  # noqa: BLE001 — never let the check crash the agent
         logger.debug(f"update check failed: {e}")
         return (False, None)

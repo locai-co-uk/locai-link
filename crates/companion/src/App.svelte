@@ -184,7 +184,7 @@
         updateStarted = true;
       }
       if (updateStarted && poll.status === "down") updateSawDown = true;
-      // Once it's back up after dropping, the swap is done — success hides the
+      // Once it's back up after dropping, the swap is done: success hides the
       // banner (update_available now false); failure re-shows it to retry.
       if (updateStarted && updateSawDown && poll.status === "up") {
         updateStarted = false;
@@ -495,7 +495,7 @@
       {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updateStarted}
         <!-- Service management is wired for both macOS (launchctl) and
              Linux (systemctl --user). Windows still lacks a backend,
-             so those buttons stay hidden there. Hidden mid-update — the
+             so those buttons stay hidden there. Hidden mid-update: the
              agent bounces on its own, so Start/Stop/Restart shouldn't show. -->
         <div class="row row--action">
           {#if prefs.agent.status === "up"}

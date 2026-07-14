@@ -166,7 +166,7 @@ A modular, pipeline-based runtime. The **control plane** (lifecycle, configurati
 flowchart TB
     %% Layers are stacked top-to-bottom; each layer's nodes are chained with
     %% invisible links (~~~) so they sit in one row. That only holds if no node
-    %% inside a layer crosses the layer boundary — so the upstream arrows run
+    %% inside a layer crosses the layer boundary, so the upstream arrows run
     %% from the layer containers, not individual nodes.
     User([User / CLI])
 
@@ -231,7 +231,7 @@ flowchart TB
 
 On an `UPDATE_AGENT` command (from the control plane, or the loopback `/update` endpoint the menu-bar app posts to), the agent reports the command complete, shuts down all pipelines cleanly, then takes one of two paths depending on how it was installed:
 
-**Bundled install** (PyInstaller artifact — the packaged app):
+**Bundled install** (PyInstaller artifact, the packaged app):
 
 1. Resolves the latest matching release from **GitHub Releases** and downloads the platform bundle
 2. Verifies the SHA256, extracts it alongside the running version under `versions/<v>/`
@@ -241,8 +241,8 @@ On an `UPDATE_AGENT` command (from the control plane, or the loopback `/update` 
 **Source install** (cloned repo):
 
 1. Runs `git pull` on the current branch (stashing local changes if needed) and re-runs `uv pip install -e .`
-2. Refreshes pinned binaries for plugins referenced by the active config — each `plugins/*/install.py` is tag-cached, so this is cheap when versions haven't changed, and unused plugins are skipped
-3. Re-execs itself via `os.execv()` — the process image is replaced but the **PID is preserved**, so systemd/launchd/Windows Service see a continuously-running process
+2. Refreshes pinned binaries for plugins referenced by the active config (each `plugins/*/install.py` is tag-cached, so this is cheap when versions haven't changed, and unused plugins are skipped)
+3. Re-execs itself via `os.execv()`; the process image is replaced but the **PID is preserved**, so systemd/launchd/Windows Service see a continuously-running process
 
 Either way no separate supervisor is needed, and the same `main.py run` command works for development and headless service deployment.
 

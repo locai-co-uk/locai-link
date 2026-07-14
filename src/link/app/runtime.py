@@ -113,11 +113,15 @@ class AgentRuntime:
                 endpoint=endpoints[0] if endpoints else None,
                 connected=True,
             )
-        # Update-check runs inside the health server (it owns the field it
-        # serves); inject the checker so infra stays free of updater knowledge.
+        # Health server owns the update-available field; inject the checker.
+        # Version check uses the device's api_url (Control); download uses GitHub.
         from link.app.updater import check_update_available
 
-        self.health_server = HealthServer(self.health_state, update_checker=check_update_available)
+        control_base = getattr(agent_config.identity, "api_url", None) if agent_config.identity else None
+        self.health_server = HealthServer(
+            self.health_state,
+            update_checker=lambda: check_update_available(control_base_url=control_base),
+        )
 
         if threading.current_thread() is threading.main_thread():
             try:

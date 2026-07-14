@@ -958,7 +958,8 @@ def _stub_check(monkeypatch, *, frozen, current="1.0.21", latest="1.0.22", raise
         return
     monkeypatch.setattr(updater, "discover_install_root", lambda: Path("/x"))
     monkeypatch.setattr(updater, "read_manifest", lambda root: SimpleNamespace(asset_name="stem", version=current))
-    monkeypatch.setattr(updater, "latest_release_for", lambda stem: SimpleNamespace(version=latest))
+    # The version check queries Control's endpoint, not GitHub.
+    monkeypatch.setattr(updater, "latest_version_from_control", lambda base: latest)
 
 
 def test_check_update_available_when_newer(monkeypatch):
@@ -974,6 +975,22 @@ def test_check_update_not_available_when_equal(monkeypatch):
 def test_check_update_source_install_is_noop(monkeypatch):
     _stub_check(monkeypatch, frozen=False)
     assert updater.check_update_available() == (False, None)
+
+
+# --- latest_version_from_control (INFRA-363) ---------------------------------
+
+
+def test_latest_version_from_control_parses_version():
+    url = f"https://api.example/api/v1{updater.LATEST_VERSION_PATH}"
+    session = _StubSession({url: {"latest_version": "1.2.3", "release_url": "https://x"}})
+    assert updater.latest_version_from_control("https://api.example/api/v1", session=session) == "1.2.3"
+
+
+def test_latest_version_from_control_missing_field_raises():
+    url = f"https://api.example/api/v1{updater.LATEST_VERSION_PATH}"
+    session = _StubSession({url: {"release_url": "https://x"}})  # no latest_version
+    with pytest.raises(ReleaseNotFound):
+        updater.latest_version_from_control("https://api.example/api/v1", session=session)
 
 
 def test_check_update_swallows_errors(monkeypatch):

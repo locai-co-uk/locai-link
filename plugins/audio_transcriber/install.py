@@ -105,7 +105,7 @@ def _prebuilt_url(tag):
     return None
 
 
-_DOWNLOAD_TIMEOUT = 30  # seconds per attempt — guards against a stalled CDN
+_DOWNLOAD_TIMEOUT = 30  # seconds per attempt; guards against a stalled CDN
 
 
 def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
@@ -114,7 +114,7 @@ def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
     GitHub's asset CDN occasionally drops the connection mid-transfer
     ("Remote end closed connection"), notably on Windows runners. Each attempt
     is bounded by a timeout so a stalled transfer can't hang the install, and
-    only transient transport errors are retried — a 4xx (e.g. 404) fails fast.
+    only transient transport errors are retried; a 4xx (e.g. 404) fails fast.
     Streams to a ``.partial`` sidecar, renamed onto ``dest`` only on success.
     """
     partial = dest.with_suffix(dest.suffix + ".partial")
@@ -126,7 +126,7 @@ def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
             return
         except urllib.error.HTTPError as e:
             partial.unlink(missing_ok=True)
-            # 4xx is permanent — don't waste retries on it; 5xx is worth another go.
+            # 4xx is permanent, don't waste retries on it; 5xx is worth another go.
             if e.code < 500 or attempt == attempts:
                 raise
             logger.warning(f"Download attempt {attempt}/{attempts} failed (HTTP {e.code}); retrying...")
