@@ -84,7 +84,12 @@ fn execs_runtime_via_symlink_with_argv_passthrough() {
     );
     make_current_symlink(tmp.path(), "1.0.15");
 
-    let out = run_launcher(Command::new(&launcher).args(["--device-name", "test-rig", "--api-url", "https://x/"]));
+    let out = run_launcher(Command::new(&launcher).args([
+        "--device-name",
+        "test-rig",
+        "--api-url",
+        "https://x/",
+    ]));
 
     assert!(out.status.success(), "launcher exited non-zero: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -129,8 +134,14 @@ exit 42
     let out = run_launcher(&mut Command::new(&launcher));
     assert!(out.status.success(), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("first-run pid="), "v1 did not run: {stdout}");
-    assert!(stdout.contains("second-run"), "v2 was not re-execed: {stdout}");
+    assert!(
+        stdout.contains("first-run pid="),
+        "v1 did not run: {stdout}"
+    );
+    assert!(
+        stdout.contains("second-run"),
+        "v2 was not re-execed: {stdout}"
+    );
 }
 
 #[test]
@@ -141,7 +152,10 @@ fn errors_when_no_current_pointer_exists() {
     // Pattern A (pre-seeded) and Pattern B (boot.json) both missing →
     // genuine installer bug. Launcher should bail with a diagnostic.
     let out = run_launcher(&mut Command::new(&launcher));
-    assert!(!out.status.success(), "expected failure, got success: {out:?}");
+    assert!(
+        !out.status.success(),
+        "expected failure, got success: {out:?}"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("boot.json"),
@@ -159,7 +173,10 @@ fn errors_when_current_points_at_missing_version() {
     let out = run_launcher(&mut Command::new(&launcher));
     assert!(!out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("does not exist"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("does not exist"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -198,7 +215,11 @@ fn rolls_back_when_new_version_crashes_within_window() {
     let tmp = tempdir();
     let launcher = install_launcher(tmp.path());
     // Previous version: works, prints a marker, exits 0.
-    seed_version(tmp.path(), "1.0.15", r#"echo "previous-version-ran"; exit 0"#);
+    seed_version(
+        tmp.path(),
+        "1.0.15",
+        r#"echo "previous-version-ran"; exit 0"#,
+    );
     // New version: crashes immediately with exit 99.
     seed_version(tmp.path(), "1.0.16", r#"exit 99"#);
     make_current_symlink(tmp.path(), "1.0.16");
@@ -208,7 +229,10 @@ fn rolls_back_when_new_version_crashes_within_window() {
     let out = run_launcher(&mut Command::new(&launcher));
 
     // After rollback, the launcher respawned from 1.0.15 (which exits 0).
-    assert!(out.status.success(), "launcher should exit 0 after rollback ran: {out:?}");
+    assert!(
+        out.status.success(),
+        "launcher should exit 0 after rollback ran: {out:?}"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -226,7 +250,10 @@ fn rolls_back_when_new_version_crashes_within_window() {
     );
     // current now points at 1.0.15.
     let current_target = fs::read_link(tmp.path().join("current")).unwrap();
-    assert!(current_target.ends_with("1.0.15"), "current points at {current_target:?}");
+    assert!(
+        current_target.ends_with("1.0.15"),
+        "current points at {current_target:?}"
+    );
     // previous pointer is gone.
     assert!(
         fs::read_link(tmp.path().join("previous")).is_err()
@@ -267,7 +294,11 @@ fn does_not_roll_back_on_exit_zero() {
     let launcher = install_launcher(tmp.path());
     seed_version(tmp.path(), "1.0.15", r#"exit 0"#);
     // New version exits 0 (clean shutdown — user-requested quit).
-    seed_version(tmp.path(), "1.0.16", r#"echo new-version-clean-exit; exit 0"#);
+    seed_version(
+        tmp.path(),
+        "1.0.16",
+        r#"echo new-version-clean-exit; exit 0"#,
+    );
     make_current_symlink(tmp.path(), "1.0.16");
     make_update_pending(tmp.path(), "1.0.15", 5);
 
@@ -295,7 +326,11 @@ fn does_not_roll_back_when_previous_version_is_missing() {
 
     let out = run_launcher(&mut Command::new(&launcher));
 
-    assert_eq!(out.status.code(), Some(99), "should surface the crash: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(99),
+        "should surface the crash: {out:?}"
+    );
     let current_target = fs::read_link(tmp.path().join("current")).unwrap();
     assert!(current_target.ends_with("1.0.16"));
     // Stamp cleared so we don't keep chasing a non-existent previous.
@@ -320,10 +355,9 @@ fn rollback_preserves_pointer_file_shape() {
     // After rollback CURRENT should still be a file (not a symlink) and
     // contain 1.0.15.
     assert!(
-        fs::symlink_metadata(tmp.path().join("current"))
+        !fs::symlink_metadata(tmp.path().join("current"))
             .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-            == false,
+            .unwrap_or(false),
         "rollback should not have created a symlink under pointer-file shape"
     );
     let body = fs::read_to_string(tmp.path().join("CURRENT")).unwrap();
@@ -354,7 +388,10 @@ fn tempdir() -> TempDir {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("locai-link-launcher-test-{}-{n}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "locai-link-launcher-test-{}-{n}",
+        std::process::id()
+    ));
     fs::create_dir_all(&dir).unwrap();
     TempDir(dir)
 }

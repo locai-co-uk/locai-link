@@ -110,19 +110,52 @@ fi
 # mdimport alone updates the Spotlight metadata store but not the LS database.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
+# The console user (person driving Installer.app). Resolved before
+# registration: the LS database is per-user, and this script runs as
+# root — registering as root doesn't reliably surface the app for the
+# logged-in user (INFRA-351: app intermittently missing from search).
+CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+
+# Register an .app with Launch Services + Spotlight, as the console
+# user when there is one (headless installs fall back to root).
+register_app() {
+    local app="$1"
+    # Best-effort: registration failure must NOT abort the install (the bundle
+    # is already in /Applications and macOS indexes it on the next rescan), but
+    # log the real outcome rather than a blanket "ran".
+    if [[ -x "$LSREGISTER" ]]; then
+        local ok=1
+        # Per-user LS DB (INFRA-351) → prefer the console user, fall back to
+        # root. -trusted isn't accepted on every macOS release, so try it then
+        # plain before giving up.
+        if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
+            sudo -u "$CONSOLE_USER" "$LSREGISTER" -f -R -trusted "$app" 2>/dev/null \
+                || sudo -u "$CONSOLE_USER" "$LSREGISTER" -f -R "$app" 2>/dev/null \
+                || "$LSREGISTER" -f -R "$app" 2>/dev/null || ok=0
+        else
+            "$LSREGISTER" -f -R -trusted "$app" 2>/dev/null \
+                || "$LSREGISTER" -f -R "$app" 2>/dev/null || ok=0
+        fi
+        if [[ "$ok" -eq 1 ]]; then
+            log "lsregister registered $app (user: ${CONSOLE_USER:-root})"
+        else
+            log "WARN: lsregister failed for $app — Spotlight may lag until the next rescan"
+        fi
+    fi
+    if command -v mdimport >/dev/null 2>&1; then
+        if mdimport "$app" 2>/dev/null; then
+            log "mdimport ran on $app"
+        else
+            log "WARN: mdimport failed for $app"
+        fi
+    fi
+}
+
 if [[ -d "$COMPANION_APP" ]]; then
     rm -rf "$COMPANION_SYMLINK"
     ditto "$COMPANION_APP" "$COMPANION_SYMLINK"
     log "companion copied: $COMPANION_APP -> $COMPANION_SYMLINK"
-
-    if [[ -x "$LSREGISTER" ]]; then
-        "$LSREGISTER" -f -R -trusted "$COMPANION_SYMLINK" 2>/dev/null || true
-        log "lsregister ran on $COMPANION_SYMLINK"
-    fi
-    if command -v mdimport >/dev/null 2>&1; then
-        mdimport "$COMPANION_SYMLINK" 2>/dev/null || true
-        log "mdimport ran on $COMPANION_SYMLINK"
-    fi
+    register_app "$COMPANION_SYMLINK"
 else
     log "companion app not found at $COMPANION_APP — skipping /Applications copy"
 fi
@@ -132,20 +165,12 @@ fi
 # Spotlight / Launchpad / the Applications sidebar. Users who quit the
 # auto-launched SA before completing setup would otherwise have no way
 # to reopen it (the /Library/Locai copy isn't indexed by Launch
-# Services). Same ditto pattern as the companion — preserves the code
-# signature — followed by mdimport so Spotlight sees it immediately.
+# Services).
 if [[ -d "$SETUP_ASSISTANT" ]]; then
     rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
     ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
     log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
-    if [[ -x "$LSREGISTER" ]]; then
-        "$LSREGISTER" -f -R -trusted "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
-        log "lsregister ran on $SETUP_ASSISTANT_IN_APPLICATIONS"
-    fi
-    if command -v mdimport >/dev/null 2>&1; then
-        mdimport "$SETUP_ASSISTANT_IN_APPLICATIONS" 2>/dev/null || true
-        log "mdimport ran on $SETUP_ASSISTANT_IN_APPLICATIONS"
-    fi
+    register_app "$SETUP_ASSISTANT_IN_APPLICATIONS"
 else
     log "setup assistant not found at $SETUP_ASSISTANT — skipping /Applications copy"
 fi
@@ -153,9 +178,7 @@ fi
 # --- 5. Launch Setup Assistant ---------------------------------------
 # The postinstall runs as root; the Setup Assistant must run as the
 # actual user for LaunchAgent registration and Keychain access to work
-# correctly. Resolve the console user (the person driving Installer.app)
-# and hand off with "sudo -u".
-CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+# correctly. CONSOLE_USER was resolved above; hand off with "sudo -u".
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     # No graphical console user (headless install, remote deployment,
     # or the user is running via Terminal as root). Skip the launch —

@@ -21,12 +21,12 @@ PROJECT_ROOT = Path(__file__).parent
 
 # Pinned llama.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/llama.cpp/releases
-LLAMA_CPP_RELEASE = "b9789"
+LLAMA_CPP_RELEASE = "b9984"
 
 # Pinned llama-swap release — update manually after vetting a new release.
 # Find release tags at: https://github.com/mostlygeek/llama-swap/releases
 # The asset URL pattern is `llama-swap_<tag>_<os>_<arch>.<ext>`.
-LLAMA_SWAP_RELEASE = "216"
+LLAMA_SWAP_RELEASE = "239"
 
 # Detect Virtual Environment Root and define Install Directory.
 # FROZEN: running from a PyInstaller bundle.

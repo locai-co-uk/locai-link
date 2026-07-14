@@ -18,6 +18,8 @@ const PREFIX: &str = "LOCAI_STATUS:";
 
 #[derive(Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
+// Variant names are the wire format (`event: bootstrap_*`); don't rename.
+#[allow(clippy::enum_variant_names)]
 pub enum Status<'a> {
     BootstrapStarted {
         stage: &'a str,

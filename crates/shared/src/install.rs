@@ -53,7 +53,10 @@ pub fn installed_version(install_root: &Path) -> Option<InstalledVersion> {
         return None;
     }
     let version = resolved.file_name()?.to_string_lossy().into_owned();
-    Some(InstalledVersion { version, path: resolved })
+    Some(InstalledVersion {
+        version,
+        path: resolved,
+    })
 }
 
 /// Read `current` as a symlink first, falling back to text-pointer contents.
@@ -99,7 +102,10 @@ mod tests {
         assert_eq!(cfg.plugin_set, vec!["language_model", "audio_transcriber"]);
         assert_eq!(cfg.channel, "stable");
         assert_eq!(cfg.asset_repo, "locai-co-uk/locai-link");
-        assert_eq!(cfg.asset_url.as_deref(), Some("https://example.com/link.tar.gz"));
+        assert_eq!(
+            cfg.asset_url.as_deref(),
+            Some("https://example.com/link.tar.gz")
+        );
     }
 
     #[test]

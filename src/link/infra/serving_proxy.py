@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 from typing_extensions import override
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,20 @@ class _ProxyServer(ThreadingHTTPServer):
         self.upstream_base_url = upstream_base_url
         self.allowed_origins = allowed_origins
         self.on_telemetry = on_telemetry
+        # Shared keep-alive pool to the upstream, reused across handler threads
+        # instead of a new TCP connection per request. urllib3's pool is
+        # thread-safe; session state is never mutated per request.
+        self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=32)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+    @override
+    def server_close(self) -> None:
+        try:
+            self.session.close()
+        finally:
+            super().server_close()
 
 
 class _ChatTelemetry:
@@ -202,6 +217,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     a general HTTP proxy.
     """
 
+    # Set TCP_NODELAY on accepted client sockets: without it, small response
+    # writes hit Nagle/delayed-ACK and add ~40ms per request. (The upstream
+    # session already gets TCP_NODELAY via urllib3's defaults.)
+    disable_nagle_algorithm = True
+
     # Suppress BaseHTTPRequestHandler's default per-request stderr log spam;
     # route through Python logging instead so the proxy respects link's
     # logging config.
@@ -337,7 +357,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         upstream = self._proxy_server().upstream_base_url + self.path
 
         try:
-            resp = requests.get(upstream, timeout=5, headers=self._forward_headers())
+            resp = self._proxy_server().session.get(upstream, timeout=5, headers=self._forward_headers())
         except requests.RequestException as exc:
             logger.warning("[serving_proxy] GET %s upstream failed: %s", self.path, exc)
             self._safe_send_error(502, "Upstream unavailable")
@@ -369,14 +389,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         recorder = _ChatTelemetry(body) if self._proxy_server().on_telemetry else None
 
         try:
-            resp = requests.post(
+            resp = self._proxy_server().session.post(
                 upstream,
                 data=body,
                 headers=self._forward_headers(),
                 stream=True,
                 # Generous timeout — chat completions on a 14B model can
-                # legitimately run for minutes on cold cache. Per-chunk
-                # progress is what the stream is for.
+                # legitimately run for minutes on cold cache.
                 timeout=600,
             )
         except requests.RequestException as exc:

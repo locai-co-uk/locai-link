@@ -35,9 +35,9 @@ pub fn enable(app_id: &str, exec_path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let exec_str = exec_path
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "exec_path is not valid UTF-8"))?;
+    let exec_str = exec_path.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "exec_path is not valid UTF-8")
+    })?;
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -100,6 +100,9 @@ pub fn stop_now(app_id: &str) -> io::Result<()> {
     // unloaded" which isn't a real failure from the caller's
     // perspective. The caller (companion Quit) just wants best-effort
     // "stop everything now".
-    let _ = Command::new("launchctl").args(["unload"]).arg(&path).status();
+    let _ = Command::new("launchctl")
+        .args(["unload"])
+        .arg(&path)
+        .status();
     Ok(())
 }

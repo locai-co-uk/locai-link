@@ -380,6 +380,45 @@ def test_post_stop_serving_dispatches_stop_serving_command():
     assert "host" not in cmd
 
 
+def test_post_uninstall_dispatches_uninstall_command():
+    srv, port, received = _server_with_handlers(
+        [
+            {
+                "id": "llm_server",
+                "alias": "smollm-135m",
+                "port": 8123,
+                "host": "127.0.0.1",
+                "is_serving": False,
+            }
+        ]
+    )
+    try:
+        resp = _post_no_body(port, "/models/llm_server/uninstall")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+
+    assert len(received) == 1
+    cmd = received[0]
+    assert cmd["type"] == "UNINSTALL_MODEL"
+    assert cmd["pipeline_id"] == "llm_server"
+    # force_stop omitted -> schema default (False); no extras that would trip
+    # pydantic's extra=forbid.
+    assert "force_stop" not in cmd
+    assert cmd["id"].startswith("loopback-")
+
+
+def test_post_uninstall_unknown_pipeline_returns_404():
+    srv, port, received = _server_with_handlers([])  # no pipelines
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/models/ghost/uninstall")
+        assert exc.value.code == 404
+    finally:
+        srv.stop()
+    assert received == []
+
+
 def test_post_unknown_pipeline_returns_404():
     srv, port, received = _server_with_handlers([])  # no pipelines
     try:

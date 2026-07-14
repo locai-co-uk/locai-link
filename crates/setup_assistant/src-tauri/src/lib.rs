@@ -22,12 +22,22 @@ const COMPANION_LABEL: &str = "uk.co.locai.link.companion";
 /// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The first post-boot call can wake a scaled-to-zero backend instance, and a
+/// cold start can exceed HTTP_TIMEOUT — which surfaced as a sign-in "timed out
+/// reading response" that only cleared on manual retry. Give the device-code
+/// request a longer per-attempt budget so a cold start completes in one go.
+const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Google-fronted endpoints have been observed to stall on requests without an explicit UA.
 const USER_AGENT: &str = "locai-link-setup-assistant/0.1.0";
 
 fn http_agent() -> ureq::Agent {
+    http_agent_with_timeout(HTTP_TIMEOUT)
+}
+
+fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout(HTTP_TIMEOUT)
+        .timeout(timeout)
         .user_agent(USER_AGENT)
         .build()
 }
@@ -182,7 +192,7 @@ fn read_registered_identity(install_root: &Path) -> (Option<String>, Option<Stri
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
+        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
             newest = Some((mtime, entry.path()));
         }
     }
@@ -202,8 +212,14 @@ fn read_registered_identity(install_root: &Path) -> (Option<String>, Option<Stri
         Some(v) => v,
         None => return (None, None),
     };
-    let id = identity.get("device_id").and_then(|v| v.as_str()).map(String::from);
-    let name = identity.get("device_name").and_then(|v| v.as_str()).map(String::from);
+    let id = identity
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let name = identity
+        .get("device_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     (id, name)
 }
 
@@ -254,9 +270,12 @@ pub struct SignInState {
     inner: Mutex<Option<Session>>,
 }
 
-/// Kick off RFC 8628 device authorization. Retries once on transport errors —
-/// the first post-boot call to `/auth/device/code` has been observed to time
-/// out on macOS (DNS/TLS cold start) with an immediate retry succeeding.
+/// Kick off RFC 8628 device authorization. The first post-boot call to
+/// `/auth/device/code` can hit a cold (scaled-to-zero) backend instance and
+/// time out; uses a longer per-attempt timeout (DEVICE_CODE_TIMEOUT) plus one
+/// backed-off retry on transport errors so a cold start doesn't surface as a
+/// sign-in failure. An *immediate* retry doesn't help — the instance is still
+/// warming — so the retry waits first.
 #[tauri::command]
 async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
     // HTTP + optional retry sleep runs on the blocking pool so the SA
@@ -268,8 +287,11 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
                 "source": "setup_assistant",
             }
         });
+        // One-shot UI call; boxing ureq::Error isn't worth losing the
+        // direct Transport-variant match below.
+        #[allow(clippy::result_large_err)]
         let send = || {
-            http_agent()
+            http_agent_with_timeout(DEVICE_CODE_TIMEOUT)
                 .post(&format!("{CONTROL_API_URL}/auth/device/code"))
                 .set("Accept", "application/json")
                 .send_json(payload.clone())
@@ -277,8 +299,8 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
         let resp = match send() {
             Ok(r) => r,
             Err(ureq::Error::Transport(t)) => {
-                eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying once");
-                std::thread::sleep(std::time::Duration::from_millis(1500));
+                eprintln!("sign_in_start: first attempt failed (transport: {t}); retrying after backoff");
+                std::thread::sleep(std::time::Duration::from_secs(4));
                 send().map_err(|e| describe_ureq_err("device code request", e))?
             }
             Err(e) => return Err(describe_ureq_err("device code request", e)),
@@ -524,7 +546,10 @@ fn register_device(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "api_key missing from response".to_string())?
         .to_string();
-    let config = reg_body.get("config").cloned().unwrap_or(serde_json::Value::Null);
+    let config = reg_body
+        .get("config")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
 
     Ok(RegisteredDevice {
         device_id,
@@ -536,10 +561,7 @@ fn register_device(
 /// Write `config` to `<install_root>/configs/session_<UTC>.json` — the location
 /// the runtime's `StateManager` picks up on next start. Returns the written path.
 #[tauri::command]
-fn install_agent_config(
-    install_root: String,
-    config: serde_json::Value,
-) -> Result<String, String> {
+fn install_agent_config(install_root: String, config: serde_json::Value) -> Result<String, String> {
     if config.is_null() {
         return Err("config from register_device was null — nothing to write".to_string());
     }
@@ -568,12 +590,8 @@ fn install_agent_config(
     }
     // configs/ lives outside current/ so session state survives OTA version flips.
     let configs_dir = root.join("configs");
-    std::fs::create_dir_all(&configs_dir).map_err(|e| {
-        format!(
-            "create configs dir {}: {e}",
-            configs_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&configs_dir)
+        .map_err(|e| format!("create configs dir {}: {e}", configs_dir.display()))?;
 
     // Filename mirrors StateManager.bootstrap()'s format: session_<UTC>.json.
     let now = std::time::SystemTime::now()
@@ -583,8 +601,8 @@ fn install_agent_config(
     let ts = format_utc_compact(secs);
     let session_path = configs_dir.join(format!("session_{ts}.json"));
 
-    let serialized = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("serialise config: {e}"))?;
+    let serialized =
+        serde_json::to_string_pretty(&config).map_err(|e| format!("serialise config: {e}"))?;
     std::fs::write(&session_path, serialized)
         .map_err(|e| format!("write {}: {e}", session_path.display()))?;
 
@@ -652,7 +670,9 @@ fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, Strin
     let token = require_token(&state)?;
 
     let resp = http_agent()
-        .get(&format!("{CONTROL_API_URL}/models/list_without_layers_info"))
+        .get(&format!(
+            "{CONTROL_API_URL}/models/list_without_layers_info"
+        ))
         .set("Accept", "application/json")
         .set("Authorization", &format!("Bearer {token}"))
         .call()
@@ -916,16 +936,12 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
 
     let home = std::env::var("HOME").map_err(|_| "$HOME not set".to_string())?;
     let dest_dir = PathBuf::from(home).join("Library").join("LaunchAgents");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| {
-        format!("create {}: {e}", dest_dir.display())
-    })?;
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
 
     // Must match bundling/pkg/LaunchAgents/.
     let agents: [(&str, &str); 2] = [
-        (
-            "uk.co.locai.link.agent.plist",
-            "uk.co.locai.link.agent",
-        ),
+        ("uk.co.locai.link.agent.plist", "uk.co.locai.link.agent"),
         (
             "uk.co.locai.link.companion.plist",
             "uk.co.locai.link.companion",
@@ -1029,9 +1045,14 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
     // via NSWorkspace. Idempotent — if kickstart already brought the tray up,
     // this is a no-op. If kickstart raced or a stale service state suppressed
     // the launch, this makes the tray icon appear.
-    for path in ["/Applications/Locai Link.app", "/Library/Locai/Locai Link.app"] {
+    for path in [
+        "/Applications/Locai Link.app",
+        "/Library/Locai/Locai Link.app",
+    ] {
         if std::path::Path::new(path).exists() {
-            let _ = std::process::Command::new("open").args(["-a", path]).output();
+            let _ = std::process::Command::new("open")
+                .args(["-a", path])
+                .output();
             break;
         }
     }
@@ -1062,14 +1083,10 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         .join(".config")
         .join("systemd")
         .join("user");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| {
-        format!("create {}: {e}", dest_dir.display())
-    })?;
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
 
-    let units: [&str; 2] = [
-        "locai-link-agent.service",
-        "locai-link-companion.service",
-    ];
+    let units: [&str; 2] = ["locai-link-agent.service", "locai-link-companion.service"];
 
     for unit in units {
         let src = source_dir.join(unit);
@@ -1166,7 +1183,8 @@ fn re_register(
         if let Ok(token) = require_token(&state) {
             // device_id is a UUID — no percent-encoding needed. Add urlencoding
             // if Control ever accepts non-UUID ids.
-            let url = format!("{CONTROL_API_URL}/devices/delete_device_by_id?device_id={old_device_id}");
+            let url =
+                format!("{CONTROL_API_URL}/devices/delete_device_by_id?device_id={old_device_id}");
             match http_agent()
                 .delete(&url)
                 .set("Authorization", &format!("Bearer {token}"))
@@ -1192,7 +1210,10 @@ fn re_register(
     {
         for label in [AGENT_LABEL, COMPANION_LABEL] {
             let _ = std::process::Command::new("launchctl")
-                .args(["bootout", &format!("gui/{}/{label}", current_uid().unwrap_or_default())])
+                .args([
+                    "bootout",
+                    &format!("gui/{}/{label}", current_uid().unwrap_or_default()),
+                ])
                 .output();
         }
     }

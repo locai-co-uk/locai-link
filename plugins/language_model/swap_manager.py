@@ -150,13 +150,18 @@ class SwapManager:
         model_path: str,
         extra_args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        ttl: int | None = None,
     ) -> None:
-        """Register a model and reload (or start) llama-swap."""
+        """Register a model and reload (or start) llama-swap.
+
+        ``ttl`` is the idle-unload timeout in seconds; None uses the default.
+        """
         with self._lock:
             self._models[model_id] = {
                 "path": model_path,
                 "args": extra_args or [],
                 "env": env or {},
+                "ttl": int(ttl) if ttl is not None else self._MODEL_TTL,
             }
             self._write_config()
             if self._is_running():
@@ -418,7 +423,7 @@ class SwapManager:
             entry: dict[str, Any] = {
                 "cmd": cmd,
                 "proxy": f"http://127.0.0.1:{internal_port}",
-                "ttl": self._MODEL_TTL,
+                "ttl": m.get("ttl", self._MODEL_TTL),
             }
             if m["env"]:
                 # llama-swap expects env as ["KEY=VAL", ...] not a map.

@@ -156,6 +156,8 @@ class AsyncHandler(logging.Handler):
         self.templates = templates
         self.queue = queue.Queue(maxsize=1000)
         self._stop_event = threading.Event()
+        self._dropped = 0
+        self._drop_lock = threading.Lock()
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
@@ -198,7 +200,13 @@ class AsyncHandler(logging.Handler):
 
             self.queue.put_nowait((target, payload, raw_payload, route_key))
         except queue.Full:
-            pass
+            # Drop is correct backpressure (logging must not block), but make it
+            # visible so a telemetry blackout can't look like "all quiet".
+            with self._drop_lock:
+                self._dropped += 1
+                dropped = self._dropped
+            if dropped == 1 or dropped % 100 == 0:
+                sys.stderr.write(f"Link Logger: transport queue full, dropped {dropped} record(s) ({route_key})\n")
         except Exception:
             self.handleError(record)
 

@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).parent
 
 # Pinned whisper.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
-WHISPER_CPP_RELEASE = "v1.8.4"
+WHISPER_CPP_RELEASE = "v1.9.1"
 
 # Detect Virtual Environment Root and define Install Directory.
 # FROZEN: running from a PyInstaller bundle.

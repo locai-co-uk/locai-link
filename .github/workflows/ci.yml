@@ -231,7 +231,10 @@ jobs:
           fi
           OUT="$("$BIN" --version 2>&1)"
           echo "$OUT"
-          if ! echo "$OUT" | grep -q "version: $EXPECTED_TAG"; then
+          # Extract the tag ("version: v239 (sha)…" → "239") and require an
+          # exact match, so a wrong build (2390, 239.1, …) can't slip through.
+          ACTUAL_TAG="$(printf '%s\n' "$OUT" | sed -nE 's/^version:[[:space:]]*v?([^[:space:]]+).*/\1/p')"
+          if [ "$ACTUAL_TAG" != "$EXPECTED_TAG" ]; then
             echo "::error::llama-swap version mismatch — expected tag '$EXPECTED_TAG', got: $OUT"
             exit 1
           fi

@@ -84,6 +84,11 @@ class AgentRuntime:
         self._agent_workers: dict[str, _AgentWorker] = {}
 
         self.lock = threading.RLock()
+        # Serializes slow pipeline create/start/stop (plugin install, process
+        # spawn, thread join) so that work does not run under self.lock, keeping
+        # the read path (_snapshot_models / GET /models) responsive. Lock order:
+        # acquire this BEFORE self.lock, never the reverse.
+        self._pipeline_ops_lock = threading.RLock()
         self.running = True
         self.shutdown_event = threading.Event()
         self.update_requested = False
@@ -307,42 +312,46 @@ class AgentRuntime:
                     except Exception as e:
                         logger.warning(f"Failed to recover pipeline config: {e}")
 
-                # B. Restart Active Pipelines
+                # B. Restart Active Pipelines. Collect ids under the lock, then
+                # start each outside it — _start_pipeline takes the ops lock and
+                # must not be called while holding self.lock (lock ordering).
                 with self.lock:
-                    for p_data in raw_pipelines:
-                        pid = p_data.get("id")
-                        is_active = p_data.get("active", False)
+                    to_start = [
+                        p_data.get("id")
+                        for p_data in raw_pipelines
+                        if p_data.get("active", False) and p_data.get("id") in self.pipeline_configs
+                    ]
 
-                        if is_active and pid in self.pipeline_configs:
-                            started = self._start_pipeline(pid)
-                            recovered_any = True
-                            # Re-announce serving state to Control.
-                            if started:
-                                p_conf = self.pipeline_configs[pid]
-                                src_args = p_conf.source.args if p_conf.source else {}
-                                try:
-                                    if src_args.get("mode") == "serve":
-                                        self.status_logger.report_model(
-                                            pid,
-                                            running=False,
-                                            pid=0,
-                                            serving=True,
-                                            serving_pid=1,
-                                            serving_port=src_args.get("port", 0),
-                                        )
-                                        self.health_state.set_serving(pid)
-                                    elif src_args.get("model_path"):
-                                        # Inference-mode model pipeline
-                                        self.status_logger.report_model(
-                                            pid,
-                                            running=True,
-                                            pid=1,
-                                            serving=False,
-                                            serving_pid=0,
-                                            serving_port=0,
-                                        )
-                                except Exception as e:
-                                    logger.warning(f"Failed to re-announce model state for '{pid}': {e}")
+                for pid in to_start:
+                    started = self._start_pipeline(pid)
+                    recovered_any = True
+                    # Re-announce serving state to Control.
+                    if started:
+                        p_conf = self.pipeline_configs.get(pid)
+                        src_args = p_conf.source.args if p_conf and p_conf.source else {}
+                        try:
+                            if src_args.get("mode") == "serve":
+                                self.status_logger.report_model(
+                                    pid,
+                                    running=False,
+                                    pid=0,
+                                    serving=True,
+                                    serving_pid=1,
+                                    serving_port=src_args.get("port", 0),
+                                )
+                                self.health_state.set_serving(pid)
+                            elif src_args.get("model_path"):
+                                # Inference-mode model pipeline
+                                self.status_logger.report_model(
+                                    pid,
+                                    running=True,
+                                    pid=1,
+                                    serving=False,
+                                    serving_pid=0,
+                                    serving_port=0,
+                                )
+                        except Exception as e:
+                            logger.warning(f"Failed to re-announce model state for '{pid}': {e}")
 
         # 2. Fresh Start Fallback
         if not recovered_any:
@@ -366,50 +375,67 @@ class AgentRuntime:
         Returns:
             bool: True if started successfully, False otherwise.
         """
-        with self.lock:
-            if config_data:
-                try:
-                    if "id" not in config_data:
-                        config_data["id"] = pipeline_id
-                    new_conf = PipelineConfig(**config_data)
-                    current_conf = self.pipeline_configs.get(pipeline_id)
-                    is_running = pipeline_id in self.pipelines
+        with self._pipeline_ops_lock:
+            # Fast: validate/update config and decide restart, under self.lock.
+            with self.lock:
+                if config_data:
+                    try:
+                        if "id" not in config_data:
+                            config_data["id"] = pipeline_id
+                        new_conf = PipelineConfig(**config_data)
+                        current_conf = self.pipeline_configs.get(pipeline_id)
+                        is_running = pipeline_id in self.pipelines
 
-                    if is_running and current_conf and new_conf == current_conf:
-                        logger.info(f"Pipeline '{pipeline_id}' config is identical. Skipping restart.")
-                        return True
+                        if is_running and current_conf and new_conf == current_conf:
+                            logger.info(f"Pipeline '{pipeline_id}' config is identical. Skipping restart.")
+                            return True
 
-                    logger.info(f"Configuration update for '{pipeline_id}'.")
-                    self.pipeline_configs[pipeline_id] = new_conf
-                except Exception as e:
-                    logger.error(f"Invalid configuration for '{pipeline_id}': {e}")
+                        logger.info(f"Configuration update for '{pipeline_id}'.")
+                        self.pipeline_configs[pipeline_id] = new_conf
+                    except Exception as e:
+                        logger.error(f"Invalid configuration for '{pipeline_id}': {e}")
+                        return False
+
+                p_conf = self.pipeline_configs.get(pipeline_id)
+                if not p_conf:
+                    logger.error(f"Cannot start '{pipeline_id}': No configuration found.")
                     return False
 
-            p_conf = self.pipeline_configs.get(pipeline_id)
-            if not p_conf:
-                logger.error(f"Cannot start '{pipeline_id}': No configuration found.")
-                return False
+                # Snapshot under the lock: the slow section below reads
+                # source.args off-lock while a concurrent StartServingCommand
+                # mutates the stored config's args dict in place.
+                p_conf = p_conf.model_copy(deep=True)
 
-            if pipeline_id in self.pipelines:
+                needs_restart = pipeline_id in self.pipelines
+
+            # Slow: stop old pipeline + build components. Serialized by the ops
+            # lock but NOT under self.lock, so reads (_snapshot_models) stay live.
+            if needs_restart:
                 logger.info(f"Restarting pipeline '{pipeline_id}'...")
-                self._stop_pipeline(pipeline_id)
+                if not self._stop_pipeline(pipeline_id):
+                    logger.error(f"Cannot restart '{pipeline_id}': previous instance still running.")
+                    return False
 
             try:
                 source = self._create_component(p_conf.source)
                 sink = self._create_component(p_conf.sink) if p_conf.sink else (lambda data: None)
                 new_pipe = Pipeline(p_conf.id, source, sink)
-                self.pipelines[pipeline_id] = new_pipe
-                new_pipe.start()
-
-                if self.state_manager:
-                    # Persist Config AND Active Status
-                    self.state_manager.update_pipeline_config(p_conf)
-                    self.state_manager.set_pipeline_status(pipeline_id, True)
-
-                return True
             except Exception as e:
                 logger.error(f"Failed to start pipeline '{pipeline_id}': {e}")
                 return False
+
+            with self.lock:
+                self.pipelines[pipeline_id] = new_pipe
+            new_pipe.start()
+
+            if self.state_manager:
+                try:
+                    self.state_manager.update_pipeline_config(p_conf)
+                    self.state_manager.set_pipeline_status(pipeline_id, True)
+                except Exception as e:
+                    logger.warning(f"Failed to persist pipeline state for '{pipeline_id}': {e}")
+
+            return True
 
     def _stop_pipeline(self, pipeline_id: str) -> bool:
         """Stops and removes a pipeline.
@@ -420,24 +446,35 @@ class AgentRuntime:
         Returns:
             bool: True if stopped successfully, False otherwise.
         """
-        with self.lock:
-            pipe = self.pipelines.get(pipeline_id)
-            if pipe:
-                try:
-                    pipe.stop()
-                    pipe.join(timeout=2.0)
-                except Exception as e:
-                    logger.error(f"Error stopping pipeline: {e}")
-
-                if pipeline_id in self.pipelines:
-                    del self.pipelines[pipeline_id]
-
-                if self.state_manager:
-                    self.state_manager.set_pipeline_status(pipeline_id, False)
-                return True
-            else:
+        with self._pipeline_ops_lock:
+            with self.lock:
+                pipe = self.pipelines.get(pipeline_id)
+            if not pipe:
                 logger.warning(f"Cannot stop '{pipeline_id}': Not running.")
                 return True
+
+            # Slow: signal + join outside self.lock so reads stay live.
+            try:
+                pipe.stop()
+                pipe.join(timeout=2.0)
+            except Exception as e:
+                logger.error(f"Error stopping pipeline: {e}")
+
+            if pipe.is_alive():
+                # Cooperative stop didn't take within the timeout; keep it
+                # tracked rather than orphan a thread still holding resources.
+                logger.error(f"Pipeline '{pipeline_id}' did not stop within timeout.")
+                return False
+
+            with self.lock:
+                self.pipelines.pop(pipeline_id, None)
+
+            if self.state_manager:
+                try:
+                    self.state_manager.set_pipeline_status(pipeline_id, False)
+                except Exception as e:
+                    logger.warning(f"Failed to persist stop state for '{pipeline_id}': {e}")
+            return True
 
     def _deploy_model(self, cmd: DeployModelCommand) -> None:
         """Validate a DEPLOY_MODEL and dispatch the download to a worker thread.
@@ -612,10 +649,7 @@ class AgentRuntime:
             return False
 
         # Guard the rename: `iter_content` can return normally on a short
-        # read (server closes early, proxy truncates, etc.), so we must
-        # verify the byte count before publishing — otherwise a truncated
-        # file would land at `target_path` and later deploys would hit the
-        # `target_path.exists()` cache branch and skip the redownload.
+        # read (server closes early, proxy truncates, etc.)
         if total and done != total:
             self._cleanup_partial(partial_path)
             msg = f"incomplete download: {done}/{total} bytes"
