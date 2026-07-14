@@ -29,6 +29,11 @@ HEALTH_PORT = 20505
 # long the UI can be stuck on "Queued".
 QUEUED_TTL_SECONDS = 300
 
+# Periodic "update available" poll (INFRA-353). Initial delay keeps the
+# first network call off the startup path; interval is a gentle background poll.
+UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
+UPDATE_CHECK_INITIAL_DELAY_SECONDS = 5
+
 _MODEL_ACTION_RE = re.compile(r"^/models/([^/]+)/(serve|stop-serving|cancel-deploy|uninstall)$")
 _LOOPBACK_HOSTS = frozenset({HEALTH_HOST, "localhost"})
 
@@ -60,6 +65,10 @@ class HealthState:
         self.transport_type: str | None = None
         self.transport_endpoint: str | None = None
         self.transport_connected: bool = False
+
+        # Populated by the runtime's periodic update check (INFRA-353).
+        self.update_available: bool = False
+        self.latest_version: str | None = None
 
         self.deployments: dict[str, dict[str, Any]] = {}
         # Protects `deployments` — mutated by worker threads via
@@ -99,7 +108,14 @@ class HealthState:
             "model_id": self.model_id,
             "transport": transport,
             "deployments": deployments_snapshot,
+            "update_available": self.update_available,
+            "latest_version": self.latest_version,
         }
+
+    def set_update(self, available: bool, latest_version: str | None) -> None:
+        """Record the result of the runtime's periodic update check."""
+        self.update_available = available
+        self.latest_version = latest_version
 
     def models(self) -> list[dict[str, Any]]:
         """Fresh snapshot of servable-model pipelines. Empty when no
@@ -236,6 +252,25 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
             if self.path == "/deployments/pending":
                 self._handle_pending_deployment()
                 return
+
+            if self.path == "/update":
+                # Companion-initiated OTA (INFRA-353): dispatch the same
+                # UPDATE_AGENT the control plane sends, reusing the full
+                # download → verify → flip → re-exec + rollback path.
+                if not state.has_command_handler():
+                    self.send_error(503, "Command handler not wired")
+                    return
+                try:
+                    state.dispatch({"id": f"loopback-{uuid.uuid4().hex[:8]}", "type": "UPDATE_AGENT"})
+                except Exception as exc:
+                    logger.warning(f"Command handler raised on POST /update: {exc}")
+                    self.send_error(500, "Command dispatch failed")
+                    return
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
             match = _MODEL_ACTION_RE.match(self.path)
             if not match:
                 self.send_error(404, "Not Found")
@@ -330,12 +365,23 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
 class HealthServer:
     """Wraps the threaded HTTP server so callers can stop it cleanly."""
 
-    def __init__(self, state: HealthState, host: str = HEALTH_HOST, port: int = HEALTH_PORT) -> None:
+    def __init__(
+        self,
+        state: HealthState,
+        host: str = HEALTH_HOST,
+        port: int = HEALTH_PORT,
+        update_checker: Callable[[], tuple[bool, str | None]] | None = None,
+    ) -> None:
         self.state = state
         self.host = host
         self.port = port
+        # Injected by the runtime (app layer) so infra stays free of updater
+        # knowledge. Returns (available, latest_version); no-op if None.
+        self._update_checker = update_checker
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._poll_stop = threading.Event()
+        self._poll_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._server is not None:
@@ -355,7 +401,32 @@ class HealthServer:
         self._thread.start()
         logger.info(f"Health server listening on http://{self.host}:{self.port}/healthz")
 
+        if self._update_checker is not None:
+            self._poll_thread = threading.Thread(target=self._update_poll_loop, name="update-check", daemon=True)
+            self._poll_thread.start()
+
+    def _update_poll_loop(self) -> None:
+        """Poll for a newer bundle and surface it via HealthState. Best-effort;
+        no-op on source installs (the checker gates on frozen)."""
+        assert self._update_checker is not None
+        if self._poll_stop.wait(timeout=UPDATE_CHECK_INITIAL_DELAY_SECONDS):
+            return
+        while not self._poll_stop.is_set():
+            try:
+                available, latest = self._update_checker()
+                self.state.set_update(available, latest)
+                if available:
+                    logger.info(f"Update available: {latest}")
+            except Exception as exc:
+                logger.debug(f"Update check failed: {exc}")
+            if self._poll_stop.wait(timeout=UPDATE_CHECK_INTERVAL_SECONDS):
+                return
+
     def stop(self) -> None:
+        self._poll_stop.set()
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=2.0)
+            self._poll_thread = None
         if self._server is None:
             return
         self._server.shutdown()

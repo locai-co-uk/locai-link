@@ -75,6 +75,8 @@
     network: TransportHealth | null;
     models: ModelInfo[];
     deployments: DeploymentProgress[];
+    update_available: boolean;
+    latest_version: string | null;
   };
 
   // Models + in-flight deployments are refreshed by the same
@@ -84,6 +86,17 @@
   // panel handles the empty case naturally.
   let models = $state<ModelInfo[]>([]);
   let deployments = $state<DeploymentProgress[]>([]);
+  let updateAvailable = $state(false);
+  let latestVersion = $state<string | null>(null);
+  // Update-in-progress tracking. The agent's health server goes down during
+  // the swap, so we infer "Updating" client-side: set on trigger, confirmed
+  // once we've seen the agent drop, cleared when it returns (success clears
+  // the banner via update_available=false; failure re-shows it).
+  let updateStarted = $state(false);
+  let updateSawDown = $state(false);
+  // Suppress the tray-trigger inference during a user-initiated stop/restart
+  // so a manual Stop while an update is available isn't mislabelled "Updating".
+  let suppressUpdateInfer = $state(false);
 
   let prefs = $state<PrefsState | null>(null);
   // Gate the Agent status pill until we've had at least one poll_status
@@ -115,11 +128,20 @@
     await load();
     await refreshStatus();
     pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);
+    // The window is pre-created hidden; refreshStatus bails while hidden, so
+    // without this the pill sat on "Checking…" until the next 2s tick after
+    // the user opened Preferences. Poll the instant it becomes visible.
+    document.addEventListener("visibilitychange", onVisibility);
   });
 
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer);
+    document.removeEventListener("visibilitychange", onVisibility);
   });
+
+  function onVisibility() {
+    if (!document.hidden) void refreshStatus();
+  }
 
   async function load() {
     try {
@@ -137,6 +159,8 @@
     try {
       const poll = await invoke<StatusPoll>("poll_status");
       if (!prefs) return;
+      const prevStatus = prefs.agent.status;
+      const prevUpdateAvail = updateAvailable;
       prefs.agent.status = poll.status;
       prefs.agent.uptime_seconds = poll.uptime_seconds;
       // Version comes from /healthz when Up; when Down, fall back to
@@ -145,6 +169,27 @@
       prefs.network = poll.network;
       models = poll.models;
       deployments = poll.deployments;
+      updateAvailable = poll.update_available;
+      // Keep the last-known latest when the probe is Down (returns null).
+      latestVersion = poll.latest_version ?? latestVersion;
+
+      // Infer a tray-triggered update: agent was up with an update available
+      // and just dropped, and it wasn't a manual stop/restart.
+      if (
+        prevStatus === "up" &&
+        poll.status === "down" &&
+        prevUpdateAvail &&
+        !suppressUpdateInfer
+      ) {
+        updateStarted = true;
+      }
+      if (updateStarted && poll.status === "down") updateSawDown = true;
+      // Once it's back up after dropping, the swap is done — success hides the
+      // banner (update_available now false); failure re-shows it to retry.
+      if (updateStarted && updateSawDown && poll.status === "up") {
+        updateStarted = false;
+        updateSawDown = false;
+      }
       hasPolled = true;
     } catch {
       // Ignore polling errors — next tick tries again.
@@ -247,6 +292,7 @@
 
   async function stopRuntime() {
     await withPending("runtime", async () => {
+      suppressUpdateInfer = true;
       try {
         await invoke("runtime_stop");
       } catch (e) {
@@ -254,11 +300,13 @@
       }
       await new Promise((r) => setTimeout(r, 500));
       await refreshStatus();
+      suppressUpdateInfer = false;
     });
   }
 
   async function restartRuntime() {
     await withPending("runtime", async () => {
+      suppressUpdateInfer = true;
       try {
         await invoke("runtime_restart");
       } catch (e) {
@@ -266,6 +314,21 @@
       }
       await new Promise((r) => setTimeout(r, 800));
       await refreshStatus();
+      suppressUpdateInfer = false;
+    });
+  }
+
+  async function installUpdate() {
+    await withPending("update", async () => {
+      try {
+        await invoke("install_update");
+        // The agent swaps the bundle and relaunches; the runtime drops
+        // briefly, so surface an in-progress note rather than an error.
+        updateStarted = true;
+        updateSawDown = false;
+      } catch (e) {
+        console.warn("install_update:", e);
+      }
     });
   }
 
@@ -392,21 +455,48 @@
               <span class="dot"></span>
               Checking…
             </span>
+          {:else if updateStarted}
+            <span class="pill pill--updating">
+              <span class="dot"></span>
+              Updating…
+            </span>
           {:else}
             <span class="pill pill--{prefs.agent.status}">
               <span class="dot"></span>
               {prefs.agent.status === "up" ? "Running" : "Stopped"}
             </span>
           {/if}
-          {#if prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
+          {#if !updateStarted && prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
             <span class="uptime">· {formatUptime(prefs.agent.uptime_seconds)}</span>
           {/if}
         </span>
       </div>
-      {#if prefs.platform === "macos" || prefs.platform === "linux"}
+      {#if updateStarted || (updateAvailable && prefs.agent.status === "up")}
+        <div class="update-banner">
+          <div class="update-copy">
+            <span class="update-title">
+              {updateStarted ? "Updating…" : `Update available${latestVersion ? ` · v${latestVersion}` : ""}`}
+            </span>
+            <span class="update-hint">
+              {updateStarted
+                ? "Locai Link is installing the update and will restart automatically."
+                : "Locai Link will download the new version and restart automatically."}
+            </span>
+          </div>
+          <button
+            class="btn btn--primary btn--sm"
+            onclick={installUpdate}
+            disabled={updateStarted || pending.has("update")}
+          >
+            {updateStarted ? "Installing…" : "Update now"}
+          </button>
+        </div>
+      {/if}
+      {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updateStarted}
         <!-- Service management is wired for both macOS (launchctl) and
              Linux (systemctl --user). Windows still lacks a backend,
-             so those buttons stay hidden there. -->
+             so those buttons stay hidden there. Hidden mid-update — the
+             agent bounces on its own, so Start/Stop/Restart shouldn't show. -->
         <div class="row row--action">
           {#if prefs.agent.status === "up"}
             <button
@@ -694,6 +784,17 @@
     background: var(--color-surface-alt, #F1F0EA);
     color: var(--color-text-muted, #8A877F);
   }
+  .pill--updating {
+    background: var(--color-surface-tint-green-3, #EAF9F1);
+    color: var(--color-primary-pressed, #00A852);
+  }
+  .pill--updating .dot {
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
 
   /* Models panel */
   .models {
@@ -778,6 +879,33 @@
   .uptime {
     color: var(--color-text-muted, #8A877F);
     font-size: 12px;
+  }
+
+  .update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    border: 1px solid var(--color-primary-pressed, #00A852);
+    background: var(--color-surface-tint-green-3, #EAF9F1);
+    border-radius: 8px;
+  }
+  .update-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .update-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-primary-pressed, #00A852);
+  }
+  .update-hint {
+    font-size: 12px;
+    color: var(--color-text-secondary, #46443F);
   }
 
   .toggle-row {

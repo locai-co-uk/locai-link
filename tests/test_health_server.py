@@ -509,3 +509,52 @@ def test_post_invalid_action_returns_404():
         assert exc.value.code == 404
     finally:
         srv.stop()
+
+
+# --- INFRA-353: update check surfaced in snapshot + /update trigger ----------
+
+
+def test_snapshot_includes_update_fields():
+    hs = HealthState(version="1.0.21")
+    snap = hs.snapshot()
+    assert snap["update_available"] is False
+    assert snap["latest_version"] is None
+    hs.set_update(True, "1.0.22")
+    snap = hs.snapshot()
+    assert snap["update_available"] is True
+    assert snap["latest_version"] == "1.0.22"
+
+
+def test_post_update_dispatches_update_agent():
+    srv, port, received = _server_with_handlers([])
+    try:
+        resp = _post_no_body(port, "/update")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+    assert len(received) == 1
+    assert received[0]["type"] == "UPDATE_AGENT"
+    assert received[0]["id"].startswith("loopback-")
+
+
+def test_post_update_503_without_handler():
+    srv, port, _ = _server_with_handlers([], command_handler=None)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/update")
+        assert exc.value.code == 503
+    finally:
+        srv.stop()
+
+
+def test_post_update_500_when_dispatch_raises():
+    def bad_dispatch(_cmd: dict[str, Any]) -> None:
+        raise RuntimeError("boom")
+
+    srv, port, _ = _server_with_handlers([], command_handler=bad_dispatch)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/update")
+        assert exc.value.code == 500
+    finally:
+        srv.stop()

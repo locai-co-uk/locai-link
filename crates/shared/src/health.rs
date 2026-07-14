@@ -19,6 +19,9 @@ pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:20505/models";
 /// [`DEFAULT_MODELS_URL`] — kept distinct so call sites read as intent.
 pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 
+/// Loopback endpoint that triggers an in-app OTA update (INFRA-353).
+pub const DEFAULT_UPDATE_URL: &str = "http://127.0.0.1:20505/update";
+
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Shared HTTP client so back-to-back polls reuse the connection pool.
@@ -40,6 +43,12 @@ pub struct AgentHealth {
     /// predate this field parse as `Vec::new()`.
     #[serde(default)]
     pub deployments: Vec<DeploymentProgress>,
+    /// A newer bundle is available (INFRA-353). `false` on older runtimes.
+    #[serde(default)]
+    pub update_available: bool,
+    /// The latest published version when `update_available`; else `None`.
+    #[serde(default)]
+    pub latest_version: Option<String>,
 }
 
 /// One in-flight model deployment. Removed from the list once completed on the runtime side.
@@ -147,6 +156,16 @@ pub fn toggle_serving(
 /// runtime side if no deploy is currently in-flight.
 pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String> {
     post_action(base_url, pipeline_id, "cancel-deploy")
+}
+
+/// Ask the agent to update itself to the latest published bundle (INFRA-353).
+/// Dispatches UPDATE_AGENT; the agent restarts onto the new version.
+pub fn trigger_update(url: &str) -> Result<(), String> {
+    match HTTP_AGENT.post(url).send_bytes(&[]) {
+        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
+        Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
+        Err(e) => Err(format!("POST {url} failed: {e}")),
+    }
 }
 
 /// Probe Link's `/healthz` endpoint. Every failure mode collapses to

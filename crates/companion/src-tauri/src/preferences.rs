@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use locai_link_shared::{
     agent_health, cancel_deployment as shared_cancel_deployment, list_models,
-    toggle_serving as shared_toggle_serving, DeploymentProgress, HealthStatus, ModelInfo,
-    ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
-    DEFAULT_MODEL_ACTION_BASE,
+    toggle_serving as shared_toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
+    ModelInfo, ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL,
+    DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE, DEFAULT_UPDATE_URL,
 };
 use serde::Serialize;
 use tauri::AppHandle;
@@ -100,6 +100,9 @@ pub struct StatusPoll {
     /// Empty on transient failures — UI treats that as "no models yet".
     models: Vec<ModelInfo>,
     deployments: Vec<DeploymentProgress>,
+    /// A newer bundle is published for this platform (INFRA-353).
+    update_available: bool,
+    latest_version: Option<String>,
 }
 
 // --- Commands ----------------------------------------------------------------
@@ -135,22 +138,31 @@ pub async fn get_prefs_state() -> PrefsState {
 #[tauri::command]
 pub async fn poll_status() -> StatusPoll {
     tauri::async_runtime::spawn_blocking(|| {
-        let (status, uptime, version, network, deployments) = probe_runtime_full();
+        let probe = probe_runtime_full();
         let models = match list_models(DEFAULT_MODELS_URL) {
             ModelsStatus::Ok(list) => list,
             ModelsStatus::Down | ModelsStatus::Malformed(_) => Vec::new(),
         };
         StatusPoll {
-            status,
-            uptime_seconds: uptime,
-            version,
-            network,
+            status: probe.status,
+            uptime_seconds: probe.uptime_seconds,
+            version: probe.version,
+            network: probe.network,
             models,
-            deployments,
+            deployments: probe.deployments,
+            update_available: probe.update_available,
+            latest_version: probe.latest_version,
         }
     })
     .await
     .expect("poll_status panicked")
+}
+
+/// Trigger the agent's in-app update (INFRA-353). POSTs the loopback
+/// `/update`; the agent swaps the bundle and relaunches on success.
+#[tauri::command]
+pub fn install_update() -> Result<(), String> {
+    trigger_update(DEFAULT_UPDATE_URL)
 }
 
 /// Start or stop serving `pipeline_id`. `action` is `"serve"` or `"stop-serving"`.
@@ -304,24 +316,36 @@ pub fn open_control_device(app: AppHandle, device_id: Option<String>) -> Result<
 // --- Helpers -----------------------------------------------------------------
 
 /// Full /healthz probe including in-flight deployments; used by `poll_status`.
-fn probe_runtime_full() -> (
-    AgentStatus,
-    Option<u64>,
-    Option<String>,
-    Option<TransportHealth>,
-    Vec<DeploymentProgress>,
-) {
+struct RuntimeProbe {
+    status: AgentStatus,
+    uptime_seconds: Option<u64>,
+    version: Option<String>,
+    network: Option<TransportHealth>,
+    deployments: Vec<DeploymentProgress>,
+    update_available: bool,
+    latest_version: Option<String>,
+}
+
+fn probe_runtime_full() -> RuntimeProbe {
     match agent_health(DEFAULT_HEALTH_URL) {
-        HealthStatus::Up(h) => (
-            AgentStatus::Up,
-            Some(h.uptime_seconds),
-            Some(h.version),
-            h.transport,
-            h.deployments,
-        ),
-        HealthStatus::Down | HealthStatus::Malformed(_) => {
-            (AgentStatus::Down, None, None, None, Vec::new())
-        }
+        HealthStatus::Up(h) => RuntimeProbe {
+            status: AgentStatus::Up,
+            uptime_seconds: Some(h.uptime_seconds),
+            version: Some(h.version),
+            network: h.transport,
+            deployments: h.deployments,
+            update_available: h.update_available,
+            latest_version: h.latest_version,
+        },
+        HealthStatus::Down | HealthStatus::Malformed(_) => RuntimeProbe {
+            status: AgentStatus::Down,
+            uptime_seconds: None,
+            version: None,
+            network: None,
+            deployments: Vec::new(),
+            update_available: false,
+            latest_version: None,
+        },
     }
 }
 

@@ -18,6 +18,7 @@ import threading
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -411,20 +412,21 @@ def test_read_boot_config_absent(tmp_path):
 # --- latest_release_for ---
 
 
-def _fake_release_payload(stem: str, version: str) -> dict[str, Any]:
+def _fake_release_payload(stem: str, version: str, platform_tag: str = "linux-x86_64") -> dict[str, Any]:
+    full = f"{stem}-{platform_tag}-v{version}"
     return {
         "tag_name": f"v{version}",
         "assets": [
             {
-                "name": f"{stem}-v{version}.tar.gz",
-                "browser_download_url": f"https://example/{stem}-v{version}.tar.gz",
+                "name": f"{full}.tar.gz",
+                "browser_download_url": f"https://example/{full}.tar.gz",
             },
             {
-                "name": f"{stem}-v{version}.tar.gz.sha256",
-                "browser_download_url": f"https://example/{stem}-v{version}.tar.gz.sha256",
+                "name": f"{full}.tar.gz.sha256",
+                "browser_download_url": f"https://example/{full}.tar.gz.sha256",
             },
             {
-                "name": f"locai-link-other-linux-x86_64-v{version}.tar.gz",
+                "name": f"locai-link-other-{platform_tag}-v{version}.tar.gz",
                 "browser_download_url": "https://example/other.tar.gz",
             },
         ],
@@ -476,26 +478,35 @@ class _StubResponse:
 
 
 def test_latest_release_for_picks_matching_asset():
-    stem = "locai-link-llm-linux-x86_64"
-    payload = _fake_release_payload(stem, "1.0.16")
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.0.16", platform_tag="linux-x86_64")
     session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
-    info = updater.latest_release_for(stem, repo="foo/bar", session=session)
+    info = updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
     assert isinstance(info, ReleaseInfo)
     assert info.version == "1.0.16"
     assert info.tag == "v1.0.16"
-    assert info.asset_name == f"{stem}-v1.0.16.tar.gz"
+    assert info.asset_name == f"{stem}-linux-x86_64-v1.0.16.tar.gz"
     assert info.sha256_url is not None and info.sha256_url.endswith(".sha256")
 
 
+def test_latest_release_for_ignores_other_platform_assets():
+    # A release carries every platform's asset; an install must match only its own.
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.0.16", platform_tag="macos-arm64")
+    session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
+    with pytest.raises(ReleaseNotFound):
+        updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
+
+
 def test_latest_release_for_no_matching_asset():
-    stem = "locai-link-llm-linux-x86_64"
+    stem = "locai-link-llm-stt"
     payload = {
         "tag_name": "v9.9.9",
         "assets": [{"name": "something-else.tar.gz", "browser_download_url": "x"}],
     }
     session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
     with pytest.raises(ReleaseNotFound):
-        updater.latest_release_for(stem, repo="foo/bar", session=session)
+        updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
 
 
 # --- download ---
@@ -595,8 +606,37 @@ def _make_tar_with(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def test_extract_tar_real_installer_package_shape(tmp_path):
+    """The actual release asset: <name>/bundle/versions/<v>/ + install.sh/icons
+    at the root. Payload is located by the runtime binary, so the wrapper,
+    installer scripts, and icons must not land in the extracted bundle dir."""
+    archive = tmp_path / "bundle.tar.gz"
+    wrap = "locai-link-llm-stt-linux-x86_64-v1.0.16"
+    archive.write_bytes(
+        _make_tar_with(
+            {
+                f"{wrap}/install.sh": b"#!/bin/sh",
+                f"{wrap}/icons/32x32.png": b"png",
+                f"{wrap}/bundle/versions/1.0.16/manifest.json": b"{}",
+                f"{wrap}/bundle/versions/1.0.16/{updater.RUNTIME_BINARY}": b"binary",
+                f"{wrap}/bundle/versions/1.0.16/_internal/libpython.so": b"lib",
+            }
+        )
+    )
+    dest = tmp_path / "versions" / "1.0.16"
+    updater.extract(archive, dest)
+    assert (dest / "manifest.json").is_file()
+    assert (dest / updater.RUNTIME_BINARY).read_bytes() == b"binary"
+    assert (dest / "_internal" / "libpython.so").is_file()
+    # Installer wrapping must NOT leak into the extracted bundle dir.
+    assert not (dest / "install.sh").exists()
+    assert not (dest / "icons").exists()
+    assert not (dest / "bundle").exists()
+
+
 def test_extract_tar_real_versions_wrapped_shape(tmp_path):
-    """The actual CI tarball shape: versions/<v>/... plus launcher at root."""
+    """Flat shape: versions/<v>/... plus launcher at root (no canonically
+    named runtime — exercises the versions/<v>/ fallback branch)."""
     archive = tmp_path / "bundle.tar.gz"
     archive.write_bytes(
         _make_tar_with(
@@ -902,3 +942,58 @@ def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     # And no flip should have happened.
     flip_spy.assert_not_called()
     assert (root / updater.CURRENT_LINK).resolve().name == "1.0.15"
+
+
+# --- check_update_available (INFRA-353) --------------------------------------
+
+
+def _stub_check(monkeypatch, *, frozen, current="1.0.21", latest="1.0.22", raise_in_discover=False):
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: frozen)
+    if raise_in_discover:
+
+        def _boom() -> Path:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(updater, "discover_install_root", _boom)
+        return
+    monkeypatch.setattr(updater, "discover_install_root", lambda: Path("/x"))
+    monkeypatch.setattr(updater, "read_manifest", lambda root: SimpleNamespace(asset_name="stem", version=current))
+    monkeypatch.setattr(updater, "latest_release_for", lambda stem: SimpleNamespace(version=latest))
+
+
+def test_check_update_available_when_newer(monkeypatch):
+    _stub_check(monkeypatch, frozen=True, current="1.0.21", latest="1.0.22")
+    assert updater.check_update_available() == (True, "1.0.22")
+
+
+def test_check_update_not_available_when_equal(monkeypatch):
+    _stub_check(monkeypatch, frozen=True, current="1.0.21", latest="1.0.21")
+    assert updater.check_update_available() == (False, "1.0.21")
+
+
+def test_check_update_source_install_is_noop(monkeypatch):
+    _stub_check(monkeypatch, frozen=False)
+    assert updater.check_update_available() == (False, None)
+
+
+def test_check_update_swallows_errors(monkeypatch):
+    _stub_check(monkeypatch, frozen=True, raise_in_discover=True)
+    assert updater.check_update_available() == (False, None)
+
+
+# --- _version_gt -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "expected"),
+    [
+        ("1.0.20", "1.0.19", True),  # newer patch
+        ("1.0.19", "1.0.20", False),  # older patch
+        ("1.0.19", "1.0.19", False),  # equal
+        ("1.0", "1.0.0", False),  # trailing-zero equivalent
+        ("2.0.0", "1.9.9", True),  # major bump
+        ("v1.0.20", "1.0.19", True),  # tolerates a leading v
+    ],
+)
+def test_version_gt(a, b, expected):
+    assert updater._version_gt(a, b) is expected

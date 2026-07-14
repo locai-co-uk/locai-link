@@ -113,7 +113,11 @@ class AgentRuntime:
                 endpoint=endpoints[0] if endpoints else None,
                 connected=True,
             )
-        self.health_server = HealthServer(self.health_state)
+        # Update-check runs inside the health server (it owns the field it
+        # serves); inject the checker so infra stays free of updater knowledge.
+        from link.app.updater import check_update_available
+
+        self.health_server = HealthServer(self.health_state, update_checker=check_update_available)
 
         if threading.current_thread() is threading.main_thread():
             try:
@@ -378,6 +382,10 @@ class AgentRuntime:
         with self._pipeline_ops_lock:
             # Fast: validate/update config and decide restart, under self.lock.
             with self.lock:
+                # Hold the new config aside; don't commit it to
+                # pipeline_configs until the restart actually succeeds, so a
+                # failed stop/build leaves the previous working config intact.
+                pending_conf: PipelineConfig | None = None
                 if config_data:
                     try:
                         if "id" not in config_data:
@@ -391,12 +399,12 @@ class AgentRuntime:
                             return True
 
                         logger.info(f"Configuration update for '{pipeline_id}'.")
-                        self.pipeline_configs[pipeline_id] = new_conf
+                        pending_conf = new_conf
                     except Exception as e:
                         logger.error(f"Invalid configuration for '{pipeline_id}': {e}")
                         return False
 
-                p_conf = self.pipeline_configs.get(pipeline_id)
+                p_conf = pending_conf or self.pipeline_configs.get(pipeline_id)
                 if not p_conf:
                     logger.error(f"Cannot start '{pipeline_id}': No configuration found.")
                     return False
@@ -425,6 +433,8 @@ class AgentRuntime:
                 return False
 
             with self.lock:
+                if pending_conf is not None:
+                    self.pipeline_configs[pipeline_id] = pending_conf
                 self.pipelines[pipeline_id] = new_pipe
             new_pipe.start()
 

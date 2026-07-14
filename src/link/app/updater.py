@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -496,20 +497,33 @@ def read_boot_config(root: Path) -> BootConfig | None:
 # ---------------------------------------------------------------------------
 
 
+def _platform_tag() -> str:
+    """The ``<os>-<arch>`` segment the release workflow inserts into asset
+    names (e.g. ``linux-x86_64``). Must match the ``platform_tag`` matrix in
+    .github/workflows/release.yml."""
+    os_tag = {"linux": "linux", "darwin": "macos", "win32": "windows"}.get(sys.platform, sys.platform)
+    machine = platform.machine().lower()
+    arch_tag = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}.get(machine, machine)
+    return f"{os_tag}-{arch_tag}"
+
+
 def latest_release_for(
     asset_stem: str,
     *,
     repo: str = DEFAULT_RELEASES_REPO,
     api_base: str = "https://api.github.com",
     session: _HttpGetter | None = None,
+    platform_tag: str | None = None,
 ) -> ReleaseInfo:
     """Find the latest release that publishes an asset matching ``asset_stem``.
 
-    ``asset_stem`` is the platform-and-plugin-set prefix, e.g.
-    ``locai-link-llm-linux-x86_64`` (from ``manifest.asset_name``). The actual
-    asset filename is ``<stem>-v<version>.<ext>`` — see
-    ``bundling/manifest.py::derive_asset_name`` for the naming rules.
+    ``asset_stem`` is the plugin-set base from ``manifest.asset_name`` (e.g.
+    ``locai-link-llm-stt``). The release workflow appends this host's
+    platform/arch and the version: ``<stem>-<platform_tag>-v<version>.<ext>``
+    (see .github/workflows/release.yml). ``platform_tag`` defaults to this
+    host's tag so an install only ever matches its own platform's asset.
     """
+    ptag = platform_tag or _platform_tag()
     http = session or requests
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases/latest"
     try:
@@ -524,9 +538,9 @@ def latest_release_for(
     version = tag.lstrip("v")
 
     assets: Iterable[dict[str, Any]] = payload.get("assets") or []
-    asset_match, sha_match = _pick_assets(assets, asset_stem, version)
+    asset_match, sha_match = _pick_assets(assets, asset_stem, version, ptag)
     if asset_match is None:
-        raise ReleaseNotFound(f"No asset matching '{asset_stem}-v{version}.(tar.gz|zip)' on release {tag}")
+        raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}-v{version}.(tar.gz|zip)' on release {tag}")
     return ReleaseInfo(
         version=version,
         tag=tag,
@@ -537,10 +551,10 @@ def latest_release_for(
 
 
 def _pick_assets(
-    assets: Iterable[dict[str, Any]], stem: str, version: str
+    assets: Iterable[dict[str, Any]], stem: str, version: str, platform_tag: str
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    bundle_re = re.compile(rf"^{re.escape(stem)}-v{re.escape(version)}\.(tar\.gz|zip)$")
-    sha_re = re.compile(rf"^{re.escape(stem)}-v{re.escape(version)}\.(tar\.gz|zip)\.sha256$")
+    bundle_re = re.compile(rf"^{re.escape(stem)}-{re.escape(platform_tag)}-v{re.escape(version)}\.(tar\.gz|zip)$")
+    sha_re = re.compile(rf"^{re.escape(stem)}-{re.escape(platform_tag)}-v{re.escape(version)}\.(tar\.gz|zip)\.sha256$")
     bundle_match: dict[str, Any] | None = None
     sha_match: dict[str, Any] | None = None
     for a in assets:
@@ -707,14 +721,14 @@ def _hash_sha256(path: Path) -> str:
 
 
 def extract(archive: Path, dest: Path) -> None:
-    """Extract a release archive's ``versions/<v>/`` payload into ``dest``.
+    """Extract a release archive's version payload into ``dest``.
 
-    The release tarball produced by ``bundling/build.py`` wraps the bundle in
-    ``versions/<v>/`` plus a launcher + ``current`` pointer at the root, so
-    extracting the same artifact into a fresh install_root yields a valid
-    first install. For OTA updates we only want the inner ``versions/<v>/``
-    directory — the launcher and pointer already exist in the deployed
-    install_root and must not be overwritten.
+    The release tarball is a full installer package — it wraps the bundle as
+    ``<name>/bundle/versions/<v>/`` alongside install.sh + icons at the root.
+    For OTA we only want that inner payload dir (the one holding the runtime);
+    the launcher, pointer, and installer scripts already exist in the deployed
+    install_root and must not be pulled in. ``_locate_versioned_payload`` finds
+    it regardless of wrapping depth.
 
     Refuses path-traversal entries. Atomic replace of ``dest`` on success.
     """
@@ -743,11 +757,20 @@ def extract(archive: Path, dest: Path) -> None:
 
 
 def _locate_versioned_payload(staging: Path) -> Path:
-    """Find ``staging/versions/<single>/`` inside an extracted release.
+    """Find the bundle payload dir (the one holding the runtime binary) inside
+    an extracted release, regardless of how the packer wraps it.
 
-    Falls back to ``staging/<single>/`` for the legacy/flat tarball shape used
-    by some tests — keeps callers honest while preserving compatibility.
+    Release tarballs wrap the payload as ``<name>/bundle/versions/<v>/`` (full
+    installer package with install.sh + icons at the root). Locating the dir
+    that directly contains the runtime binary is layout-agnostic; the
+    ``versions/<v>/`` and single-top-level-dir branches remain as fallbacks
+    for flat archives without the canonically-named binary.
     """
+    runtimes = [p.parent for p in staging.rglob(RUNTIME_BINARY) if p.is_file()]
+    if len(runtimes) == 1:
+        return runtimes[0]
+    if len(runtimes) > 1:
+        raise BundleUpdateError(f"multiple runtime binaries in archive: {sorted(str(r) for r in runtimes)}")
     versions_dir = staging / VERSIONS_DIR
     if versions_dir.is_dir():
         children = [p for p in versions_dir.iterdir() if p.is_dir()]
@@ -760,7 +783,7 @@ def _locate_versioned_payload(staging: Path) -> Path:
     top_dirs = [p for p in staging.iterdir() if p.is_dir()]
     if len(top_dirs) == 1:
         return top_dirs[0]
-    raise BundleUpdateError("archive layout unrecognised: expected versions/<v>/ payload or a single top-level dir")
+    raise BundleUpdateError("archive layout unrecognised: no runtime binary or recognizable payload dir found")
 
 
 def _extract_tar(archive: Path, dest: Path) -> None:
@@ -1018,6 +1041,40 @@ def clear_staging(root: Path) -> None:
 def running_frozen_bundle() -> bool:
     """True when this process is a PyInstaller-frozen bundle (vs a source install)."""
     return bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+
+
+def _version_gt(a: str, b: str) -> bool:
+    """True if version ``a`` is newer than ``b`` (numeric dotted compare)."""
+
+    def parts(v: str) -> list[int]:
+        out: list[int] = []
+        for chunk in v.strip().lstrip("v").split("."):
+            digits = "".join(c for c in chunk if c.isdigit())
+            out.append(int(digits) if digits else 0)
+        return out
+
+    pa, pb = parts(a), parts(b)
+    n = max(len(pa), len(pb))
+    return (pa + [0] * (n - len(pa))) > (pb + [0] * (n - len(pb)))
+
+
+def check_update_available(install_root: Path | None = None) -> tuple[bool, str | None]:
+    """Whether a newer bundle is published (frozen installs only).
+
+    Returns ``(update_available, latest_version)``. Best-effort: any failure
+    (offline, source install, GitHub error) yields ``(False, None)`` — the
+    check must never take the agent down.
+    """
+    if not running_frozen_bundle():
+        return (False, None)
+    try:
+        root = install_root or discover_install_root()
+        manifest = read_manifest(root)
+        release = latest_release_for(manifest.asset_name)
+        return (_version_gt(release.version, manifest.version), release.version)
+    except Exception as e:  # noqa: BLE001 — never let the check crash the agent
+        logger.debug(f"update check failed: {e}")
+        return (False, None)
 
 
 def swap_bundle(install_root: Path | None = None) -> bool:

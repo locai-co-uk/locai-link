@@ -12,8 +12,9 @@ use std::thread;
 use std::time::Duration;
 
 use locai_link_shared::{
-    agent_health, list_models, toggle_serving, DeploymentProgress, HealthStatus, ModelInfo,
-    ModelsStatus, ServingAction, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE,
+    agent_health, list_models, toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
+    ModelInfo, ModelsStatus, ServingAction, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
+    DEFAULT_MODEL_ACTION_BASE, DEFAULT_UPDATE_URL,
 };
 use tauri::{
     image::Image,
@@ -48,6 +49,7 @@ const MENU_ID_CONTROL: &str = "control";
 const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
 const MENU_ID_PREFERENCES: &str = "preferences";
 const MENU_ID_QUIT: &str = "quit";
+const MENU_ID_UPDATE: &str = "update";
 
 /// Suffix after this prefix is the pipeline id.
 const MENU_ID_MODEL_PREFIX: &str = "model:";
@@ -81,6 +83,9 @@ fn status_text_up() -> String {
 }
 fn status_text_down() -> String {
     format!("Locai Link{} · OFFLINE", *CHANNEL_SUFFIX)
+}
+fn status_text_updating() -> String {
+    format!("Locai Link{} · UPDATING", *CHANNEL_SUFFIX)
 }
 
 /// Malformed and Down collapse into `Down` — both mean "no usable data".
@@ -121,6 +126,7 @@ pub fn run() {
             preferences::poll_status,
             preferences::toggle_model_serving,
             preferences::cancel_model_deploy,
+            preferences::install_update,
             preferences::set_run_at_login,
             preferences::runtime_start,
             preferences::runtime_stop,
@@ -154,7 +160,7 @@ pub fn run() {
             thread::spawn(kickstart_runtime_if_installed);
 
             let (menu, status_item) =
-                build_tray_menu(app.handle(), &[], &[], &status_text_initial())?;
+                build_tray_menu(app.handle(), &[], &[], &status_text_initial(), None)?;
 
             let icon = Image::from_bytes(TRAY_ICON_UP)?;
             let tray = TrayIconBuilder::with_id("main")
@@ -282,6 +288,7 @@ fn build_tray_menu(
     models: &[ModelInfo],
     deployments: &[DeploymentProgress],
     status_text: &str,
+    update: Option<&str>,
 ) -> tauri::Result<(Menu<Wry>, MenuItem<Wry>)> {
     // `enabled: false` renders as grey/unclickable — informational only.
     let status = MenuItem::with_id(app, MENU_ID_STATUS, status_text, false, None::<&str>)?;
@@ -306,18 +313,32 @@ fn build_tray_menu(
     )?;
     let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status,
-            &sep1,
-            &models_submenu,
-            &sep2,
-            &control,
-            &preferences,
-            &quit,
-        ],
-    )?;
+    // "Update to vX.Y.Z" appears only when the agent reports one available.
+    let update_item = match update {
+        Some(v) => Some(MenuItem::with_id(
+            app,
+            MENU_ID_UPDATE,
+            format!("Update to v{v}"),
+            true,
+            None::<&str>,
+        )?),
+        None => None,
+    };
+
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![
+        &status as &dyn IsMenuItem<Wry>,
+        &sep1,
+        &models_submenu,
+        &sep2,
+    ];
+    if let Some(u) = &update_item {
+        items.push(u);
+    }
+    items.push(&control);
+    items.push(&preferences);
+    items.push(&quit);
+
+    let menu = Menu::with_items(app, &items)?;
     Ok((menu, status))
 }
 
@@ -413,7 +434,11 @@ fn deployment_label(d: &DeploymentProgress) -> String {
 
 /// Digest of what the tray menu structure depends on. Progress is bucketed to
 /// 5% steps to match the runtime's reporter cadence; alias/port renames don't rebuild.
-fn menu_digest(models: &[ModelInfo], deployments: &[DeploymentProgress]) -> MenuDigest {
+fn menu_digest(
+    models: &[ModelInfo],
+    deployments: &[DeploymentProgress],
+    update: Option<&str>,
+) -> MenuDigest {
     let mut m: Vec<(String, bool)> = models
         .iter()
         .map(|m| (m.id.clone(), m.is_serving))
@@ -433,6 +458,7 @@ fn menu_digest(models: &[ModelInfo], deployments: &[DeploymentProgress]) -> Menu
     MenuDigest {
         models: m,
         deployments: d,
+        update: update.map(str::to_string),
     }
 }
 
@@ -440,6 +466,7 @@ fn menu_digest(models: &[ModelInfo], deployments: &[DeploymentProgress]) -> Menu
 struct MenuDigest {
     models: Vec<(String, bool)>,
     deployments: Vec<(String, String, u32)>,
+    update: Option<String>,
 }
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
@@ -452,6 +479,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         MENU_ID_PREFERENCES => {
             show_preferences_window(app);
+        }
+        MENU_ID_UPDATE => {
+            // Off the menu-event thread: the loopback POST shouldn't block the
+            // tray. The next poll picks up the "Updating" state.
+            thread::spawn(|| {
+                if let Err(e) = trigger_update(DEFAULT_UPDATE_URL) {
+                    eprintln!("[companion] trigger_update failed: {e}");
+                }
+            });
         }
         MENU_ID_QUIT => {
             // Make the choice explicit: also stop the Link runtime, or just close
@@ -550,12 +586,54 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
     // touch the models digest) still forces a rebuild — IconMenuItem::set_text
     // on Tauri 2.11 didn't reliably repaint the disabled header row.
     let mut current_status_text = status_text_initial();
+    // Update-in-progress inference: the agent's health server goes down during
+    // the swap. If it was up with an update available and just dropped, treat
+    // it as updating (clicking the tray Update item produces exactly this) and
+    // hold that until it returns — success/failure both resolve on next Up.
+    let mut updating = false;
+    let mut update_saw_down = false;
+    let mut prev_up_with_update = false;
+    // Bound how long we display "Updating" while the agent is down, so a swap
+    // that never comes back (crash, failed relaunch) falls back to OFFLINE
+    // instead of showing "Updating" forever. ~5 min at a 5s poll.
+    let mut update_down_polls = 0u32;
+    const MAX_UPDATE_DOWN_POLLS: u32 = 60;
 
     loop {
         let health = agent_health(DEFAULT_HEALTH_URL);
         let models = list_models(DEFAULT_MODELS_URL);
 
-        let next_tray = TrayState::from(&health);
+        let (is_up, has_update) = match &health {
+            HealthStatus::Up(h) => (true, h.update_available),
+            HealthStatus::Down | HealthStatus::Malformed(_) => (false, false),
+        };
+        if prev_up_with_update && !is_up {
+            updating = true;
+        }
+        if updating && !is_up {
+            update_saw_down = true;
+            update_down_polls += 1;
+            if update_down_polls >= MAX_UPDATE_DOWN_POLLS {
+                updating = false;
+                update_saw_down = false;
+            }
+        }
+        if updating && update_saw_down && is_up {
+            updating = false;
+            update_saw_down = false;
+        }
+        if !updating {
+            update_down_polls = 0;
+        }
+        prev_up_with_update = is_up && has_update;
+
+        // Keep the icon on the Up glyph while updating so it doesn't flash the
+        // offline icon during the swap.
+        let next_tray = if updating {
+            TrayState::Up
+        } else {
+            TrayState::from(&health)
+        };
         if next_tray != current_tray {
             let bytes = match next_tray {
                 TrayState::Up => TRAY_ICON_UP,
@@ -570,7 +648,11 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             current_tray = next_tray;
         }
 
-        let status_text = status_label(&health, &models);
+        let status_text = if updating {
+            status_text_updating()
+        } else {
+            status_label(&health, &models)
+        };
 
         // Tray tooltip mirrors serving state — Discord/Slack-style hover hint.
         let brand = format!("Locai Link{}", *CHANNEL_SUFFIX);
@@ -601,11 +683,21 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             HealthStatus::Up(h) => h.deployments.clone(),
             HealthStatus::Down | HealthStatus::Malformed(_) => Vec::new(),
         };
-        let new_digest = menu_digest(&new_models, &new_deployments);
+        let update_latest: Option<String> = match &health {
+            HealthStatus::Up(h) if h.update_available => h.latest_version.clone(),
+            _ => None,
+        };
+        let new_digest = menu_digest(&new_models, &new_deployments, update_latest.as_deref());
         let text_changed = status_text != current_status_text;
 
         if new_digest != current_digest || text_changed {
-            match build_tray_menu(&app, &new_models, &new_deployments, &status_text) {
+            match build_tray_menu(
+                &app,
+                &new_models,
+                &new_deployments,
+                &status_text,
+                update_latest.as_deref(),
+            ) {
                 Ok((new_menu, new_status_item)) => {
                     if let Err(e) = tray.set_menu(Some(new_menu)) {
                         eprintln!("[companion] tray.set_menu failed: {e}");

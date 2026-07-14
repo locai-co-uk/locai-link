@@ -7,7 +7,7 @@ build-backend = "uv_build"
 
 [project]
 name = "locai-link"
-version = "1.0.21"
+version = "1.1.0"
 description = "Self-hosted edge AI runtime for on-prem and private cloud."
 readme = "README.md"
 requires-python = ">=3.11"
