@@ -402,6 +402,9 @@ class HealthServer:
         logger.info(f"Health server listening on http://{self.host}:{self.port}/healthz")
 
         if self._update_checker is not None:
+            # Clear a stop signal left by a prior stop() so a restarted server
+            # polls again instead of bailing on the loop's first wait().
+            self._poll_stop.clear()
             self._poll_thread = threading.Thread(target=self._update_poll_loop, name="update-check", daemon=True)
             self._poll_thread.start()
 

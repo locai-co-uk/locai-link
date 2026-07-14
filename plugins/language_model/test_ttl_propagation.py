@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 try:
     from .swap_manager import SwapManager
 except ImportError:  # flat layout (pytest prepend import mode)
@@ -52,3 +54,17 @@ def test_per_model_ttls_are_independent(monkeypatch, tmp_path):
     models = _models(sm)
     assert models["a"]["ttl"] == 60
     assert models["b"]["ttl"] == SwapManager._MODEL_TTL
+
+
+@pytest.mark.parametrize("ttl", [-1, 0, 1, 300])
+def test_valid_ttl_boundaries_accepted(monkeypatch, tmp_path, ttl):
+    sm = _make_sm(monkeypatch, tmp_path)
+    sm.add_model("m", "/models/m.gguf", ttl=ttl)
+    assert _models(sm)["m"]["ttl"] == ttl
+
+
+@pytest.mark.parametrize("ttl", [-2, -1.5, 1.9, True, "60"])
+def test_invalid_ttl_rejected(monkeypatch, tmp_path, ttl):
+    sm = _make_sm(monkeypatch, tmp_path)
+    with pytest.raises(ValueError):
+        sm.add_model("m", "/models/m.gguf", ttl=ttl)

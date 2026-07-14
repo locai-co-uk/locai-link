@@ -483,9 +483,20 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         MENU_ID_UPDATE => {
             // Off the menu-event thread: the loopback POST shouldn't block the
             // tray. The next poll picks up the "Updating" state.
-            thread::spawn(|| {
+            let app_handle = app.clone();
+            thread::spawn(move || {
                 if let Err(e) = trigger_update(DEFAULT_UPDATE_URL) {
                     eprintln!("[companion] trigger_update failed: {e}");
+                    // Otherwise the click looks like it did nothing — tell the user.
+                    let dialog_handle = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        dialog_handle
+                            .dialog()
+                            .message("Couldn't start the update. Check that Link is running, then try again.")
+                            .title("Update failed")
+                            .kind(MessageDialogKind::Error)
+                            .show(|_| {});
+                    });
                 }
             });
         }

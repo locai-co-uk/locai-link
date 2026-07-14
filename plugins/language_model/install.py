@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import http.client
 import logging
 import os
 import platform
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -121,19 +123,34 @@ def _prebuilt_url(tag):
     return None
 
 
+_DOWNLOAD_TIMEOUT = 30  # seconds per attempt — guards against a stalled CDN
+
+
 def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
     """Download ``url`` to ``dest``, retrying transient network failures.
 
     GitHub's asset CDN occasionally drops the connection mid-transfer
-    ("Remote end closed connection"), notably on Windows runners; a single
-    urlretrieve with no retry then fails the whole install.
+    ("Remote end closed connection"), notably on Windows runners. Each attempt
+    is bounded by a timeout so a stalled transfer can't hang the install, and
+    only transient transport errors are retried — a 4xx (e.g. 404) fails fast.
+    Streams to a ``.partial`` sidecar, renamed onto ``dest`` only on success.
     """
+    partial = dest.with_suffix(dest.suffix + ".partial")
     for attempt in range(1, attempts + 1):
         try:
-            urllib.request.urlretrieve(url, dest)
+            with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as resp, open(partial, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+            os.replace(partial, dest)
             return
-        except Exception as e:  # noqa: BLE001 — retry any transport error
-            dest.unlink(missing_ok=True)
+        except urllib.error.HTTPError as e:
+            partial.unlink(missing_ok=True)
+            # 4xx is permanent — don't waste retries on it; 5xx is worth another go.
+            if e.code < 500 or attempt == attempts:
+                raise
+            logger.warning(f"Download attempt {attempt}/{attempts} failed (HTTP {e.code}); retrying...")
+            time.sleep(2 * attempt)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
+            partial.unlink(missing_ok=True)
             if attempt == attempts:
                 raise
             logger.warning(f"Download attempt {attempt}/{attempts} failed ({e}); retrying...")

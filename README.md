@@ -162,6 +162,7 @@ See the API reference for per-module docs.
 A modular, pipeline-based runtime. The **control plane** (lifecycle, configuration) is separated from the **data plane** (inference, telemetry) for performance and resilience.
 
 ```mermaid
+%%{init: {"flowchart": {"rankSpacing": 30, "nodeSpacing": 18, "padding": 4}}}%%
 flowchart TB
     %% --- External Entities (Top) ---
     User([User / CLI])
