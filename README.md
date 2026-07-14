@@ -162,45 +162,37 @@ See the API reference for per-module docs.
 A modular, pipeline-based runtime. The **control plane** (lifecycle, configuration) is separated from the **data plane** (inference, telemetry) for performance and resilience.
 
 ```mermaid
-%%{init: {"flowchart": {"rankSpacing": 30, "nodeSpacing": 18, "padding": 4}}}%%
+%%{init: {"flowchart": {"rankSpacing": 34, "nodeSpacing": 14, "padding": 6}}}%%
 flowchart TB
     %% --- External Entities (Top) ---
     User([User / CLI])
 
     %% --- The Edge Device (Middle) ---
+    %% Each layer's nodes are chained with invisible links (~~~) so they pack
+    %% into a compact row instead of a tall column. That only holds if no node
+    %% inside a layer has an edge crossing the layer boundary — so the upstream
+    %% arrows below run from the layer containers, not individual nodes.
     subgraph Device["Edge Device"]
         direction TB
 
         Entry[Entry Point<br/>link.main]
 
         subgraph App["Application Layer"]
-            direction TB
-            Runtime[Agent Runtime]
-            State[State Manager]
-            Onboard[Onboarding]
+            direction LR
+            Runtime[Agent Runtime] ~~~ State[State Manager] ~~~ Onboard[Onboarding]
         end
 
         subgraph Infra["Infrastructure Layer"]
-            direction TB
-            Zenoh[Zenoh Client]
-            Service[Service Manager]
-            Provision[Provisioner]
-            Health[Health Server]
-            Updater[Updater / OTA]
+            direction LR
+            Zenoh[Zenoh Client] ~~~ Service[Service Manager] ~~~ Provision[Provisioner] ~~~ Health[Health Server] ~~~ Updater[Updater / OTA]
         end
 
         subgraph Exec["Execution Layer (Pipelines)"]
-            direction TB
-            Pipe[Pipeline Orchestrator]
-            Source((Source))
-            Sink((Sink))
+            direction LR
+            Pipe[Pipeline Orchestrator] ~~~ Source((Source)) ~~~ Sink((Sink))
             subgraph Plugins["Plugins — install any subset, or none"]
-                direction TB
-                LM[language_model]
-                AT[audio_transcriber]
-                IC[image_classifier]
-                AC[audio_classifier]
-                More[…other / custom]
+                direction LR
+                LM[language_model] ~~~ AT[audio_transcriber] ~~~ IC[image_classifier] ~~~ AC[audio_classifier] ~~~ More[…other / custom]
             end
         end
     end
@@ -208,20 +200,22 @@ flowchart TB
     %% --- External Entities (Bottom) ---
     Cloud([Locai Control Plane])
 
-    %% --- Flows (vertical chain) ---
+    %% --- Flows ---
     User --> Entry
     Entry --> App
     Entry -.-> Infra
     App --> Exec
     Source -.->|Load active only| Plugins
 
-    %% Two distinct upstream paths to the control plane:
-    %%  • Pipeline sinks: telemetry + inference results (data plane)
-    %%  • LinkReporter: logs, status, commands, model state, deployment progress (control plane reporting)
-    Sink -->|Telemetry / Results| Cloud
-    Runtime -->|Logs / Status / Reports| Cloud
-    Onboard -->|Register / Activate| Cloud
-    Updater -->|Manifest / Payload| Cloud
+    %% Upstream to the control plane, at layer granularity:
+    %%  • Execution (pipeline sinks): telemetry + inference results (data plane)
+    %%  • Application (LinkReporter): logs, status, model state, deployment progress
+    %%  • Application (Onboarding): device registration / activation
+    %%  • Infrastructure (Updater): OTA manifest / payload
+    Exec -->|Telemetry / Results| Cloud
+    App -->|Logs / Status / Reports| Cloud
+    App -->|Register / Activate| Cloud
+    Infra -->|Manifest / Payload| Cloud
 
     %% --- Optionality styling: dashed borders signal "any subset" ---
     style LM stroke-dasharray:5 5
@@ -229,16 +223,6 @@ flowchart TB
     style IC stroke-dasharray:5 5
     style AC stroke-dasharray:5 5
     style More stroke-dasharray:5 5,fill:none
-
-    %% --- Force vertical stacking inside each layer + pin Cloud below Device ---
-    Runtime ~~~ State
-    State ~~~ Onboard
-    Zenoh ~~~ Service
-    Service ~~~ Provision
-    Provision ~~~ Health
-    Health ~~~ Updater
-    Pipe ~~~ Source
-    Source ~~~ Sink
     LM ~~~ AT
     AT ~~~ IC
     IC ~~~ AC

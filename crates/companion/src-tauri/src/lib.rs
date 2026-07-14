@@ -112,6 +112,9 @@ struct MenuHandles {
     status_item: MenuItem<Wry>,
     models: Vec<ModelInfo>,
     in_flight: std::collections::HashSet<String>,
+    /// Blocks repeat "Update" clicks while a swap is in flight. Held from the
+    /// click until poll_forever sees the update finish (or on POST failure).
+    update_in_flight: bool,
 }
 
 type SharedHandles = Arc<Mutex<MenuHandles>>;
@@ -176,6 +179,7 @@ pub fn run() {
                 status_item,
                 models: Vec::new(),
                 in_flight: std::collections::HashSet::new(),
+                update_in_flight: false,
             }));
             app.manage(handles.clone());
             let app_handle = app.handle().clone();
@@ -481,12 +485,31 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             show_preferences_window(app);
         }
         MENU_ID_UPDATE => {
+            // Claim the in-flight slot so a rapid double-click can't fire
+            // overlapping /update POSTs (the second would hit a shutting-down
+            // agent and pop a spurious failure dialog).
+            let shared: SharedHandles = (*app.state::<SharedHandles>()).clone();
+            {
+                let mut guard = match shared.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                if guard.update_in_flight {
+                    return;
+                }
+                guard.update_in_flight = true;
+            }
             // Off the menu-event thread: the loopback POST shouldn't block the
-            // tray. The next poll picks up the "Updating" state.
+            // tray. The next poll picks up the "Updating" state; poll_forever
+            // releases the slot when the update finishes.
             let app_handle = app.clone();
             thread::spawn(move || {
                 if let Err(e) = trigger_update(DEFAULT_UPDATE_URL) {
                     eprintln!("[companion] trigger_update failed: {e}");
+                    // Failed before the agent went down — release so a retry works.
+                    if let Ok(mut g) = shared.lock() {
+                        g.update_in_flight = false;
+                    }
                     // Otherwise the click looks like it did nothing — tell the user.
                     let dialog_handle = app_handle.clone();
                     let _ = app_handle.run_on_main_thread(move || {
@@ -618,6 +641,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             HealthStatus::Up(h) => (true, h.update_available),
             HealthStatus::Down | HealthStatus::Malformed(_) => (false, false),
         };
+        let was_updating = updating;
         if prev_up_with_update && !is_up {
             updating = true;
         }
@@ -635,6 +659,13 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         }
         if !updating {
             update_down_polls = 0;
+        }
+        // Release the click guard once an in-progress update resolves (agent
+        // returned, or the timeout gave up) so the menu item works again.
+        if was_updating && !updating {
+            if let Ok(mut h) = handles.lock() {
+                h.update_in_flight = false;
+            }
         }
         prev_up_with_update = is_up && has_update;
 

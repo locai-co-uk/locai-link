@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import requests
+from packaging.version import Version
 
 from link.config.models import AgentConfig
 
@@ -1044,18 +1045,8 @@ def running_frozen_bundle() -> bool:
 
 
 def _version_gt(a: str, b: str) -> bool:
-    """True if version ``a`` is newer than ``b`` (numeric dotted compare)."""
-
-    def parts(v: str) -> list[int]:
-        out: list[int] = []
-        for chunk in v.strip().lstrip("v").split("."):
-            digits = "".join(c for c in chunk if c.isdigit())
-            out.append(int(digits) if digits else 0)
-        return out
-
-    pa, pb = parts(a), parts(b)
-    n = max(len(pa), len(pb))
-    return (pa + [0] * (n - len(pa))) > (pb + [0] * (n - len(pb)))
+    """True if version ``a`` is newer than ``b`` (PEP 440 comparison)."""
+    return Version(a) > Version(b)
 
 
 def check_update_available(install_root: Path | None = None) -> tuple[bool, str | None]:
