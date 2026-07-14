@@ -21,6 +21,7 @@ use tauri::{
     tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Manager, WindowEvent, Wry,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 // All four consts point at the same 32×32 asset for now — cfg structure
@@ -114,6 +115,7 @@ type SharedHandles = Arc<Mutex<MenuHandles>>;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             preferences::get_prefs_state,
             preferences::poll_status,
@@ -452,8 +454,30 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             show_preferences_window(app);
         }
         MENU_ID_QUIT => {
-            // Tray only — the agent stays up because integrator apps depend on it.
-            app.exit(0);
+            // Make the choice explicit: also stop the Link runtime, or just close
+            // the tray (Link keeps running — the historical default). Non-blocking
+            // so the tray/menu event loop isn't held; act in the callback.
+            let app_handle = app.clone();
+            app.dialog()
+                .message(
+                    "Also stop the Link service?\n\n\
+                     \"Stop Link\" stops it and quits.\n\
+                     \"Keep running\" just closes this app.",
+                )
+                .title("Quit Locai Link")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Stop Link".to_string(),
+                    "Keep running".to_string(),
+                ))
+                .show(move |stop| {
+                    if stop {
+                        if let Err(e) = preferences::runtime_stop() {
+                            eprintln!("[companion] runtime_stop on quit failed: {e}");
+                        }
+                    }
+                    app_handle.exit(0);
+                });
         }
         _ if id.starts_with(MENU_ID_MODEL_PREFIX) => {
             let pipeline_id = id[MENU_ID_MODEL_PREFIX.len()..].to_string();

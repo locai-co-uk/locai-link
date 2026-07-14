@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -102,6 +103,25 @@ def _prebuilt_url(tag):
     return None
 
 
+def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
+    """Download ``url`` to ``dest``, retrying transient network failures.
+
+    GitHub's asset CDN occasionally drops the connection mid-transfer
+    ("Remote end closed connection"), notably on Windows runners; a single
+    urlretrieve with no retry then fails the whole install.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            urllib.request.urlretrieve(url, dest)
+            return
+        except Exception as e:  # noqa: BLE001 — retry any transport error
+            dest.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            logger.warning(f"Download attempt {attempt}/{attempts} failed ({e}); retrying...")
+            time.sleep(2 * attempt)
+
+
 def _install_prebuilt(url, bin_dir, tag):
     """Download a prebuilt release archive and install binaries to bin_dir.
 
@@ -125,7 +145,7 @@ def _install_prebuilt(url, bin_dir, tag):
 
     logger.info("Downloading whisper.cpp prebuilt binary...")
     try:
-        urllib.request.urlretrieve(url, archive_path)
+        _download_with_retry(url, archive_path)
     except Exception as e:
         logger.warning(f"Download failed: {e}")
         archive_path.unlink(missing_ok=True)
