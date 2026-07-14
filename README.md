@@ -162,16 +162,14 @@ See the API reference for per-module docs.
 A modular, pipeline-based runtime. The **control plane** (lifecycle, configuration) is separated from the **data plane** (inference, telemetry) for performance and resilience.
 
 ```mermaid
-%%{init: {"flowchart": {"rankSpacing": 34, "nodeSpacing": 14, "padding": 6}}}%%
+%%{init: {"flowchart": {"rankSpacing": 38, "nodeSpacing": 16, "padding": 8, "subGraphTitleMargin": {"top": 4, "bottom": 12}}}}%%
 flowchart TB
-    %% --- External Entities (Top) ---
+    %% Layers are stacked top-to-bottom; each layer's nodes are chained with
+    %% invisible links (~~~) so they sit in one row. That only holds if no node
+    %% inside a layer crosses the layer boundary — so the upstream arrows run
+    %% from the layer containers, not individual nodes.
     User([User / CLI])
 
-    %% --- The Edge Device (Middle) ---
-    %% Each layer's nodes are chained with invisible links (~~~) so they pack
-    %% into a compact row instead of a tall column. That only holds if no node
-    %% inside a layer has an edge crossing the layer boundary — so the upstream
-    %% arrows below run from the layer containers, not individual nodes.
     subgraph Device["Edge Device"]
         direction TB
 
@@ -187,9 +185,9 @@ flowchart TB
             Zenoh[Zenoh Client] ~~~ Service[Service Manager] ~~~ Provision[Provisioner] ~~~ Health[Health Server] ~~~ Updater[Updater / OTA]
         end
 
-        subgraph Exec["Execution Layer (Pipelines)"]
+        subgraph Exec["Execution Layer (Pipeline Orchestrator)"]
             direction LR
-            Pipe[Pipeline Orchestrator] ~~~ Source((Source)) ~~~ Sink((Sink))
+            Source((Source)) ~~~ Sink((Sink))
             subgraph Plugins["Plugins — install any subset, or none"]
                 direction LR
                 LM[language_model] ~~~ AT[audio_transcriber] ~~~ IC[image_classifier] ~~~ AC[audio_classifier] ~~~ More[…other / custom]
@@ -197,14 +195,13 @@ flowchart TB
         end
     end
 
-    %% --- External Entities (Bottom) ---
     Cloud([Locai Control Plane])
 
     %% --- Flows ---
     User --> Entry
     Entry --> App
-    Entry -.-> Infra
-    App --> Exec
+    App --> Infra
+    Infra --> Exec
     Source -.->|Load active only| Plugins
 
     %% Upstream to the control plane, at layer granularity:
@@ -223,11 +220,6 @@ flowchart TB
     style IC stroke-dasharray:5 5
     style AC stroke-dasharray:5 5
     style More stroke-dasharray:5 5,fill:none
-    LM ~~~ AT
-    AT ~~~ IC
-    IC ~~~ AC
-    AC ~~~ More
-    Device ~~~ Cloud
 ```
 
 > **Plugins are optional.** Each plugin under `plugins/` is a standalone installable package registering pipeline components via the `locai.plugins` entry point. The runtime only loads plugins referenced by the active config. A device deployment can run with zero plugins (telemetry-only), one (e.g. `language_model`), or any combination.
