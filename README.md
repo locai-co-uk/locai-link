@@ -177,12 +177,12 @@ flowchart TB
 
         subgraph App["Application Layer"]
             direction LR
-            Runtime[Agent Runtime] ~~~ State[State Manager] ~~~ Onboard[Onboarding]
+            Runtime[Agent Runtime] ~~~ State[State Manager] ~~~ Onboard[Onboarding] ~~~ Updater[Updater / OTA]
         end
 
         subgraph Infra["Infrastructure Layer"]
             direction LR
-            Zenoh[Zenoh Client] ~~~ Service[Service Manager] ~~~ Provision[Provisioner] ~~~ Health[Health Server] ~~~ Updater[Updater / OTA]
+            Zenoh[Zenoh Client] ~~~ Service[Service Manager] ~~~ Provision[Provisioner] ~~~ Health[Health Server]
         end
 
         subgraph Exec["Execution Layer (Pipeline Orchestrator)"]
@@ -196,23 +196,26 @@ flowchart TB
     end
 
     Cloud([Locai Control Plane])
+    Releases[(GitHub Releases)]
 
     %% --- Flows ---
     User --> Entry
     Entry --> App
-    App --> Infra
-    Infra --> Exec
+    App -.->|uses| Infra
+    App -->|drives| Exec
+    Infra ~~~ Exec
     Source -.->|Load active only| Plugins
 
-    %% Upstream to the control plane, at layer granularity:
+    %% Upstream to the control plane (over Zenoh), at layer granularity:
     %%  • Execution (pipeline sinks): telemetry + inference results (data plane)
     %%  • Application (LinkReporter): logs, status, model state, deployment progress
-    %%  • Application (Onboarding): device registration / activation
-    %%  • Infrastructure (Updater): OTA manifest / payload
+    %%  • Application (Onboarding): device registration / activation (HTTP)
     Exec -->|Telemetry / Results| Cloud
     App -->|Logs / Status / Reports| Cloud
     App -->|Register / Activate| Cloud
-    Infra -->|Manifest / Payload| Cloud
+
+    %% OTA bundles are pulled from GitHub Releases (not the control plane).
+    Releases -->|Manifest / Payload| App
 
     %% --- Optionality styling: dashed borders signal "any subset" ---
     style LM stroke-dasharray:5 5
@@ -226,15 +229,22 @@ flowchart TB
 
 ### Over-the-air updates
 
-When the control plane sends an `UPDATE_AGENT` command, the agent:
+On an `UPDATE_AGENT` command (from the control plane, or the loopback `/update` endpoint the menu-bar app posts to), the agent reports the command complete, shuts down all pipelines cleanly, then takes one of two paths depending on how it was installed:
 
-1. Reports the command as completed and shuts down all pipelines cleanly
-2. Runs `git pull` on the current branch (stashing local changes if needed)
-3. Re-runs `uv pip install -e .` to pick up dependency changes
-4. Refreshes pinned binaries for plugins referenced by the active config — each `plugins/*/install.py` is tag-cached, so this is cheap when versions haven't changed, and plugins the config doesn't use are skipped entirely
-5. Re-execs itself via `os.execv()` — the process image is replaced but the **PID is preserved**, so systemd/launchd/Windows Service see a continuously-running process with no downtime gap
+**Bundled install** (PyInstaller artifact — the packaged app):
 
-No separate supervisor is needed. The same `main.py run` command works for both development and headless service deployment.
+1. Resolves the latest matching release from **GitHub Releases** and downloads the platform bundle
+2. Verifies the SHA256, extracts it alongside the running version under `versions/<v>/`
+3. Health-checks the new runtime, then **atomically flips the `current` pointer** and garbage-collects old versions
+4. Exits with code `42`; the launcher relaunches from the new `current`. A `.update-pending` stamp lets the launcher roll back if the new version fails to boot
+
+**Source install** (cloned repo):
+
+1. Runs `git pull` on the current branch (stashing local changes if needed) and re-runs `uv pip install -e .`
+2. Refreshes pinned binaries for plugins referenced by the active config — each `plugins/*/install.py` is tag-cached, so this is cheap when versions haven't changed, and unused plugins are skipped
+3. Re-execs itself via `os.execv()` — the process image is replaced but the **PID is preserved**, so systemd/launchd/Windows Service see a continuously-running process
+
+Either way no separate supervisor is needed, and the same `main.py run` command works for development and headless service deployment.
 
 ### Onboarding flow
 
