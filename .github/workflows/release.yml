@@ -405,8 +405,13 @@ jobs:
           # `.pkg --root` will lay down on the target.
           cp -R dist/locai-link/. "$STAGING/"
 
-          # boot.json — canonical production channel config.
-          cp bundling/pkg/boot.json "$STAGING/boot.json"
+          # boot.json — canonical production channel config. plugin_set is
+          # injected from the bundle manifest so the launcher's first-launch
+          # fetch targets the asset this build actually is.
+          python3 bundling/gen_boot_json.py \
+            --manifest "$STAGING/current/manifest.json" \
+            --template bundling/pkg/boot.json \
+            --output "$STAGING/boot.json"
 
           # Setup Assistant .app — path was stashed by the codesign step.
           cp -R "$SA_APP_PATH" "$STAGING/Setup Assistant.app"

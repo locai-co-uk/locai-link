@@ -187,11 +187,43 @@
     }
   });
 
+  // Model types this build can serve, from supported_model_types (bundle
+  // manifest plugins). Defaults to LLMs until the fetch resolves.
+  let supportedTypes = $state<string[]>(["language_models"]);
+
+  // Servable iff this build ships a plugin for the model's type (INFRA-371), so
+  // an LLM-only build hides audio/other models it can't run.
+  function isServable(m: ModelSummary): boolean {
+    return supportedTypes.includes(m.model_type);
+  }
+
+  // Gemma 4 XS is the recommended default (INFRA-371). Matched by name until
+  // Control exposes a dedicated flag. Normalise punctuation first so the real
+  // library name "Gemma 4 (X-Small)" and variants (XS, X Small) all match.
+  function isRecommended(m: ModelSummary): boolean {
+    const n = m.display_name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return n.includes("gemma") && (n.includes("xs") || n.includes("extrasmall"));
+  }
+
   async function loadModels() {
     models = { kind: "loading" };
     try {
+      try {
+        supportedTypes = await invoke<string[]>("supported_model_types");
+      } catch {
+        // Keep the LLM default; the list just filters conservatively.
+      }
       const list = await invoke<ModelSummary[]>("list_models");
-      models = { kind: "ready", models: list, selected: new Set() };
+      // Servable types only; recommended first, then alphabetical.
+      const servable = list.filter(isServable).sort((a, b) => {
+        const ra = isRecommended(a);
+        const rb = isRecommended(b);
+        if (ra !== rb) return ra ? -1 : 1;
+        return a.display_name.localeCompare(b.display_name);
+      });
+      // Pre-select the recommended model so the common path is one click.
+      const selected = new Set(servable.filter(isRecommended).map((m) => m.id));
+      models = { kind: "ready", models: servable, selected };
     } catch (e) {
       models = { kind: "error", message: e instanceof Error ? e.message : String(e) };
     }
@@ -810,7 +842,12 @@
                         onchange={() => toggleModel(m.id)}
                       />
                       <div class="model-row__body">
-                        <div class="model-row__name">{m.display_name}</div>
+                        <div class="model-row__name">
+                          <span class="model-row__name-text">{m.display_name}</span>
+                          {#if isRecommended(m)}
+                            <span class="model-row__badge">Recommended</span>
+                          {/if}
+                        </div>
                         <div class="model-row__meta">
                           <span>{m.model_type}</span>
                           <span>·</span>
@@ -1375,12 +1412,30 @@
     flex: 1;
   }
   .model-row__name {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    min-width: 0;
     font-size: 13px;
     font-weight: var(--weight-semibold);
     color: var(--color-text-strong);
+  }
+  .model-row__name-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
+  }
+  .model-row__badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface-tint-green-3, #eaf9f1);
+    color: var(--color-primary-pressed, #00a852);
   }
   .model-row__meta {
     display: flex;

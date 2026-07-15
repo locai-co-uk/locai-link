@@ -14,7 +14,8 @@
   // Failures collapse to a Down agent state; the "Start Locai Link"
   // button is the primary recovery gesture from there.
   import { invoke } from "@tauri-apps/api/core";
-  import { onDestroy, onMount } from "svelte";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { onDestroy, onMount, tick } from "svelte";
 
   type TransportHealth = {
     type: string;
@@ -79,6 +80,23 @@
     latest_version: string | null;
   };
 
+  type AvailableModel = {
+    model_id: string;
+    display_name: string;
+    framework: string;
+    model_type: string;
+    size_bytes: number;
+    filename_on_server: string;
+    file_extension: string;
+    is_globally_shared: boolean;
+    installed_on_device: boolean;
+  };
+
+  type DeployOutcome = {
+    command_id: string | null;
+    status: string; // "dispatched" | "pending" | "already_installed"
+  };
+
   // Models + in-flight deployments are refreshed by the same
   // `poll_status` tick as everything else. Kept outside `prefs` because
   // they aren't part of the initial `get_prefs_state` snapshot — they
@@ -97,6 +115,23 @@
   // Suppress the tray-trigger inference during a user-initiated stop/restart
   // so a manual Stop while an update is available isn't mislabelled "Updating".
   let suppressUpdateInfer = $state(false);
+
+  // Available-models catalog (INFRA-343). Fetched from Control (device-key
+  // authed) on demand, not part of the /healthz poll. `requested` tracks
+  // models the user just tapped Download on, for instant feedback before the
+  // queued deployment row shows up in the poll.
+  let availableModels = $state<AvailableModel[]>([]);
+  let availableLoading = $state(false);
+  let availableError = $state<string | null>(null);
+  let availableLoaded = $state(false);
+  let requested = $state<Set<string>>(new Set());
+  // Model types this build can serve, from supported_model_types (derived from
+  // the bundle manifest's plugins). Defaults to LLMs until the fetch resolves.
+  let supportedTypes = $state<string[]>(["language_models"]);
+  // Signature of in-flight deployment ids; when it changes (a download starts
+  // or finishes) we refresh the catalog so installed/available state is current.
+  let lastDeployKeys = "";
+  let downloadsSection = $state<HTMLElement | null>(null);
 
   let prefs = $state<PrefsState | null>(null);
   // Gate the Agent status pill until we've had at least one poll_status
@@ -120,6 +155,7 @@
       ? ""
       : `${CHANNEL.charAt(0).toUpperCase()}${CHANNEL.slice(1)}`;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let unlistenDownloads: UnlistenFn | null = null;
 
   onMount(async () => {
     // get_prefs_state is now file-reads only (no HTTP), so load completes fast;
@@ -127,20 +163,40 @@
     // status + models. Cold-start UI paints one HTTP RTT after open.
     await load();
     await refreshStatus();
+    try {
+      supportedTypes = await invoke<string[]>("supported_model_types");
+    } catch {
+      // Keep the LLM default; the list just filters conservatively.
+    }
+    void loadAvailableModels();
     pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);
     // The window is pre-created hidden; refreshStatus bails while hidden, so
     // without this the pill sat on "Checking…" until the next 2s tick after
     // the user opened Preferences. Poll the instant it becomes visible.
     document.addEventListener("visibilitychange", onVisibility);
+    // Tray "Download models…" scrolls this window to the catalog section.
+    unlistenDownloads = await listen("show-downloads", () => {
+      void loadAvailableModels();
+      void scrollToDownloads();
+    });
   });
 
   onDestroy(() => {
     if (pollTimer) clearInterval(pollTimer);
     document.removeEventListener("visibilitychange", onVisibility);
+    unlistenDownloads?.();
   });
 
   function onVisibility() {
-    if (!document.hidden) void refreshStatus();
+    if (!document.hidden) {
+      void refreshStatus();
+      void loadAvailableModels();
+    }
+  }
+
+  async function scrollToDownloads() {
+    await tick();
+    downloadsSection?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function load() {
@@ -172,6 +228,35 @@
       updateAvailable = poll.update_available;
       // Keep the last-known latest when the probe is Down (returns null).
       latestVersion = poll.latest_version ?? latestVersion;
+
+      // When the set of in-flight deployments changes (a download just started
+      // or finished) refresh the catalog so installed/available flags track it.
+      const keys = poll.deployments
+        .map((d) => d.pipeline_id)
+        .sort()
+        .join(",");
+      if (keys !== lastDeployKeys) {
+        lastDeployKeys = keys;
+        if (availableLoaded) void loadAvailableModels();
+      }
+
+      // Prune optimistic "Starting…" flags once the model is installed locally
+      // or has an in-flight deployment row — the poll is now authoritative.
+      if (requested.size > 0) {
+        const settled = new Set<string>([
+          ...poll.models.map((m) => m.id),
+          ...poll.deployments.map((d) => d.pipeline_id),
+        ]);
+        const next = new Set(requested);
+        let changed = false;
+        for (const id of requested) {
+          if (settled.has(id)) {
+            next.delete(id);
+            changed = true;
+          }
+        }
+        if (changed) requested = next;
+      }
 
       // Infer a tray-triggered update: agent was up with an update available
       // and just dropped, and it wasn't a manual stop/restart.
@@ -236,6 +321,32 @@
     return Array.from(byId.values());
   });
 
+  // Servable iff this build ships a plugin for the model's type (INFRA-343/371).
+  // supportedTypes comes from the bundle manifest, so an LLM-only build hides
+  // audio/other models the agent can't run.
+  function isServable(m: AvailableModel): boolean {
+    return supportedTypes.includes(m.model_type);
+  }
+
+  // Installed on THIS device. The local /models list is authoritative and
+  // immediate; Control's installed_on_device flag lags (it round-trips through
+  // Firestore after the deploy reports back), so prefer local and fall back to
+  // the flag. Fixes Setup-Assistant-installed models showing "Download" and a
+  // just-finished download sticking on "Starting…".
+  const installedIds = $derived(new Set(models.map((m) => m.id)));
+  function isInstalled(m: AvailableModel): boolean {
+    return installedIds.has(m.model_id) || m.installed_on_device;
+  }
+
+  // Catalog rows for the download list. Servable types only (see isServable). A
+  // model with an in-flight deployment already shows (with progress) in the
+  // Models panel above, so hide it here to avoid a duplicate row. Installed
+  // models stay, marked "Installed" below.
+  const availableRows = $derived.by(() => {
+    const deploying = new Set(deployments.map((d) => d.pipeline_id));
+    return availableModels.filter((m) => isServable(m) && !deploying.has(m.model_id));
+  });
+
   async function toggleServing(row: {
     pipeline_id: string;
     is_serving: boolean;
@@ -251,6 +362,60 @@
         // no optimistic update, poll is authoritative.
       } catch (e) {
         console.warn("toggle_model_serving failed:", e);
+      }
+    });
+  }
+
+  async function loadAvailableModels() {
+    availableLoading = true;
+    try {
+      const list = await invoke<AvailableModel[]>("list_available_models");
+      availableModels = list;
+      availableError = null;
+      availableLoaded = true;
+      // Drop optimistic "requested" flags once the model is installed or has a
+      // real deployment row; the poll/catalog is now authoritative.
+      if (requested.size > 0) {
+        const deploying = new Set(deployments.map((d) => d.pipeline_id));
+        const next = new Set(requested);
+        for (const id of requested) {
+          const m = list.find((x) => x.model_id === id);
+          if ((m && m.installed_on_device) || deploying.has(id)) next.delete(id);
+        }
+        requested = next;
+      }
+    } catch (e) {
+      availableError = e instanceof Error ? e.message : String(e);
+    } finally {
+      availableLoading = false;
+    }
+  }
+
+  async function requestDeploy(model: AvailableModel) {
+    await withPending(`deploy:${model.model_id}`, async () => {
+      // Optimistic: show "Starting…" immediately; cleared once the model shows
+      // as installed or a deployment row appears.
+      requested = new Set(requested).add(model.model_id);
+      try {
+        const outcome = await invoke<DeployOutcome>("request_model_deploy", {
+          modelId: model.model_id,
+          modelName: model.filename_on_server || null,
+        });
+        if (outcome.status === "already_installed") {
+          // Nothing queued; refresh so the row flips to "Installed".
+          const next = new Set(requested);
+          next.delete(model.model_id);
+          requested = next;
+          await loadAvailableModels();
+        }
+        // dispatched/pending: the queued row is pre-registered agent-side and
+        // the next /healthz poll surfaces progress.
+      } catch (e) {
+        const next = new Set(requested);
+        next.delete(model.model_id);
+        requested = next;
+        availableError = e instanceof Error ? e.message : String(e);
+        console.warn("request_model_deploy failed:", e);
       }
     });
   }
@@ -389,6 +554,33 @@
   function shortId(id: string): string {
     if (id.length <= 12) return id;
     return `${id.slice(0, 8)}…${id.slice(-4)}`;
+  }
+
+  function formatSize(bytes: number): string {
+    if (!bytes || bytes < 0) return "—";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = bytes;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  }
+
+  // Derive a quant tag (e.g. "Q4_K_M") from the asset filename; Control doesn't
+  // send it separately. Empty when the filename carries no recognisable tag.
+  function deriveQuant(filename: string): string {
+    const m = filename.match(/\b(IQ?\d+[A-Z0-9_]*K[A-Z0-9_]*|Q\d+(?:_[A-Z0-9]+)*|F16|F32|BF16)\b/i);
+    return m ? m[1].toUpperCase() : "";
+  }
+
+  function modelMeta(m: AvailableModel): string {
+    const quant = deriveQuant(m.filename_on_server);
+    const parts = [formatSize(m.size_bytes)];
+    if (quant) parts.push(quant);
+    if (m.is_globally_shared) parts.push("Shared");
+    return parts.join(" · ");
   }
 </script>
 
@@ -627,6 +819,57 @@
       {/if}
     </section>
 
+    <!-- ============ AVAILABLE MODELS (download) ============ -->
+    <section bind:this={downloadsSection}>
+      <div class="section-head">
+        <h2>Available models</h2>
+        <button
+          class="btn btn--ghost btn--tiny"
+          onclick={loadAvailableModels}
+          disabled={availableLoading}
+        >
+          {availableLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {#if availableError}
+        <p class="empty error-text">{availableError}</p>
+      {/if}
+      {#if !availableLoaded && availableLoading}
+        <p class="empty">Loading models…</p>
+      {:else if availableRows.length === 0}
+        <p class="empty">
+          {availableError ? "Couldn't load your model library." : "No models available to download."}
+        </p>
+      {:else}
+        <ul class="models">
+          {#each availableRows as model (model.model_id)}
+            <li class="model">
+              <div class="model__main">
+                <span class="model__alias">{model.display_name}</span>
+                <span class="model__meta">{modelMeta(model)}</span>
+              </div>
+              <div class="model__state">
+                {#if isInstalled(model)}
+                  <span class="pill pill--idle">✓ Installed</span>
+                {:else if requested.has(model.model_id)}
+                  <span class="pill pill--idle">Starting…</span>
+                {:else}
+                  <button
+                    class="btn btn--primary btn--sm"
+                    onclick={() => requestDeploy(model)}
+                    disabled={pending.has(`deploy:${model.model_id}`) || prefs.agent.status === "down"}
+                    title={prefs.agent.status === "down" ? "Start Locai Link to download models" : ""}
+                  >
+                    Download
+                  </button>
+                {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+
     <!-- ============ NETWORK ============ -->
     <section>
       <h2>Network</h2>
@@ -831,6 +1074,22 @@
   .model__port {
     color: var(--color-text-muted, #8A877F);
     font-size: 12px;
+  }
+  .model__meta {
+    color: var(--color-text-muted, #8A877F);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  /* h2 inside a section-head keeps its bottom margin as the list's top gap. */
+  .error-text {
+    color: var(--color-error, #E84D3D);
   }
   .model__state {
     display: flex;

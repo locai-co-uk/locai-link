@@ -20,7 +20,7 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
-    AppHandle, Manager, WindowEvent, Wry,
+    AppHandle, Emitter, Manager, WindowEvent, Wry,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
@@ -48,8 +48,13 @@ const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
 const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
 const MENU_ID_PREFERENCES: &str = "preferences";
+const MENU_ID_DOWNLOAD: &str = "download_models";
 const MENU_ID_QUIT: &str = "quit";
 const MENU_ID_UPDATE: &str = "update";
+
+/// Emitted to the Preferences window when the user picks "Download models…" so
+/// the UI opens on the available-models section.
+const EVENT_SHOW_DOWNLOADS: &str = "show-downloads";
 
 /// Suffix after this prefix is the pipeline id.
 const MENU_ID_MODEL_PREFIX: &str = "model:";
@@ -129,6 +134,9 @@ pub fn run() {
             preferences::poll_status,
             preferences::toggle_model_serving,
             preferences::cancel_model_deploy,
+            preferences::list_available_models,
+            preferences::request_model_deploy,
+            preferences::supported_model_types,
             preferences::install_update,
             preferences::set_run_at_login,
             preferences::runtime_start,
@@ -308,6 +316,13 @@ fn build_tray_menu(
         true,
         None::<&str>,
     )?;
+    let download = MenuItem::with_id(
+        app,
+        MENU_ID_DOWNLOAD,
+        "Download models…",
+        true,
+        None::<&str>,
+    )?;
     let preferences = MenuItem::with_id(
         app,
         MENU_ID_PREFERENCES,
@@ -339,6 +354,7 @@ fn build_tray_menu(
         items.push(u);
     }
     items.push(&control);
+    items.push(&download);
     items.push(&preferences);
     items.push(&quit);
 
@@ -483,6 +499,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         MENU_ID_PREFERENCES => {
             show_preferences_window(app);
+        }
+        MENU_ID_DOWNLOAD => {
+            show_preferences_window(app);
+            // Tell the window to open on the available-models section. Best-effort:
+            // if it isn't listening yet (cold open), the emit is a harmless no-op
+            // and the section is still reachable by scrolling.
+            if let Err(e) = app.emit(EVENT_SHOW_DOWNLOADS, ()) {
+                eprintln!("[companion] emit {EVENT_SHOW_DOWNLOADS} failed: {e}");
+            }
         }
         MENU_ID_UPDATE => {
             // Claim the in-flight slot so a rapid double-click can't fire

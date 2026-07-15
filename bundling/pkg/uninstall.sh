@@ -108,6 +108,9 @@ fi
 pkill -f "$INSTALL_ROOT/locai-link"                 2>/dev/null || true
 pkill -f "/Locai Link.app/"                         2>/dev/null || true
 pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
+# Install-root SA copy ("Setup Assistant.app", no "Locai " prefix); the
+# full path skips macOS's own /CoreServices copy.
+pkill -f "$INSTALL_ROOT/Setup Assistant.app/"       2>/dev/null || true
 
 # --- 3. Unregister the .apps from LaunchServices --------------------
 # Even after removing the .app bundle, LaunchServices can keep an
@@ -166,7 +169,12 @@ if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
         removed=0
         for ((i = count - 1; i >= 0; i--)); do
             url=$(sudo -u "$CONSOLE_USER" "$PB" -c "Print :persistent-apps:$i:tile-data:file-data:_CFURLString" "$DOCK_PLIST" 2>/dev/null)
-            if [[ "$url" == *"Locai%20Link.app"* || "$url" == *"Locai%20Setup%20Assistant.app"* || "$url" == *"Locai Link.app"* || "$url" == *"Locai Setup Assistant.app"* ]]; then
+            # Match both SA copies: /Applications ("Locai Setup Assistant.app")
+            # and install-root ("Locai/Setup Assistant.app"); the "Locai/"
+            # segment skips macOS's own /CoreServices copy.
+            if [[ "$url" == *"Locai%20Link.app"* || "$url" == *"Locai Link.app"* \
+               || "$url" == *"Locai%20Setup%20Assistant.app"* || "$url" == *"Locai Setup Assistant.app"* \
+               || "$url" == *"Locai/Setup%20Assistant.app"* || "$url" == *"Locai/Setup Assistant.app"* ]]; then
                 sudo -u "$CONSOLE_USER" "$PB" -c "Delete :persistent-apps:$i" "$DOCK_PLIST" 2>/dev/null && removed=$((removed + 1))
             fi
         done

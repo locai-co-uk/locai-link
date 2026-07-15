@@ -59,6 +59,49 @@ pub fn installed_version(install_root: &Path) -> Option<InstalledVersion> {
     })
 }
 
+/// Map a bundled plugin name to the Control library `model_type` it can serve.
+/// Extend as new servable plugins are added; unknown plugins map to nothing.
+fn plugin_model_type(plugin: &str) -> Option<&'static str> {
+    match plugin {
+        "language_model" => Some("language_models"),
+        "audio_transcriber" => Some("audio_transcription"),
+        _ => None,
+    }
+}
+
+/// Model types this install can actually serve, derived from the plugins baked
+/// into the current bundle (`current/manifest.json`). Source of truth for
+/// filtering model lists to what the build supports. Falls back to
+/// `language_models` (the always-present core) when the manifest is unreadable
+/// or lists no known servable plugins (e.g. a source checkout with no manifest).
+pub fn supported_model_types(install_root: &Path) -> Vec<String> {
+    let mut types = read_manifest_model_types(install_root).unwrap_or_default();
+    if types.is_empty() {
+        types.push("language_models".to_string());
+    }
+    types
+}
+
+fn read_manifest_model_types(install_root: &Path) -> Option<Vec<String>> {
+    let version = installed_version(install_root)?;
+    let content = std::fs::read_to_string(version.path.join("manifest.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let plugins = json.get("plugins")?.as_array()?;
+    let mut out: Vec<String> = Vec::new();
+    for p in plugins {
+        let Some(name) = p.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if let Some(model_type) = plugin_model_type(name) {
+            let model_type = model_type.to_string();
+            if !out.contains(&model_type) {
+                out.push(model_type);
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Read `current` as a symlink first, falling back to text-pointer contents.
 fn resolve_current(current: &Path) -> Option<PathBuf> {
     if let Ok(target) = std::fs::read_link(current) {
@@ -198,5 +241,51 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("current"), "").unwrap();
         assert!(installed_version(dir.path()).is_none());
+    }
+
+    // --- supported_model_types -------------------------------------------
+
+    fn lay_down_manifest(root: &Path, plugins_json: &str) {
+        let versions = root.join("versions").join("1.0.0");
+        fs::create_dir_all(&versions).unwrap();
+        fs::write(root.join("current"), "versions/1.0.0\n").unwrap();
+        fs::write(
+            versions.join("manifest.json"),
+            format!(r#"{{"version":"1.0.0","plugins":{plugins_json}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn supported_types_llm_and_stt_build() {
+        let dir = tempdir().unwrap();
+        lay_down_manifest(
+            dir.path(),
+            r#"[{"name":"language_model"},{"name":"audio_transcriber"}]"#,
+        );
+        assert_eq!(
+            supported_model_types(dir.path()),
+            vec!["language_models", "audio_transcription"]
+        );
+    }
+
+    #[test]
+    fn supported_types_llm_only_build() {
+        let dir = tempdir().unwrap();
+        lay_down_manifest(dir.path(), r#"[{"name":"language_model"}]"#);
+        assert_eq!(supported_model_types(dir.path()), vec!["language_models"]);
+    }
+
+    #[test]
+    fn supported_types_unknown_plugin_falls_back_to_llm() {
+        let dir = tempdir().unwrap();
+        lay_down_manifest(dir.path(), r#"[{"name":"image_classifier"}]"#);
+        assert_eq!(supported_model_types(dir.path()), vec!["language_models"]);
+    }
+
+    #[test]
+    fn supported_types_no_manifest_falls_back_to_llm() {
+        let dir = tempdir().unwrap();
+        assert_eq!(supported_model_types(dir.path()), vec!["language_models"]);
     }
 }

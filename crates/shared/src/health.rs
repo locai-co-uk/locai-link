@@ -22,6 +22,10 @@ pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 /// Loopback endpoint that triggers an in-app OTA update (INFRA-353).
 pub const DEFAULT_UPDATE_URL: &str = "http://127.0.0.1:20505/update";
 
+/// Loopback endpoint that pre-registers a queued deployment so the UI shows a
+/// row at 0% before the runtime picks up the DEPLOY_MODEL (INFRA-343).
+pub const DEFAULT_PENDING_URL: &str = "http://127.0.0.1:20505/deployments/pending";
+
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Shared HTTP client so back-to-back polls reuse the connection pool.
@@ -162,6 +166,23 @@ pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String
 /// Dispatches UPDATE_AGENT; the agent restarts onto the new version.
 pub fn trigger_update(url: &str) -> Result<(), String> {
     match HTTP_AGENT.post(url).send_bytes(&[]) {
+        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
+        Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
+        Err(e) => Err(format!("POST {url} failed: {e}")),
+    }
+}
+
+/// Pre-register a deployment as `queued` so its row shows at 0% immediately,
+/// before the runtime processes the DEPLOY_MODEL (INFRA-343). `pipeline_id` is
+/// the model id (the runtime keys deployment progress by it). Best-effort; the
+/// real progress row overwrites this once the runtime advances.
+pub fn mark_deployment_pending(
+    url: &str,
+    pipeline_id: &str,
+    model_name: Option<&str>,
+) -> Result<(), String> {
+    let body = serde_json::json!({ "pipeline_id": pipeline_id, "model_name": model_name });
+    match HTTP_AGENT.post(url).send_json(body) {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
         Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
         Err(e) => Err(format!("POST {url} failed: {e}")),
@@ -360,6 +381,82 @@ mod tests {
         assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
     }
 
+    #[test]
+    fn mark_deployment_pending_posts_body_and_reports_ok() {
+        let (port, handle, captured) =
+            serve_once_reading_body("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        let res = mark_deployment_pending(
+            &format!("http://127.0.0.1:{port}/deployments/pending"),
+            "p1",
+            Some("m.gguf"),
+        );
+        handle.join().unwrap();
+        assert!(res.is_ok(), "got {res:?}");
+        let req = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(
+            req.starts_with("POST /deployments/pending HTTP/1.1"),
+            "got: {req:?}"
+        );
+        assert!(req.contains("\"pipeline_id\":\"p1\""), "body: {req:?}");
+        assert!(req.contains("\"model_name\":\"m.gguf\""), "body: {req:?}");
+    }
+
+    #[test]
+    fn mark_deployment_pending_serialises_null_model_name() {
+        let (port, handle, captured) =
+            serve_once_reading_body("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        let res = mark_deployment_pending(
+            &format!("http://127.0.0.1:{port}/deployments/pending"),
+            "p1",
+            None,
+        );
+        handle.join().unwrap();
+        assert!(res.is_ok(), "got {res:?}");
+        let req = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(req.contains("\"model_name\":null"), "body: {req:?}");
+    }
+
+    #[test]
+    fn mark_deployment_pending_returns_err_on_non_2xx() {
+        let (port, handle) = serve_once("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        let res = mark_deployment_pending(
+            &format!("http://127.0.0.1:{port}/deployments/pending"),
+            "p1",
+            None,
+        );
+        handle.join().unwrap();
+        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
+    }
+
+    #[test]
+    fn mark_deployment_pending_returns_err_on_connection_refused() {
+        let res = mark_deployment_pending("http://127.0.0.1:1/deployments/pending", "p1", None);
+        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
+    }
+
+    #[test]
+    fn trigger_update_reports_ok_on_2xx() {
+        let (port, handle) = serve_once("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        let res = trigger_update(&format!("http://127.0.0.1:{port}/update"));
+        handle.join().unwrap();
+        assert!(res.is_ok(), "got {res:?}");
+    }
+
+    #[test]
+    fn trigger_update_returns_err_on_non_2xx() {
+        let (port, handle) =
+            serve_once("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        let res = trigger_update(&format!("http://127.0.0.1:{port}/update"));
+        handle.join().unwrap();
+        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
+    }
+
+    #[test]
+    fn trigger_update_returns_err_on_connection_refused() {
+        let res = trigger_update("http://127.0.0.1:1/update");
+        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
+    }
+
     // Minimal one-shot HTTP server: bind, accept once, write canned response, exit.
     fn serve_once(response: &'static str) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -393,6 +490,47 @@ mod tests {
                 .lock()
                 .unwrap()
                 .extend_from_slice(&buf[..n]);
+            sock.write_all(response.as_bytes()).expect("write");
+        });
+        (port, handle, captured)
+    }
+
+    // Like `serve_once_capturing` but reads through the declared Content-Length
+    // so the request body (sent in a later TCP segment) is captured too.
+    fn serve_once_reading_body(
+        response: &'static str,
+    ) -> (
+        u16,
+        thread::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured_for_thread = captured.clone();
+        let handle = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut acc: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = sock.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                acc.extend_from_slice(&buf[..n]);
+                if let Some(pos) = acc.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&acc[..pos]).to_ascii_lowercase();
+                    let content_len = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if acc.len() >= pos + 4 + content_len {
+                        break;
+                    }
+                }
+            }
+            captured_for_thread.lock().unwrap().extend_from_slice(&acc);
             sock.write_all(response.as_bytes()).expect("write");
         });
         (port, handle, captured)

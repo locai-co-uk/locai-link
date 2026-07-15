@@ -7,10 +7,13 @@
 use std::path::PathBuf;
 
 use locai_link_shared::{
-    agent_health, cancel_deployment as shared_cancel_deployment, list_models,
-    toggle_serving as shared_toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
-    ModelInfo, ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL,
-    DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE, DEFAULT_UPDATE_URL,
+    agent_health, cancel_deployment as shared_cancel_deployment,
+    list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
+    read_identity, request_deploy as shared_request_deploy,
+    supported_model_types as shared_supported_model_types, toggle_serving as shared_toggle_serving,
+    trigger_update, AvailableModel, DeployOutcome, DeploymentProgress, HealthStatus, ModelInfo,
+    ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
+    DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL, DEFAULT_UPDATE_URL,
 };
 use serde::Serialize;
 use tauri::AppHandle;
@@ -181,6 +184,58 @@ pub fn toggle_model_serving(pipeline_id: String, action: String) -> Result<(), S
 #[tauri::command]
 pub fn cancel_model_deploy(pipeline_id: String) -> Result<(), String> {
     shared_cancel_deployment(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)
+}
+
+/// List the models this device may install, from Control's device-authenticated
+/// `available-models` endpoint (INFRA-343). Reads the device key + api_url from
+/// the session config (no user token). `Err` carries a display string so the UI
+/// can show why the list is unavailable (offline, not-yet-claimed device, etc.).
+#[tauri::command]
+pub async fn list_available_models() -> Result<Vec<AvailableModel>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let identity = read_identity(&PathBuf::from(install_root()))
+            .ok_or_else(|| "device not registered yet".to_string())?;
+        shared_list_available_models(&identity)
+    })
+    .await
+    .map_err(|e| format!("list_available_models task panicked: {e}"))?
+}
+
+/// Model types this build can actually serve, derived from the current bundle's
+/// manifest plugins (INFRA-343/371). The UI filters the model lists to these so
+/// an LLM-only build never offers audio/other models it can't run.
+#[tauri::command]
+pub fn supported_model_types() -> Vec<String> {
+    shared_supported_model_types(&PathBuf::from(install_root()))
+}
+
+/// Ask Control to deploy `model_id` onto this device (INFRA-343). Idempotent on
+/// Control's side. On a dispatched/pending outcome, pre-registers a queued row
+/// with the local agent so the download shows at 0% immediately. `model_name`
+/// (the asset filename) labels that row until the runtime reports real progress.
+#[tauri::command]
+pub async fn request_model_deploy(
+    model_id: String,
+    model_name: Option<String>,
+) -> Result<DeployOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let identity = read_identity(&PathBuf::from(install_root()))
+            .ok_or_else(|| "device not registered yet".to_string())?;
+        let outcome = shared_request_deploy(&identity, &model_id)?;
+        // Only pre-register when a deploy is actually happening; `already_installed`
+        // has nothing to show. Best-effort; a failed pre-register just means the
+        // row appears a beat later when the runtime reports progress.
+        if outcome.status == "dispatched" || outcome.status == "pending" {
+            if let Err(e) =
+                mark_deployment_pending(DEFAULT_PENDING_URL, &model_id, model_name.as_deref())
+            {
+                eprintln!("[companion] mark_deployment_pending({model_id}) failed: {e}");
+            }
+        }
+        Ok(outcome)
+    })
+    .await
+    .map_err(|e| format!("request_model_deploy task panicked: {e}"))?
 }
 
 #[tauri::command]
