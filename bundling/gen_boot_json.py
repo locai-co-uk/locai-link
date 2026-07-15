@@ -35,9 +35,7 @@ def plugin_set_from_manifest(manifest: dict) -> list[str]:
     names = {p.get("name") for p in manifest.get("plugins", []) if p.get("name")}
     unknown = names - set(PLUGIN_CODES)
     if unknown:
-        raise SystemExit(
-            f"Plugin(s) missing a code in manifest.py PLUGIN_CODES: {', '.join(sorted(unknown))}"
-        )
+        raise SystemExit(f"Plugin(s) missing a code in manifest.py PLUGIN_CODES: {', '.join(sorted(unknown))}")
     return [PLUGIN_CODES[name] for name in PLUGIN_ORDER if name in names]
 
 
