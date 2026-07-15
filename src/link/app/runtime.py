@@ -276,11 +276,21 @@ class AgentRuntime:
 
             elif isinstance(cmd, UpdateAgentCommand):
                 logger.info("OTA update command received. Preparing to update...", extra={"category": "deployment"})
-                self.status_logger.report_command(cmd.id, "completed", "Update accepted - restarting.")
-                # Signal main.py to pull updates and re-exec after shutdown completes
-                self.update_requested = True
-                self.running = False
-                self.shutdown_event.set()
+                from link.app.updater import bundle_asset_available, running_frozen_bundle
+
+                # Pre-flight: a frozen install with no published per-platform asset
+                # can't update. Accepting anyway shuts down, fails in swap_bundle,
+                # relaunches, and loops forever (cancelling in-flight work each
+                # time). Decline and stay on the current version instead.
+                if running_frozen_bundle() and not bundle_asset_available():
+                    logger.warning("Update requested but no installable asset is published yet; staying put.")
+                    self.status_logger.report_command(cmd.id, "failed", "No installable update asset available yet")
+                else:
+                    self.status_logger.report_command(cmd.id, "completed", "Update accepted - restarting.")
+                    # Signal main.py to pull updates and re-exec after shutdown completes
+                    self.update_requested = True
+                    self.running = False
+                    self.shutdown_event.set()
 
             else:  # UpdateAgentConfigCommand — last remaining variant in the Command union
                 from link.app.reconfigure import apply_agent_config

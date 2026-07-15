@@ -1089,6 +1089,29 @@ def check_update_available(
         return (False, None)
 
 
+def bundle_asset_available(install_root: Path | None = None) -> bool:
+    """Whether the latest release actually publishes an installable per-platform
+    asset for this bundle.
+
+    Pre-flight for the OTA path: if no asset exists (e.g. the macOS tarball isn't
+    published), accepting the update just shuts the agent down, fails in
+    ``swap_bundle`` with ``ReleaseNotFound``, relaunches, and retries forever.
+    The caller uses this to decline the update and stay on the current version
+    instead. Frozen installs only; source installs update via git, so this
+    returns ``False`` and the caller must gate on ``running_frozen_bundle``.
+    """
+    if not running_frozen_bundle():
+        return False
+    try:
+        root = install_root or discover_install_root()
+        manifest = read_manifest(root)
+        latest_release_for(manifest.asset_name)
+        return True
+    except Exception as e:  # noqa: BLE001 - never let the pre-flight crash the agent
+        logger.debug(f"bundle_asset_available: no installable asset: {e}")
+        return False
+
+
 def swap_bundle(install_root: Path | None = None) -> bool:
     """Run the full bundle OTA chain end-to-end. Returns True if current was flipped.
 

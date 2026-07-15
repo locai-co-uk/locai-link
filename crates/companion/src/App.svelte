@@ -126,8 +126,9 @@
   let availableLoaded = $state(false);
   let requested = $state<Set<string>>(new Set());
   // Model types this build can serve, from supported_model_types (derived from
-  // the bundle manifest's plugins). Defaults to LLMs until the fetch resolves.
-  let supportedTypes = $state<string[]>(["language_models"]);
+  // the bundle manifest's plugins). Empty until resolved, and stays empty on
+  // failure so we fail closed rather than guessing a capability set.
+  let supportedTypes = $state<string[]>([]);
   // Signature of in-flight deployment ids; when it changes (a download starts
   // or finishes) we refresh the catalog so installed/available state is current.
   let lastDeployKeys = "";
@@ -165,8 +166,9 @@
     await refreshStatus();
     try {
       supportedTypes = await invoke<string[]>("supported_model_types");
-    } catch {
-      // Keep the LLM default; the list just filters conservatively.
+    } catch (e) {
+      // Fail closed: show nothing rather than guessing a capability set.
+      console.warn("supported_model_types:", e);
     }
     void loadAvailableModels();
     pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);

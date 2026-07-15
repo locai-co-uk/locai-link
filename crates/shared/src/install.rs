@@ -75,11 +75,12 @@ fn plugin_model_type(plugin: &str) -> Option<&'static str> {
 /// `language_models` (the always-present core) when the manifest is unreadable
 /// or lists no known servable plugins (e.g. a source checkout with no manifest).
 pub fn supported_model_types(install_root: &Path) -> Vec<String> {
-    let mut types = read_manifest_model_types(install_root).unwrap_or_default();
-    if types.is_empty() {
-        types.push("language_models".to_string());
+    // Unreadable manifest (source checkout / missing) → LLM fallback. A readable
+    // manifest with no servable plugins → empty, so nothing unsupported is offered.
+    match read_manifest_model_types(install_root) {
+        Some(types) => types,
+        None => vec!["language_models".to_string()],
     }
-    types
 }
 
 fn read_manifest_model_types(install_root: &Path) -> Option<Vec<String>> {
@@ -277,10 +278,12 @@ mod tests {
     }
 
     #[test]
-    fn supported_types_unknown_plugin_falls_back_to_llm() {
+    fn supported_types_unknown_plugin_returns_empty() {
+        // Readable manifest, but no plugin maps to a servable type: offer nothing
+        // rather than wrongly advertising LLMs.
         let dir = tempdir().unwrap();
         lay_down_manifest(dir.path(), r#"[{"name":"image_classifier"}]"#);
-        assert_eq!(supported_model_types(dir.path()), vec!["language_models"]);
+        assert!(supported_model_types(dir.path()).is_empty());
     }
 
     #[test]

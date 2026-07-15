@@ -518,6 +518,24 @@ jobs:
           p = pathlib.Path("release-assets/${STABLE_NAME}")
           print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  ${STABLE_NAME}")
           EOF
+
+          # 9. OTA tarball. The swap-in-place updater downloads a versions/<v>
+          #    payload, not the .pkg, so publish the signed runtime version dir
+          #    under the tar.gz asset name the updater resolves
+          #    (<stem>-macos-arm64-v<version>.tar.gz). Without this, macOS OTA
+          #    never finds an asset and loops on ReleaseNotFound.
+          VERSION_DIR="$(python3 -c "import json; print(json.load(open('$STAGING/current/manifest.json'))['version'])")"
+          if [ -z "$VERSION_DIR" ] || [ ! -d "$STAGING/versions/$VERSION_DIR" ]; then
+            echo "::error::OTA payload versions/$VERSION_DIR not found under staging"
+            exit 1
+          fi
+          TAR_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.tar.gz"
+          tar -czf "release-assets/$TAR_NAME" -C "$STAGING/versions" "$VERSION_DIR"
+          python - <<EOF > "release-assets/${TAR_NAME}.sha256"
+          import hashlib, pathlib
+          p = pathlib.Path("release-assets/${TAR_NAME}")
+          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  ${TAR_NAME}")
+          EOF
           ls -lah release-assets/
 
       - name: Wipe ephemeral keychain + notary key
