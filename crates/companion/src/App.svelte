@@ -116,7 +116,7 @@
   // so a manual Stop while an update is available isn't mislabelled "Updating".
   let suppressUpdateInfer = $state(false);
 
-  // Available-models catalog (INFRA-343). Fetched from Control (device-key
+  // Available-models catalog. Fetched from Control (device-key
   // authed) on demand, not part of the /healthz poll. `requested` tracks
   // models the user just tapped Download on, for instant feedback before the
   // queued deployment row shows up in the poll.
@@ -323,7 +323,7 @@
     return Array.from(byId.values());
   });
 
-  // Servable iff this build ships a plugin for the model's type (INFRA-343/371).
+  // Servable iff this build ships a plugin for the model's type.
   // supportedTypes comes from the bundle manifest, so an LLM-only build hides
   // audio/other models the agent can't run.
   function isServable(m: AvailableModel): boolean {

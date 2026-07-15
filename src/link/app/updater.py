@@ -361,6 +361,10 @@ class Manifest:
     git_sha: str
     built_at: str
     plugins: list[dict[str, Any]]
+    # UI-app content hashes ({"companion": "<sha256>", ...}), injected at package
+    # time. Drives whole-app OTA: an app is re-swapped only when its hash differs
+    # from the installed one. Empty on bundles built before whole-app OTA.
+    apps: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -445,6 +449,7 @@ def read_manifest(root: Path) -> Manifest:
             git_sha=str(data.get("git_sha", "")),
             built_at=str(data.get("built_at", "")),
             plugins=list(data.get("plugins", [])),
+            apps={str(k): str(v) for k, v in (data.get("apps") or {}).items()},
         )
     except KeyError as exc:
         raise ManifestMalformed(f"{path}: missing field {exc}") from exc
@@ -508,11 +513,18 @@ def _platform_tag() -> str:
     return f"{os_tag}-{arch_tag}"
 
 
+def _ota_overrides_allowed() -> bool:
+    """Honour the LOCAI_* release overrides only outside a frozen production
+    bundle, or with an explicit opt-in. Stops a hostile or misconfigured env
+    from redirecting a production device's OTA to an attacker-controlled host."""
+    return not running_frozen_bundle() or bool(os.environ.get("LOCAI_ALLOW_OTA_OVERRIDES"))
+
+
 def latest_release_for(
     asset_stem: str,
     *,
-    repo: str = DEFAULT_RELEASES_REPO,
-    api_base: str = "https://api.github.com",
+    repo: str | None = None,
+    api_base: str | None = None,
     session: _HttpGetter | None = None,
     platform_tag: str | None = None,
 ) -> ReleaseInfo:
@@ -520,10 +532,22 @@ def latest_release_for(
 
     ``asset_stem`` is the plugin-set base from ``manifest.asset_name`` (e.g.
     ``locai-link-llm-stt``). The release workflow appends this host's
-    platform/arch and the version: ``<stem>-<platform_tag>-v<version>.<ext>``
-    (see .github/workflows/release.yml). ``platform_tag`` defaults to this
-    host's tag so an install only ever matches its own platform's asset.
+    platform/arch and the version: ``<stem>-<platform_tag>-v<version>.<ext>``.
+    ``platform_tag`` defaults to this host's tag so an install only ever matches
+    its own platform's asset.
+
+    ``repo`` / ``api_base`` fall back to ``LOCAI_RELEASES_REPO`` /
+    ``LOCAI_RELEASES_API_BASE`` for local testing (see bundling/serve_local_release.py),
+    but a frozen production bundle ignores those unless ``LOCAI_ALLOW_OTA_OVERRIDES``
+    is set, so the env can't redirect a real device's OTA.
     """
+    allow_env = _ota_overrides_allowed()
+    repo = repo or (os.environ.get("LOCAI_RELEASES_REPO") if allow_env else None) or DEFAULT_RELEASES_REPO
+    api_base = (
+        api_base or (os.environ.get("LOCAI_RELEASES_API_BASE") if allow_env else None) or "https://api.github.com"
+    )
+    if not allow_env and not api_base.startswith("https://"):
+        raise ReleaseNotFound(f"refuse insecure release API base: {api_base!r}")
     ptag = platform_tag or _platform_tag()
     http = session or requests
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases/latest"
@@ -739,15 +763,8 @@ def extract(archive: Path, dest: Path) -> None:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
-    suffix = "".join(archive.suffixes[-2:]).lower()
     try:
-        if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
-            _extract_tar(archive, staging)
-        elif suffix.endswith(".zip"):
-            _extract_zip(archive, staging)
-        else:
-            raise ExtractRefused(f"Unknown archive type: {archive.name}")
-
+        _extract_archive(archive, staging)
         payload = _locate_versioned_payload(staging)
         if dest.exists():
             shutil.rmtree(dest)
@@ -755,6 +772,19 @@ def extract(archive: Path, dest: Path) -> None:
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _extract_archive(archive: Path, staging: Path) -> None:
+    """Extract ``archive`` (tar.gz/tgz or zip) into ``staging``, refusing
+    path-traversal entries. Caller owns ``staging`` and its cleanup."""
+    staging.mkdir(parents=True, exist_ok=True)
+    suffix = "".join(archive.suffixes[-2:]).lower()
+    if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
+        _extract_tar(archive, staging)
+    elif suffix.endswith(".zip"):
+        _extract_zip(archive, staging)
+    else:
+        raise ExtractRefused(f"Unknown archive type: {archive.name}")
 
 
 def _locate_versioned_payload(staging: Path) -> Path:
@@ -1049,7 +1079,7 @@ def _version_gt(a: str, b: str) -> bool:
     return Version(a) > Version(b)
 
 
-# Control's public version-check endpoint (INFRA-363); appended to the device's
+# Control's public version-check endpoint; appended to the device's
 # api_url. DEFAULT mirrors main.DEFAULT_API_URL.
 LATEST_VERSION_PATH = "/devices/agent/latest-version"
 DEFAULT_CONTROL_API_BASE = "https://api.locai.co.uk/api/v1"
@@ -1076,13 +1106,17 @@ def check_update_available(
     Version check hits Control's endpoint; the OTA download still resolves the
     per-platform asset from GitHub in ``swap_bundle``. Best-effort: any failure
     (offline, source install, Control error) yields ``(False, None)``.
+
+    ``LOCAI_LATEST_VERSION`` forces the "latest" version for local testing (frozen
+    bundles honour it only with ``LOCAI_ALLOW_OTA_OVERRIDES`` set).
     """
     if not running_frozen_bundle():
         return (False, None)
     try:
         root = install_root or discover_install_root()
         manifest = read_manifest(root)
-        latest = latest_version_from_control(control_base_url or DEFAULT_CONTROL_API_BASE)
+        override = os.environ.get("LOCAI_LATEST_VERSION") if _ota_overrides_allowed() else None
+        latest = override or latest_version_from_control(control_base_url or DEFAULT_CONTROL_API_BASE)
         return (_version_gt(latest, manifest.version), latest)
     except Exception as e:  # noqa: BLE001 — never let the check crash the agent
         logger.debug(f"update check failed: {e}")
@@ -1112,6 +1146,122 @@ def bundle_asset_available(install_root: Path | None = None) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Whole-app OTA — swap changed UI apps (companion / setup assistant)
+# ---------------------------------------------------------------------------
+
+_APP_COMPANION = "companion"
+
+
+def _ui_app_payload_name(key: str) -> str:
+    """Name of the app inside the OTA payload for the current platform."""
+    if sys.platform == "darwin":
+        return {"companion": "Locai Link.app", "setup_assistant": "Setup Assistant.app"}[key]
+    if sys.platform == "win32":
+        return {"companion": "companion.exe", "setup_assistant": "setup-assistant.exe"}[key]
+    return {"companion": "companion", "setup_assistant": "setup-assistant"}[key]
+
+
+def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
+    """Every installed copy of the app to keep in sync on this platform."""
+    if sys.platform == "darwin":
+        if key == _APP_COMPANION:
+            return [Path("/Applications/Locai Link.app"), install_root / "Locai Link.app"]
+        return [Path("/Applications/Locai Setup Assistant.app"), install_root / "Setup Assistant.app"]
+    if sys.platform == "win32":
+        return []  # no companion OTA on Windows yet
+    name = "companion" if key == _APP_COMPANION else "setup-assistant"
+    return [install_root / name]
+
+
+def _rm(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    elif path.exists() or path.is_symlink():
+        path.unlink(missing_ok=True)
+
+
+def _locate_in_payload(staging: Path, name: str) -> Path | None:
+    """Shallowest entry named ``name`` in the extracted payload, or None."""
+    matches = sorted(staging.rglob(name), key=lambda p: len(p.parts))
+    return matches[0] if matches else None
+
+
+def _install_app(src: Path, dest: Path) -> None:
+    """Copy ``src`` (file or dir) onto ``dest`` via a same-dir temp + os.replace.
+    Copies (not moves) so one payload can populate multiple destinations."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.new")
+    _rm(tmp)
+    if src.is_dir():
+        shutil.copytree(src, tmp, symlinks=True)
+    else:
+        shutil.copy2(src, tmp)
+    # os.replace is atomic for files/empty dirs; .app bundles are non-empty dirs
+    # it can't overwrite, so move the old one aside and only drop it once the new
+    # one lands (a crash mid-swap leaves a recoverable .old, not a missing app).
+    try:
+        os.replace(tmp, dest)
+    except OSError:
+        backup = dest.with_name(f".{dest.name}.old")
+        _rm(backup)
+        if dest.exists() or dest.is_symlink():
+            os.replace(dest, backup)
+        os.replace(tmp, dest)
+        _rm(backup)
+
+
+def _restart_ui_app(key: str) -> None:
+    """Relaunch the companion so it picks up the swapped binary. Setup Assistant
+    only runs during setup, so it has nothing to restart. Best-effort."""
+    if key != _APP_COMPANION:
+        return
+    try:
+        if sys.platform == "darwin":
+            uid = str(os.getuid())
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{uid}/uk.co.locai.link.companion"],
+                check=False,
+                timeout=15,
+            )
+        elif sys.platform.startswith("linux"):
+            subprocess.run(
+                ["systemctl", "--user", "restart", "locai-link-companion.service"],
+                check=False,
+                timeout=15,
+            )
+    except Exception as e:  # noqa: BLE001 - a failed restart shouldn't fail the update
+        logger.warning(f"Could not restart companion after update: {e}")
+
+
+def swap_changed_ui_apps(
+    staging: Path, install_root: Path, old_apps: dict[str, str], new_apps: dict[str, str]
+) -> list[str]:
+    """Replace UI apps whose content hash changed between the installed and new
+    manifests (whole-app OTA). Unchanged apps are left running as-is.
+    Returns the keys that were swapped."""
+    swapped: list[str] = []
+    for key, new_hash in new_apps.items():
+        if old_apps.get(key) == new_hash:
+            continue  # unchanged — don't disturb the running app
+        try:
+            name = _ui_app_payload_name(key)
+            src = _locate_in_payload(staging, name)
+            if src is None:
+                logger.warning(f"whole-app OTA: '{key}' changed but '{name}' not in payload; skipping")
+                continue
+            dests = _ui_app_destinations(key, install_root)
+            if not dests:
+                continue
+            for dest in dests:
+                _install_app(src, dest)
+            swapped.append(key)
+            logger.info(f"whole-app OTA: updated '{key}'")
+        except Exception as e:  # noqa: BLE001 - one app failing shouldn't abort the rest
+            logger.error(f"whole-app OTA: failed to update '{key}': {e}")
+    return swapped
+
+
 def swap_bundle(install_root: Path | None = None) -> bool:
     """Run the full bundle OTA chain end-to-end. Returns True if current was flipped.
 
@@ -1139,8 +1289,18 @@ def swap_bundle(install_root: Path | None = None) -> bool:
     archive = download(release.download_url, staging / release.asset_name)
     verify(archive, expected_sha256_url=release.sha256_url, platform=sys.platform)
 
+    # Extract once into a work dir we keep, so both the runtime payload and the
+    # UI apps can be pulled from it before cleanup.
+    extract_dir = staging / "extracted"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    _extract_archive(archive, extract_dir)
+
+    payload = _locate_versioned_payload(extract_dir)
     target = install_root / VERSIONS_DIR / release.version
-    extract(archive, target)
+    if target.exists():
+        shutil.rmtree(target)
+    os.replace(payload, target)  # moves the runtime out; UI apps stay in extract_dir
     verify_extracted_macos(target)  # no-op on non-macOS
 
     if not health_check(target / RUNTIME_BINARY):
@@ -1152,6 +1312,18 @@ def swap_bundle(install_root: Path | None = None) -> bool:
     # the runtime spawned from the new version exits nonzero within the
     # window, the launcher rolls current back to the version recorded here.
     _write_update_pending(install_root, previous_version=manifest.version)
+
+    # Whole-app OTA: after the runtime flip, replace any UI app
+    # whose content hash changed, then relaunch it. Never let an app-swap
+    # hiccup fail the runtime update that already succeeded.
+    try:
+        new_apps = read_manifest(install_root).apps  # current now points at target
+        swapped = swap_changed_ui_apps(extract_dir, install_root, manifest.apps, new_apps)
+        for key in swapped:
+            _restart_ui_app(key)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"whole-app OTA: UI app swap failed (runtime still updated): {e}")
+
     gc_old_versions(install_root)
     clear_staging(install_root)
     logger.info(f"swap_bundle: flipped current -> {release.version}")

@@ -370,6 +370,42 @@ jobs:
             --skip-notarise
           echo "COMPANION_APP_PATH=$COMPANION_APP" >> "$GITHUB_ENV"
 
+      - name: Notarise + staple UI .app bundles (macOS)
+        # The OTA tarball ships these .apps directly, not inside the .pkg,
+        # so they each need their own stapled ticket to stay Gatekeeper-clean
+        # when swapped in. Notarise both in one submission, then staple the
+        # source paths in place; the .pkg and OTA legs below copy the stapled apps.
+        if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
+        env:
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NOTARY_DIR="$RUNNER_TEMP/notary-apps"
+          rm -rf "$NOTARY_DIR"
+          mkdir -p "$NOTARY_DIR"
+          cp -R "$COMPANION_APP_PATH" "$NOTARY_DIR/"
+          cp -R "$SA_APP_PATH" "$NOTARY_DIR/"
+
+          # Zip both apps into one submission (notarytool notarises all
+          # nested code; stapler then resolves each app's ticket by cdhash).
+          APPS_ZIP="$RUNNER_TEMP/ota-apps.zip"
+          ditto -c -k --keepParent "$NOTARY_DIR" "$APPS_ZIP"
+          xcrun notarytool submit "$APPS_ZIP" \
+            --key "$APPLE_NOTARY_KEY_PATH" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait
+
+          # Staple the originals (same cdhash as the submitted copies), so
+          # every downstream copy carries the ticket. Validate hard-fails
+          # the build if the ticket didn't attach.
+          xcrun stapler staple "$COMPANION_APP_PATH"
+          xcrun stapler staple "$SA_APP_PATH"
+          xcrun stapler validate "$COMPANION_APP_PATH"
+          xcrun stapler validate "$SA_APP_PATH"
+
       - name: Codesign runtime bundle (macOS)
         # Signs the Python runtime tree (dist/locai-link/) but skips
         # notarisation — the outer .pkg gets notarised end-to-end
@@ -390,6 +426,7 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           TAG: ${{ needs.release.outputs.tag }}
+          ASSET_BASE: ${{ steps.manifest.outputs.asset_base }}
         shell: bash
         run: |
           set -euo pipefail
@@ -419,6 +456,12 @@ jobs:
           # Companion menubar .app — the user-facing "Locai Link" in
           # /Applications post-install (postinstall symlinks it there).
           cp -R "$COMPANION_APP_PATH" "$STAGING/Locai Link.app"
+
+          # App content hashes for whole-app OTA: record companion /
+          # setup-assistant source hashes in the manifest so swap_bundle re-swaps
+          # them only when they changed.
+          python3 bundling/inject_app_hashes.py \
+            --manifest "$STAGING/current/manifest.json" --repo-root .
 
           # LaunchAgent plists — bundled but NOT bootstrapped at
           # install time. The Setup Assistant registers them on
@@ -497,7 +540,7 @@ jobs:
           #    ${asset_base}-${platform}-${TAG}.${ext} pattern used by
           #    the tar.gz / zip legs so all release assets look uniform.
           mkdir -p release-assets
-          FINAL_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.pkg"
+          FINAL_NAME="${ASSET_BASE}-macos-arm64-${TAG}.pkg"
           cp "$SIGNED_PKG" "release-assets/$FINAL_NAME"
 
           python - <<EOF > "release-assets/${FINAL_NAME}.sha256"
@@ -507,7 +550,7 @@ jobs:
           print(f"{digest}  ${FINAL_NAME}")
           EOF
 
-          # Stable-named copy for the permanent "latest" download URL (INFRA-348).
+          # Stable-named copy for the permanent "latest" download URL.
           # Version- and plugin-agnostic so the URL never changes across releases:
           #   .../releases/latest/download/locai-link-macos-arm64.pkg
           # Assumes one canonical bundle per platform per release.
@@ -519,18 +562,24 @@ jobs:
           print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  ${STABLE_NAME}")
           EOF
 
-          # 9. OTA tarball. The swap-in-place updater downloads a versions/<v>
-          #    payload, not the .pkg, so publish the signed runtime version dir
-          #    under the tar.gz asset name the updater resolves
-          #    (<stem>-macos-arm64-v<version>.tar.gz). Without this, macOS OTA
-          #    never finds an asset and loops on ReleaseNotFound.
+          # 9. OTA tarball. swap_bundle downloads this, not the .pkg. Whole-app
+          #    OTA: include the runtime version payload AND the notarised +
+          #    stapled .app bundles, so swap_bundle can replace changed UI apps too, not
+          #    just the runtime. Named as the <stem>-macos-arm64-v<version>.tar.gz
+          #    asset the updater resolves; without it macOS OTA loops on ReleaseNotFound.
           VERSION_DIR="$(python3 -c "import json; print(json.load(open('$STAGING/current/manifest.json'))['version'])")"
           if [ -z "$VERSION_DIR" ] || [ ! -d "$STAGING/versions/$VERSION_DIR" ]; then
             echo "::error::OTA payload versions/$VERSION_DIR not found under staging"
             exit 1
           fi
-          TAR_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.tar.gz"
-          tar -czf "release-assets/$TAR_NAME" -C "$STAGING/versions" "$VERSION_DIR"
+          OTA_ROOT="$RUNNER_TEMP/ota"
+          rm -rf "$OTA_ROOT"
+          mkdir -p "$OTA_ROOT/versions"
+          cp -R "$STAGING/versions/$VERSION_DIR" "$OTA_ROOT/versions/$VERSION_DIR"
+          cp -R "$STAGING/Locai Link.app"        "$OTA_ROOT/Locai Link.app"
+          cp -R "$STAGING/Setup Assistant.app"   "$OTA_ROOT/Setup Assistant.app"
+          TAR_NAME="${ASSET_BASE}-macos-arm64-${TAG}.tar.gz"
+          tar -czf "release-assets/$TAR_NAME" -C "$OTA_ROOT" .
           python - <<EOF > "release-assets/${TAR_NAME}.sha256"
           import hashlib, pathlib
           p = pathlib.Path("release-assets/${TAR_NAME}")
@@ -567,7 +616,7 @@ jobs:
           print(f"{digest}  {name}")
           EOF
 
-          # Stable-named copy for the permanent "latest" download URL (INFRA-348).
+          # Stable-named copy for the permanent "latest" download URL.
           cp "release-assets/${ASSET}" "release-assets/${STABLE}"
           python - <<'EOF' > "release-assets/${STABLE}.sha256"
           import hashlib, os, pathlib
@@ -597,7 +646,7 @@ jobs:
           print(f"{digest}  {name}")
           EOF
 
-          # Stable-named copy for the permanent "latest" download URL (INFRA-348).
+          # Stable-named copy for the permanent "latest" download URL.
           cp "release-assets/${ASSET}" "release-assets/${STABLE}"
           python - <<'EOF' > "release-assets/${STABLE}.sha256"
           import hashlib, os, pathlib

@@ -873,15 +873,19 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
     # the fake bash-script runtime we lay down isn't signed, so mock it.
     mocker.patch.object(updater, "verify_extracted_macos")
 
-    def fake_extract(archive, target):
-        # Lay down a manifest + a runnable runtime stub at the target dir.
-        target.mkdir(parents=True, exist_ok=True)
-        (target / updater.MANIFEST_NAME).write_text("{}")
-        runtime = target / updater.RUNTIME_BINARY
+    def fake_extract_archive(archive, staging):
+        # Lay down a versioned payload (manifest + runnable runtime stub) in the
+        # extract staging; _locate_versioned_payload finds it by the runtime.
+        payload = staging / "payload"
+        payload.mkdir(parents=True, exist_ok=True)
+        (payload / updater.MANIFEST_NAME).write_text(
+            f'{{"manifest_version": 1, "asset_name": "locai-link-llm-linux-x86_64", "version": "{new_version}"}}'
+        )
+        runtime = payload / updater.RUNTIME_BINARY
         runtime.write_text("#!/usr/bin/env bash\nexit 0\n")
         runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    mocker.patch.object(updater, "extract", side_effect=fake_extract)
+    mocker.patch.object(updater, "_extract_archive", side_effect=fake_extract_archive)
 
     assert updater.swap_bundle(install_root=root) is True
     assert (root / updater.CURRENT_LINK).resolve().name == new_version
@@ -924,14 +928,18 @@ def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     # Same as the happy-path test: codesign would reject the fake runtime.
     mocker.patch.object(updater, "verify_extracted_macos")
 
-    def fake_extract(archive, target):
+    def fake_extract_archive(archive, staging):
         # A runtime that exits nonzero so health_check fails.
-        target.mkdir(parents=True, exist_ok=True)
-        runtime = target / updater.RUNTIME_BINARY
+        payload = staging / "payload"
+        payload.mkdir(parents=True, exist_ok=True)
+        (payload / updater.MANIFEST_NAME).write_text(
+            f'{{"manifest_version": 1, "asset_name": "locai-link-llm-linux-x86_64", "version": "{new_version}"}}'
+        )
+        runtime = payload / updater.RUNTIME_BINARY
         runtime.write_text("#!/usr/bin/env bash\nexit 17\n")
         runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    mocker.patch.object(updater, "extract", side_effect=fake_extract)
+    mocker.patch.object(updater, "_extract_archive", side_effect=fake_extract_archive)
     flip_spy = mocker.patch.object(updater, "flip_current")
 
     with pytest.raises(updater.HealthCheckFailed):
@@ -944,7 +952,60 @@ def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     assert (root / updater.CURRENT_LINK).resolve().name == "1.0.15"
 
 
-# --- check_update_available (INFRA-353) --------------------------------------
+@pytest.mark.skipif(sys.platform == "win32", reason="whole-app swap targets macOS/Linux")
+def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
+    """A real tarball carrying runtime + a changed companion: swap_bundle flips
+    the runtime and replaces the companion binary."""
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
+    (root / "companion").write_bytes(b"OLD-COMPANION")
+
+    new_version = "1.0.16"
+    asset_name = f"locai-link-llm-stt-linux-x86_64-v{new_version}.tar.gz"
+    wrap = f"locai-link-llm-stt-linux-x86_64-v{new_version}"
+    manifest_json = (
+        f'{{"manifest_version":1,"asset_name":"locai-link-llm-stt",'
+        f'"version":"{new_version}","apps":{{"companion":"newhash"}}}}'
+    ).encode()
+    tar_bytes = _make_tar_with(
+        {
+            f"{wrap}/bundle/versions/{new_version}/manifest.json": manifest_json,
+            f"{wrap}/bundle/versions/{new_version}/{updater.RUNTIME_BINARY}": b"runtime",
+            f"{wrap}/companion": b"NEW-COMPANION",
+            f"{wrap}/setup-assistant": b"NEW-SA",
+        }
+    )
+
+    mocker.patch.object(
+        updater,
+        "latest_release_for",
+        return_value=ReleaseInfo(
+            version=new_version,
+            tag=f"v{new_version}",
+            asset_name=asset_name,
+            download_url="https://x/" + asset_name,
+            sha256_url="https://x/" + asset_name + ".sha256",
+        ),
+    )
+
+    def fake_download(url, dest, **_):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(tar_bytes)
+        return dest
+
+    mocker.patch.object(updater, "download", side_effect=fake_download)
+    mocker.patch.object(updater, "verify")
+    mocker.patch.object(updater, "verify_extracted_macos")
+    mocker.patch.object(updater, "health_check", return_value=True)
+    restart = mocker.patch.object(updater, "_restart_ui_app")
+
+    assert updater.swap_bundle(install_root=root) is True
+    assert (root / updater.CURRENT_LINK).resolve().name == new_version
+    assert (root / "companion").read_bytes() == b"NEW-COMPANION"
+    restart.assert_any_call("companion")
+
+
+# --- check_update_available --------------------------------------
 
 
 def _stub_check(monkeypatch, *, frozen, current="1.0.21", latest="1.0.22", raise_in_discover=False):
@@ -977,7 +1038,7 @@ def test_check_update_source_install_is_noop(monkeypatch):
     assert updater.check_update_available() == (False, None)
 
 
-# --- latest_version_from_control (INFRA-363) ---------------------------------
+# --- latest_version_from_control ---------------------------------
 
 
 def test_latest_version_from_control_parses_version():
@@ -996,6 +1057,50 @@ def test_latest_version_from_control_missing_field_raises():
 def test_check_update_swallows_errors(monkeypatch):
     _stub_check(monkeypatch, frozen=True, raise_in_discover=True)
     assert updater.check_update_available() == (False, None)
+
+
+def test_check_update_available_env_forces_latest(monkeypatch, tmp_path):
+    """LOCAI_LATEST_VERSION forces the latest for local testing, bypassing Control."""
+    monkeypatch.setenv("LOCAI_ALLOW_OTA_OVERRIDES", "1")
+    monkeypatch.setenv("LOCAI_LATEST_VERSION", "1.1.0")
+    root = _setup_install_root(tmp_path, "1.0.15")
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("Control must not be consulted when the env forces a version")
+
+    monkeypatch.setattr(updater, "latest_version_from_control", _boom)
+    assert updater.check_update_available() == (True, "1.1.0")
+
+
+def test_latest_release_for_honours_env_overrides(monkeypatch):
+    """LOCAI_RELEASES_API_BASE/REPO redirect release resolution for local testing."""
+    monkeypatch.setenv("LOCAI_RELEASES_API_BASE", "http://local.test")
+    monkeypatch.setenv("LOCAI_RELEASES_REPO", "me/mine")
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.1.1", platform_tag="linux-x86_64")
+    session = _StubSession({"http://local.test/repos/me/mine/releases/latest": payload})
+    info = updater.latest_release_for(stem, session=session, platform_tag="linux-x86_64")
+    assert info.version == "1.1.1"
+
+
+def test_frozen_bundle_ignores_env_overrides_without_optin(monkeypatch):
+    """A frozen bundle must ignore LOCAI_* release overrides unless opted in, so
+    the env can't redirect a real device's OTA to an attacker-controlled host."""
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setenv("LOCAI_RELEASES_API_BASE", "http://evil.test")
+    monkeypatch.setenv("LOCAI_RELEASES_REPO", "attacker/repo")
+    seen = {}
+
+    class _Recorder:
+        def get(self, url, **_kw):
+            seen["url"] = url
+            raise updater.requests.RequestException("stop here")
+
+    with pytest.raises(updater.ReleaseNotFound):
+        updater.latest_release_for("locai-link-llm-stt", session=_Recorder(), platform_tag="linux-x86_64")
+    assert seen["url"].startswith("https://api.github.com/repos/locai-co-uk/locai-link/")
 
 
 # --- bundle_asset_available (OTA pre-flight) ---------------------------------
@@ -1030,6 +1135,78 @@ def test_bundle_asset_available_false_when_no_asset(monkeypatch, tmp_path):
 
     monkeypatch.setattr(updater, "latest_release_for", _raise)
     assert updater.bundle_asset_available() is False
+
+
+# --- swap_changed_ui_apps (whole-app OTA) ------------------------
+
+
+def test_swap_changed_ui_apps_skips_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    staging = tmp_path / "extract"
+    staging.mkdir()
+    (staging / "companion").write_text("NEW")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "companion").write_text("OLD")
+
+    swapped = updater.swap_changed_ui_apps(staging, root, {"companion": "h"}, {"companion": "h"})
+    assert swapped == []
+    assert (root / "companion").read_text() == "OLD", "unchanged app must not be touched"
+
+
+def test_swap_changed_ui_apps_replaces_changed(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    staging = tmp_path / "extract"
+    staging.mkdir()
+    (staging / "companion").write_text("NEW")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "companion").write_text("OLD")
+
+    swapped = updater.swap_changed_ui_apps(staging, root, {"companion": "old"}, {"companion": "new"})
+    assert swapped == ["companion"]
+    assert (root / "companion").read_text() == "NEW"
+
+
+def test_swap_changed_ui_apps_skips_when_missing_from_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    staging = tmp_path / "extract"
+    staging.mkdir()  # payload has no companion
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "companion").write_text("OLD")
+
+    swapped = updater.swap_changed_ui_apps(staging, root, {}, {"companion": "new"})
+    assert swapped == []
+    assert (root / "companion").read_text() == "OLD"
+
+
+def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    root = tmp_path / "root"
+    root.mkdir()
+
+    # Real darwin branch: companion syncs into /Applications and the install root.
+    assert updater._ui_app_destinations(updater._APP_COMPANION, root) == [
+        Path("/Applications/Locai Link.app"),
+        root / "Locai Link.app",
+    ]
+
+    # Redirect to writable temp dirs, then exercise the dual-destination swap of a
+    # non-empty .app bundle (so the swap-aside path in _install_app runs too).
+    stub_dests = [tmp_path / "Applications" / "Locai Link.app", root / "Locai Link.app"]
+    monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, ir: stub_dests)
+    for d in stub_dests:
+        (d / "Contents").mkdir(parents=True)
+        (d / "Contents" / "Info.plist").write_text("OLD")
+    payload = tmp_path / "extract" / "Locai Link.app" / "Contents"
+    payload.mkdir(parents=True)
+    (payload / "Info.plist").write_text("NEW")
+
+    swapped = updater.swap_changed_ui_apps(tmp_path / "extract", root, {"companion": "old"}, {"companion": "new"})
+    assert swapped == ["companion"]
+    for d in stub_dests:
+        assert (d / "Contents" / "Info.plist").read_text() == "NEW"
 
 
 # --- _version_gt -------------------------------------------------------------

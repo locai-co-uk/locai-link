@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Control device-API client for in-app model downloads (INFRA-343 / INFRA-362).
+//! Control device-API client for in-app model downloads.
 //!
 //! Two device-authenticated endpoints, called with the device API key the
 //! agent already holds (no user OAuth token in the app):
