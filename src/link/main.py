@@ -15,6 +15,7 @@ from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
 from link.app.updater import (
     BundleUpdateError,
+    ReleaseNotFound,
     pull_and_update,
     reinstall_plugin_binaries,
     running_frozen_bundle,
@@ -399,6 +400,11 @@ def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
     if running_frozen_bundle():
         try:
             swap_bundle()
+        except ReleaseNotFound as e:
+            # Version published but its per-platform asset isn't up yet, so this
+            # is not a failure: relaunch current (42) and retry next poll.
+            logger.info(f"Update not ready yet ({e}); relaunching current, will retry.")
+            sys.exit(42)
         except BundleUpdateError as e:
             logger.critical(f"Bundle update failed: {e}")
             sys.exit(1)
@@ -492,7 +498,7 @@ def _find_link_repo_root(start: Path) -> Path | None:
             continue
         try:
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             continue
         project = data.get("project")
         if isinstance(project, dict) and project.get("name") == "locai-link":

@@ -30,4 +30,8 @@ tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 locai-link-shared = { path = "../../shared" }
+# Native quit-confirmation dialog. Tauri's own plugin marshals the dialog onto
+# the correct (main) thread and event loop — rfd's sync GTK dialog doesn't
+# display reliably from inside a Tauri app on Linux.
+tauri-plugin-dialog = "2"
 

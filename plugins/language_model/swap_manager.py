@@ -155,13 +155,17 @@ class SwapManager:
         """Register a model and reload (or start) llama-swap.
 
         ``ttl`` is the idle-unload timeout in seconds; None uses the default.
+        0 disables unloading; -1 keeps the model resident. Values below -1, and
+        non-integers (including bools and floats), are rejected.
         """
+        if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < -1):
+            raise ValueError(f"ttl must be None, -1, 0, or a positive integer; got {ttl!r}")
         with self._lock:
             self._models[model_id] = {
                 "path": model_path,
                 "args": extra_args or [],
                 "env": env or {},
-                "ttl": int(ttl) if ttl is not None else self._MODEL_TTL,
+                "ttl": ttl if ttl is not None else self._MODEL_TTL,
             }
             self._write_config()
             if self._is_running():

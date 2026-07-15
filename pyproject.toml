@@ -7,8 +7,8 @@ build-backend = "uv_build"
 
 [project]
 name = "locai-link"
-version = "1.0.20"
-description = "High-performance modular edge inference agent"
+version = "1.1.0"
+description = "Self-hosted edge AI runtime for on-prem and private cloud."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE.md" }
@@ -21,6 +21,7 @@ dependencies = [
     "pydantic>=2.12.0",
     "eclipse-zenoh>=1.9.0",
     "certifi>=2024.2.2",
+    "packaging>=24.0",
 ]
 
 [project.optional-dependencies]

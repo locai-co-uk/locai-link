@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "Locai Link Preferences",
-        "width": 572,
-        "height": 682,
+        "width": 600,
+        "height": 700,
         "minWidth": 528,
         "minHeight": 616,
         "resizable": true,
