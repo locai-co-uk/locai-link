@@ -122,7 +122,11 @@ install -m 0755 "$TAURI_DIR/locai-link-setup-assistant" "$ROOT/setup-assistant"
 install -m 0755 "$TAURI_DIR/locai-link-companion"       "$ROOT/companion"
 
 # 3. boot.json + systemd + .desktop entries + icons + install/uninstall.
-install -m 0644 "$BOOT_JSON"                            "$ROOT/boot.json"
+# plugin_set is injected from manifest.json so the launcher's first-launch
+# fetch targets the asset this build actually is (not the static template).
+python3 "$REPO_ROOT/bundling/gen_boot_json.py" \
+    --manifest "$MANIFEST" --template "$BOOT_JSON" --output "$ROOT/boot.json"
+chmod 0644 "$ROOT/boot.json"
 mkdir -p "$ROOT/systemd" "$ROOT/applications" "$ROOT/icons"
 install -m 0644 "$SCRIPT_DIR/systemd/"*.service         "$ROOT/systemd/"
 install -m 0644 "$SCRIPT_DIR/applications/"*.desktop    "$ROOT/applications/"

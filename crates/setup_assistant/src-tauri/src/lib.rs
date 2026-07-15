@@ -8,7 +8,10 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::State;
 
-use locai_link_shared::{installed_version, read_boot_json, BootConfig};
+use locai_link_shared::{
+    installed_version, read_boot_json, supported_model_types as shared_supported_model_types,
+    BootConfig,
+};
 
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
 const CONTROL_API_URL: &str = "https://api.locai.co.uk/api/v1";
@@ -117,6 +120,14 @@ fn get_install_root() -> String {
 #[tauri::command]
 fn get_platform() -> String {
     std::env::consts::OS.to_string()
+}
+
+/// Model types this build can serve, derived from the installed bundle's manifest
+/// plugins (INFRA-371). The installer list filters to these so an LLM-only build
+/// never offers audio/other models it can't run.
+#[tauri::command]
+fn supported_model_types() -> Vec<String> {
+    shared_supported_model_types(&PathBuf::from(resolve_install_root()))
 }
 
 /// Read the on-disk install state. Never `Err` — the failure modes are legitimate
@@ -1422,6 +1433,7 @@ pub fn run() {
             check_install,
             get_install_root,
             get_platform,
+            supported_model_types,
             sign_in_start,
             sign_in_poll,
             suggest_device_name,

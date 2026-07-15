@@ -125,6 +125,9 @@
   let availableError = $state<string | null>(null);
   let availableLoaded = $state(false);
   let requested = $state<Set<string>>(new Set());
+  // Model types this build can serve, from supported_model_types (derived from
+  // the bundle manifest's plugins). Defaults to LLMs until the fetch resolves.
+  let supportedTypes = $state<string[]>(["language_models"]);
   // Signature of in-flight deployment ids; when it changes (a download starts
   // or finishes) we refresh the catalog so installed/available state is current.
   let lastDeployKeys = "";
@@ -160,6 +163,11 @@
     // status + models. Cold-start UI paints one HTTP RTT after open.
     await load();
     await refreshStatus();
+    try {
+      supportedTypes = await invoke<string[]>("supported_model_types");
+    } catch {
+      // Keep the LLM default; the list just filters conservatively.
+    }
     void loadAvailableModels();
     pollTimer = setInterval(refreshStatus, POLL_INTERVAL_MS);
     // The window is pre-created hidden; refreshStatus bails while hidden, so
@@ -313,16 +321,11 @@
     return Array.from(byId.values());
   });
 
-  // The app serves LLMs and audio-transcription models; other library types
-  // would just confuse in the download list (INFRA-371). Mirror the Control web
-  // UI's servable-model test.
+  // Servable iff this build ships a plugin for the model's type (INFRA-343/371).
+  // supportedTypes comes from the bundle manifest, so an LLM-only build hides
+  // audio/other models the agent can't run.
   function isServable(m: AvailableModel): boolean {
-    if (m.model_type === "language_models" || m.model_type === "audio_transcription")
-      return true;
-    const fw = m.framework?.toUpperCase();
-    if (fw === "GGUF" || fw === "GGML") return true;
-    const name = (m.filename_on_server || "").toLowerCase();
-    return /\.gguf$/.test(name) || /\.ggml$/.test(name);
+    return supportedTypes.includes(m.model_type);
   }
 
   // Installed on THIS device. The local /models list is authoritative and

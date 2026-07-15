@@ -10,10 +10,10 @@ use locai_link_shared::{
     agent_health, cancel_deployment as shared_cancel_deployment,
     list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
     read_identity, request_deploy as shared_request_deploy,
-    toggle_serving as shared_toggle_serving, trigger_update, AvailableModel, DeployOutcome,
-    DeploymentProgress, HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth,
-    DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL,
-    DEFAULT_UPDATE_URL,
+    supported_model_types as shared_supported_model_types, toggle_serving as shared_toggle_serving,
+    trigger_update, AvailableModel, DeployOutcome, DeploymentProgress, HealthStatus, ModelInfo,
+    ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
+    DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL, DEFAULT_UPDATE_URL,
 };
 use serde::Serialize;
 use tauri::AppHandle;
@@ -199,6 +199,14 @@ pub async fn list_available_models() -> Result<Vec<AvailableModel>, String> {
     })
     .await
     .map_err(|e| format!("list_available_models task panicked: {e}"))?
+}
+
+/// Model types this build can actually serve, derived from the current bundle's
+/// manifest plugins (INFRA-343/371). The UI filters the model lists to these so
+/// an LLM-only build never offers audio/other models it can't run.
+#[tauri::command]
+pub fn supported_model_types() -> Vec<String> {
+    shared_supported_model_types(&PathBuf::from(install_root()))
 }
 
 /// Ask Control to deploy `model_id` onto this device (INFRA-343). Idempotent on

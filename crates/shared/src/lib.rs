@@ -19,7 +19,9 @@ pub use health::{
     ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
     DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL, DEFAULT_UPDATE_URL,
 };
-pub use install::{installed_version, read_boot_json, BootConfig, InstalledVersion};
+pub use install::{
+    installed_version, read_boot_json, supported_model_types, BootConfig, InstalledVersion,
+};
 
 #[cfg(test)]
 mod tests {

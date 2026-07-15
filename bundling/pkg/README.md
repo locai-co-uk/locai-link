@@ -48,7 +48,12 @@ bundling/pkg/
 #    Contents end up at /Library/Locai/ on the target.
 STAGING=$(mktemp -d)
 cp crates/target/release/locai-link                 "$STAGING/locai-link"
-cp bundling/pkg/boot.json                           "$STAGING/boot.json"
+# boot.json: inject plugin_set from the bundle manifest (not a raw copy) so the
+# launcher's first-launch fetch targets the asset this build actually is.
+python3 bundling/gen_boot_json.py \
+    --manifest "$STAGING/current/manifest.json" \
+    --template bundling/pkg/boot.json \
+    --output   "$STAGING/boot.json"
 cp -R crates/target/release/bundle/macos/Setup\ Assistant.app \
                                                     "$STAGING/Setup Assistant.app"
 

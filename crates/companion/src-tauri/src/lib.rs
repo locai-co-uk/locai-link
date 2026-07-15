@@ -136,6 +136,7 @@ pub fn run() {
             preferences::cancel_model_deploy,
             preferences::list_available_models,
             preferences::request_model_deploy,
+            preferences::supported_model_types,
             preferences::install_update,
             preferences::set_run_at_login,
             preferences::runtime_start,
