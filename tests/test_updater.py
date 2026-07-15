@@ -998,6 +998,40 @@ def test_check_update_swallows_errors(monkeypatch):
     assert updater.check_update_available() == (False, None)
 
 
+# --- bundle_asset_available (OTA pre-flight) ---------------------------------
+
+
+def test_bundle_asset_available_false_on_source_install(monkeypatch):
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: False)
+    assert updater.bundle_asset_available() is False
+
+
+def test_bundle_asset_available_true_when_asset_resolves(monkeypatch, tmp_path):
+    root = _setup_install_root(tmp_path, "1.2.1")
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+    seen = {}
+    monkeypatch.setattr(
+        updater,
+        "latest_release_for",
+        lambda asset_name, **_kw: seen.setdefault("asset", asset_name),
+    )
+    assert updater.bundle_asset_available() is True
+    assert seen["asset"] == "locai-link-llm-linux-x86_64"
+
+
+def test_bundle_asset_available_false_when_no_asset(monkeypatch, tmp_path):
+    root = _setup_install_root(tmp_path, "1.2.1")
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+
+    def _raise(asset_name, **_kw):
+        raise updater.ReleaseNotFound("no asset for this platform")
+
+    monkeypatch.setattr(updater, "latest_release_for", _raise)
+    assert updater.bundle_asset_available() is False
+
+
 # --- _version_gt -------------------------------------------------------------
 
 
