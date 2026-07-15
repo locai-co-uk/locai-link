@@ -426,6 +426,7 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           TAG: ${{ needs.release.outputs.tag }}
+          ASSET_BASE: ${{ steps.manifest.outputs.asset_base }}
         shell: bash
         run: |
           set -euo pipefail
@@ -539,7 +540,7 @@ jobs:
           #    ${asset_base}-${platform}-${TAG}.${ext} pattern used by
           #    the tar.gz / zip legs so all release assets look uniform.
           mkdir -p release-assets
-          FINAL_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.pkg"
+          FINAL_NAME="${ASSET_BASE}-macos-arm64-${TAG}.pkg"
           cp "$SIGNED_PKG" "release-assets/$FINAL_NAME"
 
           python - <<EOF > "release-assets/${FINAL_NAME}.sha256"
@@ -577,7 +578,7 @@ jobs:
           cp -R "$STAGING/versions/$VERSION_DIR" "$OTA_ROOT/versions/$VERSION_DIR"
           cp -R "$STAGING/Locai Link.app"        "$OTA_ROOT/Locai Link.app"
           cp -R "$STAGING/Setup Assistant.app"   "$OTA_ROOT/Setup Assistant.app"
-          TAR_NAME="${{ steps.manifest.outputs.asset_base }}-macos-arm64-${TAG}.tar.gz"
+          TAR_NAME="${ASSET_BASE}-macos-arm64-${TAG}.tar.gz"
           tar -czf "release-assets/$TAR_NAME" -C "$OTA_ROOT" .
           python - <<EOF > "release-assets/${TAR_NAME}.sha256"
           import hashlib, pathlib

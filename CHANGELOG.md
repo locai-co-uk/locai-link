@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.1.0]
+
+Whole-app over-the-air updates and in-app model downloads. Updating a
+device now refreshes the menu-bar companion and the Setup Assistant
+alongside the runtime, and macOS gains a working OTA path for the first
+time. The companion can also pull new models on demand, without
+rerunning the Setup Assistant.
+
+### Added — Whole-app OTA (`src/link/app/updater.py`)
+
+- Updates now swap the companion and Setup Assistant apps too, not just
+  the Python runtime. The bundle manifest records a content hash per app;
+  an update re-installs only the apps whose hash changed and restarts the
+  companion so the new build takes effect immediately.
+- macOS OTA: releases publish a per-platform tarball carrying the runtime
+  payload plus the notarised, stapled `.app` bundles, so a swapped-in app
+  stays Gatekeeper-clean. macOS previously shipped only the `.pkg`, so
+  devices had no update asset to fetch.
+- The version check runs through Control's cached endpoint (fleet-safe);
+  the download resolves the per-platform asset from the release.
+
+### Added — In-app model downloads (`crates/companion/`)
+
+- The companion requests and downloads additional models directly from
+  its Available-models list, with live progress, without rerunning the
+  Setup Assistant.
+
+### Changed — Setup Assistant model selection
+
+- The model list highlights a recommended default and filters to the
+  models this device can actually serve.
+
 ## [1.0.19]
 
 First end-to-end GUI install path for macOS + Linux: a `.pkg` (macOS)

@@ -1061,6 +1061,7 @@ def test_check_update_swallows_errors(monkeypatch):
 
 def test_check_update_available_env_forces_latest(monkeypatch, tmp_path):
     """LOCAI_LATEST_VERSION forces the latest for local testing, bypassing Control."""
+    monkeypatch.setenv("LOCAI_ALLOW_OTA_OVERRIDES", "1")
     monkeypatch.setenv("LOCAI_LATEST_VERSION", "1.1.0")
     root = _setup_install_root(tmp_path, "1.0.15")
     monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
@@ -1082,6 +1083,24 @@ def test_latest_release_for_honours_env_overrides(monkeypatch):
     session = _StubSession({"http://local.test/repos/me/mine/releases/latest": payload})
     info = updater.latest_release_for(stem, session=session, platform_tag="linux-x86_64")
     assert info.version == "1.1.1"
+
+
+def test_frozen_bundle_ignores_env_overrides_without_optin(monkeypatch):
+    """A frozen bundle must ignore LOCAI_* release overrides unless opted in, so
+    the env can't redirect a real device's OTA to an attacker-controlled host."""
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setenv("LOCAI_RELEASES_API_BASE", "http://evil.test")
+    monkeypatch.setenv("LOCAI_RELEASES_REPO", "attacker/repo")
+    seen = {}
+
+    class _Recorder:
+        def get(self, url, **_kw):
+            seen["url"] = url
+            raise updater.requests.RequestException("stop here")
+
+    with pytest.raises(updater.ReleaseNotFound):
+        updater.latest_release_for("locai-link-llm-stt", session=_Recorder(), platform_tag="linux-x86_64")
+    assert seen["url"].startswith("https://api.github.com/repos/locai-co-uk/locai-link/")
 
 
 # --- bundle_asset_available (OTA pre-flight) ---------------------------------
@@ -1160,6 +1179,34 @@ def test_swap_changed_ui_apps_skips_when_missing_from_payload(tmp_path, monkeypa
     swapped = updater.swap_changed_ui_apps(staging, root, {}, {"companion": "new"})
     assert swapped == []
     assert (root / "companion").read_text() == "OLD"
+
+
+def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    root = tmp_path / "root"
+    root.mkdir()
+
+    # Real darwin branch: companion syncs into /Applications and the install root.
+    assert updater._ui_app_destinations(updater._APP_COMPANION, root) == [
+        Path("/Applications/Locai Link.app"),
+        root / "Locai Link.app",
+    ]
+
+    # Redirect to writable temp dirs, then exercise the dual-destination swap of a
+    # non-empty .app bundle (so the swap-aside path in _install_app runs too).
+    stub_dests = [tmp_path / "Applications" / "Locai Link.app", root / "Locai Link.app"]
+    monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, ir: stub_dests)
+    for d in stub_dests:
+        (d / "Contents").mkdir(parents=True)
+        (d / "Contents" / "Info.plist").write_text("OLD")
+    payload = tmp_path / "extract" / "Locai Link.app" / "Contents"
+    payload.mkdir(parents=True)
+    (payload / "Info.plist").write_text("NEW")
+
+    swapped = updater.swap_changed_ui_apps(tmp_path / "extract", root, {"companion": "old"}, {"companion": "new"})
+    assert swapped == ["companion"]
+    for d in stub_dests:
+        assert (d / "Contents" / "Info.plist").read_text() == "NEW"
 
 
 # --- _version_gt -------------------------------------------------------------

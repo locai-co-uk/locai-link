@@ -513,6 +513,13 @@ def _platform_tag() -> str:
     return f"{os_tag}-{arch_tag}"
 
 
+def _ota_overrides_allowed() -> bool:
+    """Honour the LOCAI_* release overrides only outside a frozen production
+    bundle, or with an explicit opt-in. Stops a hostile or misconfigured env
+    from redirecting a production device's OTA to an attacker-controlled host."""
+    return not running_frozen_bundle() or bool(os.environ.get("LOCAI_ALLOW_OTA_OVERRIDES"))
+
+
 def latest_release_for(
     asset_stem: str,
     *,
@@ -530,11 +537,17 @@ def latest_release_for(
     its own platform's asset.
 
     ``repo`` / ``api_base`` fall back to ``LOCAI_RELEASES_REPO`` /
-    ``LOCAI_RELEASES_API_BASE`` when not passed, so local testing can point the
-    whole OTA path at a stand-in release server (see bundling/serve_local_release.py).
+    ``LOCAI_RELEASES_API_BASE`` for local testing (see bundling/serve_local_release.py),
+    but a frozen production bundle ignores those unless ``LOCAI_ALLOW_OTA_OVERRIDES``
+    is set, so the env can't redirect a real device's OTA.
     """
-    repo = repo or os.environ.get("LOCAI_RELEASES_REPO") or DEFAULT_RELEASES_REPO
-    api_base = api_base or os.environ.get("LOCAI_RELEASES_API_BASE") or "https://api.github.com"
+    allow_env = _ota_overrides_allowed()
+    repo = repo or (os.environ.get("LOCAI_RELEASES_REPO") if allow_env else None) or DEFAULT_RELEASES_REPO
+    api_base = (
+        api_base or (os.environ.get("LOCAI_RELEASES_API_BASE") if allow_env else None) or "https://api.github.com"
+    )
+    if not allow_env and not api_base.startswith("https://"):
+        raise ReleaseNotFound(f"refuse insecure release API base: {api_base!r}")
     ptag = platform_tag or _platform_tag()
     http = session or requests
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases/latest"
@@ -1094,17 +1107,16 @@ def check_update_available(
     per-platform asset from GitHub in ``swap_bundle``. Best-effort: any failure
     (offline, source install, Control error) yields ``(False, None)``.
 
-    ``LOCAI_LATEST_VERSION`` forces the "latest" version for local testing so the
-    update indicator fires without a Control server.
+    ``LOCAI_LATEST_VERSION`` forces the "latest" version for local testing (frozen
+    bundles honour it only with ``LOCAI_ALLOW_OTA_OVERRIDES`` set).
     """
     if not running_frozen_bundle():
         return (False, None)
     try:
         root = install_root or discover_install_root()
         manifest = read_manifest(root)
-        latest = os.environ.get("LOCAI_LATEST_VERSION") or latest_version_from_control(
-            control_base_url or DEFAULT_CONTROL_API_BASE
-        )
+        override = os.environ.get("LOCAI_LATEST_VERSION") if _ota_overrides_allowed() else None
+        latest = override or latest_version_from_control(control_base_url or DEFAULT_CONTROL_API_BASE)
         return (_version_gt(latest, manifest.version), latest)
     except Exception as e:  # noqa: BLE001 — never let the check crash the agent
         logger.debug(f"update check failed: {e}")
@@ -1139,7 +1151,6 @@ def bundle_asset_available(install_root: Path | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 _APP_COMPANION = "companion"
-_APP_SETUP_ASSISTANT = "setup_assistant"
 
 
 def _ui_app_payload_name(key: str) -> str:
@@ -1186,8 +1197,18 @@ def _install_app(src: Path, dest: Path) -> None:
         shutil.copytree(src, tmp, symlinks=True)
     else:
         shutil.copy2(src, tmp)
-    _rm(dest)
-    os.replace(tmp, dest)
+    # os.replace is atomic for files/empty dirs; .app bundles are non-empty dirs
+    # it can't overwrite, so move the old one aside and only drop it once the new
+    # one lands (a crash mid-swap leaves a recoverable .old, not a missing app).
+    try:
+        os.replace(tmp, dest)
+    except OSError:
+        backup = dest.with_name(f".{dest.name}.old")
+        _rm(backup)
+        if dest.exists() or dest.is_symlink():
+            os.replace(dest, backup)
+        os.replace(tmp, dest)
+        _rm(backup)
 
 
 def _restart_ui_app(key: str) -> None:
@@ -1223,15 +1244,15 @@ def swap_changed_ui_apps(
     for key, new_hash in new_apps.items():
         if old_apps.get(key) == new_hash:
             continue  # unchanged — don't disturb the running app
-        name = _ui_app_payload_name(key)
-        src = _locate_in_payload(staging, name)
-        if src is None:
-            logger.warning(f"whole-app OTA: '{key}' changed but '{name}' not in payload; skipping")
-            continue
-        dests = _ui_app_destinations(key, install_root)
-        if not dests:
-            continue
         try:
+            name = _ui_app_payload_name(key)
+            src = _locate_in_payload(staging, name)
+            if src is None:
+                logger.warning(f"whole-app OTA: '{key}' changed but '{name}' not in payload; skipping")
+                continue
+            dests = _ui_app_destinations(key, install_root)
+            if not dests:
+                continue
             for dest in dests:
                 _install_app(src, dest)
             swapped.append(key)

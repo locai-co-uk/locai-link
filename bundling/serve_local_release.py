@@ -6,7 +6,9 @@
 release.
 
 Pairs with the ``LOCAI_RELEASES_API_BASE`` / ``LOCAI_LATEST_VERSION`` overrides
-the updater honours. Typical loop:
+the updater honours. A frozen production bundle ignores those unless
+``LOCAI_ALLOW_OTA_OVERRIDES`` is also set, so the env can't redirect a real
+device's OTA. Typical loop:
 
     # 1. Build the target version (bump pyproject.toml first, tweak the
     #    companion if you want to see it swap), naming it cleanly:
@@ -17,8 +19,8 @@ the updater honours. Typical loop:
 
     # 3. Run the *installed* frozen agent pointed at the local server, then
     #    trigger the update (loopback /update or the companion button):
-    LOCAI_RELEASES_API_BASE=http://localhost:8765 LOCAI_LATEST_VERSION=1.1.1 \
-        ~/.local/share/locai/locai-link run
+    LOCAI_ALLOW_OTA_OVERRIDES=1 LOCAI_RELEASES_API_BASE=http://localhost:8765 \
+        LOCAI_LATEST_VERSION=1.1.1 ~/.local/share/locai/locai-link run
     curl -XPOST localhost:20505/update
 """
 
