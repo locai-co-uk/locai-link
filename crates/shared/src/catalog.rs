@@ -262,8 +262,12 @@ mod tests {
     }
 
     // Set mtime; returns the io result so tests fail loudly when the mtime
-    // precondition can't be established.
+    // precondition can't be established. Opens for write because Windows'
+    // SetFileTime needs a writable handle (a read-only open is Access Denied).
     fn filetime_set(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
-        std::fs::File::open(path)?.set_modified(when)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .set_modified(when)
     }
 }
