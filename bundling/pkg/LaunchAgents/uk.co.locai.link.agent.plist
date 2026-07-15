@@ -21,6 +21,13 @@
     <key>Label</key>
     <string>uk.co.locai.link.agent</string>
 
+    <!-- Group this item under the Locai Link app in macOS Login Items so the
+         runtime and companion show as one "Locai Link" entry (INFRA-369). -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>uk.co.locai.link.companion</string>
+    </array>
+
     <key>ProgramArguments</key>
     <array>
         <string>/Library/Locai/locai-link</string>

@@ -18,6 +18,12 @@
     <key>Label</key>
     <string>uk.co.locai.link.companion</string>
 
+    <!-- Same "Locai Link" grouping in macOS Login Items (INFRA-369). -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>uk.co.locai.link.companion</string>
+    </array>
+
     <key>ProgramArguments</key>
     <array>
         <string>/Applications/Locai Link.app/Contents/MacOS/Locai Link</string>

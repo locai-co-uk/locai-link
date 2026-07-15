@@ -120,9 +120,19 @@ fn encode_segment(s: &str) -> String {
     out
 }
 
+/// Require HTTPS before the device key is attached; an http:// api_url would
+/// leak the bearer token in plaintext. Returns the trimmed base on success.
+fn secure_api_base(api_url: &str) -> Result<&str, String> {
+    let base = api_url.trim_end_matches('/');
+    if !base.starts_with("https://") {
+        return Err(format!("Control API URL must use HTTPS: {api_url}"));
+    }
+    Ok(base)
+}
+
 /// List the device owner's installable models (owned plus globally shared).
 pub fn list_available_models(id: &DeviceIdentity) -> Result<Vec<AvailableModel>, String> {
-    let base = id.api_url.trim_end_matches('/');
+    let base = secure_api_base(&id.api_url)?;
     let url = format!(
         "{base}/agent/{}/available-models",
         encode_segment(&id.device_id)
@@ -141,7 +151,7 @@ pub fn list_available_models(id: &DeviceIdentity) -> Result<Vec<AvailableModel>,
 
 /// Request a device-initiated deploy of `model_id`. Idempotent on Control's side.
 pub fn request_deploy(id: &DeviceIdentity, model_id: &str) -> Result<DeployOutcome, String> {
-    let base = id.api_url.trim_end_matches('/');
+    let base = secure_api_base(&id.api_url)?;
     let url = format!(
         "{base}/agent/{}/models/{}/request-deploy",
         encode_segment(&id.device_id),
@@ -259,6 +269,16 @@ mod tests {
         assert_eq!(encode_segment("abc-123_XYZ.~"), "abc-123_XYZ.~");
         assert_eq!(encode_segment("dev-uuid-1234"), "dev-uuid-1234");
         assert_eq!(encode_segment("a/b?c#d"), "a%2Fb%3Fc%23d");
+    }
+
+    #[test]
+    fn secure_api_base_requires_https() {
+        assert_eq!(
+            secure_api_base("https://api.example/api/v1/").unwrap(),
+            "https://api.example/api/v1"
+        );
+        assert!(secure_api_base("http://api.example/api/v1").is_err());
+        assert!(secure_api_base("ftp://x").is_err());
     }
 
     // Set mtime; returns the io result so tests fail loudly when the mtime

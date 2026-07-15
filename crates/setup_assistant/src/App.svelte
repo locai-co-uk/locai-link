@@ -188,8 +188,9 @@
   });
 
   // Model types this build can serve, from supported_model_types (bundle
-  // manifest plugins). Defaults to LLMs until the fetch resolves.
-  let supportedTypes = $state<string[]>(["language_models"]);
+  // manifest plugins). Empty until resolved, and stays empty on failure so we
+  // fail closed rather than guessing a capability set.
+  let supportedTypes = $state<string[]>([]);
 
   // Servable iff this build ships a plugin for the model's type (INFRA-371), so
   // an LLM-only build hides audio/other models it can't run.
@@ -202,7 +203,7 @@
   // library name "Gemma 4 (X-Small)" and variants (XS, X Small) all match.
   function isRecommended(m: ModelSummary): boolean {
     const n = m.display_name.toLowerCase().replace(/[^a-z0-9]/g, "");
-    return n.includes("gemma") && (n.includes("xs") || n.includes("extrasmall"));
+    return n.includes("gemma4") && (n.includes("xs") || n.includes("extrasmall"));
   }
 
   async function loadModels() {
@@ -210,8 +211,9 @@
     try {
       try {
         supportedTypes = await invoke<string[]>("supported_model_types");
-      } catch {
-        // Keep the LLM default; the list just filters conservatively.
+      } catch (e) {
+        // Fail closed: show nothing rather than guessing a capability set.
+        console.warn("supported_model_types:", e);
       }
       const list = await invoke<ModelSummary[]>("list_models");
       // Servable types only; recommended first, then alphabetical.
