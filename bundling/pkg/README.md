@@ -47,6 +47,8 @@ bundling/pkg/
 # 1. Assemble the payload tree.
 #    Contents end up at /Library/Locai/ on the target.
 STAGING=$(mktemp -d)
+# Copy the runtime tree first so current/manifest.json is present for boot.json.
+cp -R dist/locai-link/.                              "$STAGING/"
 cp crates/target/release/locai-link                 "$STAGING/locai-link"
 # boot.json: inject plugin_set from the bundle manifest (not a raw copy) so the
 # launcher's first-launch fetch targets the asset this build actually is.

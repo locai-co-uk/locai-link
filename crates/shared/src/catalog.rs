@@ -79,8 +79,12 @@ pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
-            newest = Some((mtime, entry.path()));
+        // Tie-break equal mtimes by path: session_<UTC> filenames sort
+        // chronologically, so selection stays deterministic regardless of
+        // read_dir order.
+        let candidate = (mtime, entry.path());
+        if newest.as_ref().is_none_or(|best| candidate > *best) {
+            newest = Some(candidate);
         }
     }
     let (_, path) = newest?;
@@ -100,10 +104,29 @@ pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
     })
 }
 
+/// Percent-encode one URL path segment. RFC 3986 unreserved bytes pass through;
+/// everything else becomes %XX, so a device_id/model_id containing /, ?, or #
+/// can't alter the route.
+fn encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// List the device owner's installable models (owned plus globally shared).
 pub fn list_available_models(id: &DeviceIdentity) -> Result<Vec<AvailableModel>, String> {
     let base = id.api_url.trim_end_matches('/');
-    let url = format!("{base}/agent/{}/available-models", id.device_id);
+    let url = format!(
+        "{base}/agent/{}/available-models",
+        encode_segment(&id.device_id)
+    );
     let resp = HTTP_AGENT
         .get(&url)
         .set("Accept", "application/json")
@@ -120,8 +143,9 @@ pub fn list_available_models(id: &DeviceIdentity) -> Result<Vec<AvailableModel>,
 pub fn request_deploy(id: &DeviceIdentity, model_id: &str) -> Result<DeployOutcome, String> {
     let base = id.api_url.trim_end_matches('/');
     let url = format!(
-        "{base}/agent/{}/models/{model_id}/request-deploy",
-        id.device_id
+        "{base}/agent/{}/models/{}/request-deploy",
+        encode_segment(&id.device_id),
+        encode_segment(model_id)
     );
     let resp = HTTP_AGENT
         .post(&url)
@@ -196,6 +220,40 @@ mod tests {
     fn read_identity_none_when_no_configs_dir() {
         let dir = std::env::temp_dir().join(format!("locai-catalog-empty-{}", std::process::id()));
         assert!(read_identity(&dir).is_none());
+    }
+
+    #[test]
+    fn read_identity_breaks_mtime_tie_by_filename() {
+        let dir = std::env::temp_dir().join(format!("locai-catalog-tie-{}", std::process::id()));
+        let configs = dir.join("configs");
+        fs::create_dir_all(&configs).unwrap();
+        let older = configs.join("session_20260101T000000Z.json");
+        let newer = configs.join("session_20260202T000000Z.json");
+        fs::write(
+            &older,
+            r#"{"identity":{"device_id":"older","api_key":"k","api_url":"https://x/api/v1"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &newer,
+            r#"{"identity":{"device_id":"newer","api_key":"k","api_url":"https://x/api/v1"}}"#,
+        )
+        .unwrap();
+        // Identical mtimes: the timestamped filename must decide.
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        filetime_set(&older, t);
+        filetime_set(&newer, t);
+
+        let id = read_identity(&dir).expect("identity");
+        assert_eq!(id.device_id, "newer");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn encode_segment_passes_unreserved_and_encodes_reserved() {
+        assert_eq!(encode_segment("abc-123_XYZ.~"), "abc-123_XYZ.~");
+        assert_eq!(encode_segment("dev-uuid-1234"), "dev-uuid-1234");
+        assert_eq!(encode_segment("a/b?c#d"), "a%2Fb%3Fc%23d");
     }
 
     // Set mtime without pulling in a dep: reuse std by writing then touching.
