@@ -22,6 +22,10 @@ pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 /// Loopback endpoint that triggers an in-app OTA update (INFRA-353).
 pub const DEFAULT_UPDATE_URL: &str = "http://127.0.0.1:20505/update";
 
+/// Loopback endpoint that pre-registers a queued deployment so the UI shows a
+/// row at 0% before the runtime picks up the DEPLOY_MODEL (INFRA-343).
+pub const DEFAULT_PENDING_URL: &str = "http://127.0.0.1:20505/deployments/pending";
+
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Shared HTTP client so back-to-back polls reuse the connection pool.
@@ -162,6 +166,23 @@ pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String
 /// Dispatches UPDATE_AGENT; the agent restarts onto the new version.
 pub fn trigger_update(url: &str) -> Result<(), String> {
     match HTTP_AGENT.post(url).send_bytes(&[]) {
+        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
+        Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
+        Err(e) => Err(format!("POST {url} failed: {e}")),
+    }
+}
+
+/// Pre-register a deployment as `queued` so its row shows at 0% immediately,
+/// before the runtime processes the DEPLOY_MODEL (INFRA-343). `pipeline_id` is
+/// the model id (the runtime keys deployment progress by it). Best-effort; the
+/// real progress row overwrites this once the runtime advances.
+pub fn mark_deployment_pending(
+    url: &str,
+    pipeline_id: &str,
+    model_name: Option<&str>,
+) -> Result<(), String> {
+    let body = serde_json::json!({ "pipeline_id": pipeline_id, "model_name": model_name });
+    match HTTP_AGENT.post(url).send_json(body) {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
         Ok(resp) => Err(format!("HTTP {} from {url}", resp.status())),
         Err(e) => Err(format!("POST {url} failed: {e}")),
