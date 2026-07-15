@@ -19,11 +19,11 @@ pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:20505/models";
 /// [`DEFAULT_MODELS_URL`] — kept distinct so call sites read as intent.
 pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 
-/// Loopback endpoint that triggers an in-app OTA update (INFRA-353).
+/// Loopback endpoint that triggers an in-app OTA update.
 pub const DEFAULT_UPDATE_URL: &str = "http://127.0.0.1:20505/update";
 
 /// Loopback endpoint that pre-registers a queued deployment so the UI shows a
-/// row at 0% before the runtime picks up the DEPLOY_MODEL (INFRA-343).
+/// row at 0% before the runtime picks up the DEPLOY_MODEL.
 pub const DEFAULT_PENDING_URL: &str = "http://127.0.0.1:20505/deployments/pending";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -47,7 +47,7 @@ pub struct AgentHealth {
     /// predate this field parse as `Vec::new()`.
     #[serde(default)]
     pub deployments: Vec<DeploymentProgress>,
-    /// A newer bundle is available (INFRA-353). `false` on older runtimes.
+    /// A newer bundle is available. `false` on older runtimes.
     #[serde(default)]
     pub update_available: bool,
     /// The latest published version when `update_available`; else `None`.
@@ -162,7 +162,7 @@ pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String
     post_action(base_url, pipeline_id, "cancel-deploy")
 }
 
-/// Ask the agent to update itself to the latest published bundle (INFRA-353).
+/// Ask the agent to update itself to the latest published bundle.
 /// Dispatches UPDATE_AGENT; the agent restarts onto the new version.
 pub fn trigger_update(url: &str) -> Result<(), String> {
     match HTTP_AGENT.post(url).send_bytes(&[]) {
@@ -173,7 +173,7 @@ pub fn trigger_update(url: &str) -> Result<(), String> {
 }
 
 /// Pre-register a deployment as `queued` so its row shows at 0% immediately,
-/// before the runtime processes the DEPLOY_MODEL (INFRA-343). `pipeline_id` is
+/// before the runtime processes the DEPLOY_MODEL. `pipeline_id` is
 /// the model id (the runtime keys deployment progress by it). Best-effort; the
 /// real progress row overwrites this once the runtime advances.
 pub fn mark_deployment_pending(

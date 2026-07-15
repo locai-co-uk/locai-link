@@ -103,7 +103,7 @@ pub struct StatusPoll {
     /// Empty on transient failures — UI treats that as "no models yet".
     models: Vec<ModelInfo>,
     deployments: Vec<DeploymentProgress>,
-    /// A newer bundle is published for this platform (INFRA-353).
+    /// A newer bundle is published for this platform.
     update_available: bool,
     latest_version: Option<String>,
 }
@@ -161,7 +161,7 @@ pub async fn poll_status() -> StatusPoll {
     .expect("poll_status panicked")
 }
 
-/// Trigger the agent's in-app update (INFRA-353). POSTs the loopback
+/// Trigger the agent's in-app update. POSTs the loopback
 /// `/update`; the agent swaps the bundle and relaunches on success.
 #[tauri::command]
 pub fn install_update() -> Result<(), String> {
@@ -187,7 +187,7 @@ pub fn cancel_model_deploy(pipeline_id: String) -> Result<(), String> {
 }
 
 /// List the models this device may install, from Control's device-authenticated
-/// `available-models` endpoint (INFRA-343). Reads the device key + api_url from
+/// `available-models` endpoint. Reads the device key + api_url from
 /// the session config (no user token). `Err` carries a display string so the UI
 /// can show why the list is unavailable (offline, not-yet-claimed device, etc.).
 #[tauri::command]
@@ -202,14 +202,14 @@ pub async fn list_available_models() -> Result<Vec<AvailableModel>, String> {
 }
 
 /// Model types this build can actually serve, derived from the current bundle's
-/// manifest plugins (INFRA-343/371). The UI filters the model lists to these so
+/// manifest plugins. The UI filters the model lists to these so
 /// an LLM-only build never offers audio/other models it can't run.
 #[tauri::command]
 pub fn supported_model_types() -> Vec<String> {
     shared_supported_model_types(&PathBuf::from(install_root()))
 }
 
-/// Ask Control to deploy `model_id` onto this device (INFRA-343). Idempotent on
+/// Ask Control to deploy `model_id` onto this device. Idempotent on
 /// Control's side. On a dispatched/pending outcome, pre-registers a queued row
 /// with the local agent so the download shows at 0% immediately. `model_name`
 /// (the asset filename) labels that row until the runtime reports real progress.

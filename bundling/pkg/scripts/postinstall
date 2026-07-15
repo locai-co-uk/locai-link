@@ -113,7 +113,7 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 # The console user (person driving Installer.app). Resolved before
 # registration: the LS database is per-user, and this script runs as
 # root — registering as root doesn't reliably surface the app for the
-# logged-in user (INFRA-351: app intermittently missing from search).
+# logged-in user (app intermittently missing from search otherwise).
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 
 # Register an .app with Launch Services + Spotlight, as the console
@@ -125,7 +125,7 @@ register_app() {
     # log the real outcome rather than a blanket "ran".
     if [[ -x "$LSREGISTER" ]]; then
         local ok=1
-        # Per-user LS DB (INFRA-351) → prefer the console user, fall back to
+        # Per-user LS DB → prefer the console user, fall back to
         # root. -trusted isn't accepted on every macOS release, so try it then
         # plain before giving up.
         if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then

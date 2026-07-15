@@ -511,7 +511,7 @@ def test_post_invalid_action_returns_404():
         srv.stop()
 
 
-# --- INFRA-353: update check surfaced in snapshot + /update trigger ----------
+# --- update check surfaced in snapshot + /update trigger ----------
 
 
 def test_snapshot_includes_update_fields():

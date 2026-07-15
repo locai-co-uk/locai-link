@@ -192,13 +192,13 @@
   // fail closed rather than guessing a capability set.
   let supportedTypes = $state<string[]>([]);
 
-  // Servable iff this build ships a plugin for the model's type (INFRA-371), so
+  // Servable iff this build ships a plugin for the model's type, so
   // an LLM-only build hides audio/other models it can't run.
   function isServable(m: ModelSummary): boolean {
     return supportedTypes.includes(m.model_type);
   }
 
-  // Gemma 4 XS is the recommended default (INFRA-371). Matched by name until
+  // Gemma 4 XS is the recommended default. Matched by name until
   // Control exposes a dedicated flag. Normalise punctuation first so the real
   // library name "Gemma 4 (X-Small)" and variants (XS, X Small) all match.
   function isRecommended(m: ModelSummary): boolean {

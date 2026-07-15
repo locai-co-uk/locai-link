@@ -123,7 +123,7 @@ fn get_platform() -> String {
 }
 
 /// Model types this build can serve, derived from the installed bundle's manifest
-/// plugins (INFRA-371). The installer list filters to these so an LLM-only build
+/// plugins. The installer list filters to these so an LLM-only build
 /// never offers audio/other models it can't run.
 #[tauri::command]
 fn supported_model_types() -> Vec<String> {

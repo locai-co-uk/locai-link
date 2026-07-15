@@ -121,6 +121,12 @@ cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
 install -m 0755 "$TAURI_DIR/locai-link-setup-assistant" "$ROOT/setup-assistant"
 install -m 0755 "$TAURI_DIR/locai-link-companion"       "$ROOT/companion"
 
+# 2b. App content hashes for whole-app OTA. Written into the
+# tarball's manifest so swap_bundle re-swaps the companion / setup-assistant
+# only when their source changed.
+python3 "$REPO_ROOT/bundling/inject_app_hashes.py" \
+    --manifest "$ROOT/bundle/current/manifest.json" --repo-root "$REPO_ROOT"
+
 # 3. boot.json + systemd + .desktop entries + icons + install/uninstall.
 # plugin_set is injected from manifest.json so the launcher's first-launch
 # fetch targets the asset this build actually is (not the static template).

@@ -29,7 +29,7 @@ HEALTH_PORT = 20505
 # long the UI can be stuck on "Queued".
 QUEUED_TTL_SECONDS = 300
 
-# Periodic "update available" poll (INFRA-353). Initial delay keeps the
+# Periodic "update available" poll. Initial delay keeps the
 # first network call off the startup path; interval is a gentle background poll.
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 UPDATE_CHECK_INITIAL_DELAY_SECONDS = 5
@@ -66,7 +66,7 @@ class HealthState:
         self.transport_endpoint: str | None = None
         self.transport_connected: bool = False
 
-        # Populated by the runtime's periodic update check (INFRA-353).
+        # Populated by the runtime's periodic update check.
         self.update_available: bool = False
         self.latest_version: str | None = None
 
@@ -254,7 +254,7 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 return
 
             if self.path == "/update":
-                # Companion-initiated OTA (INFRA-353): dispatch the same
+                # Companion-initiated OTA: dispatch the same
                 # UPDATE_AGENT the control plane sends, reusing the full
                 # download → verify → flip → re-exec + rollback path.
                 if not state.has_command_handler():
