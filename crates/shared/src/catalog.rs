@@ -194,7 +194,7 @@ mod tests {
         )
         .unwrap();
         let later = std::time::SystemTime::now() + Duration::from_secs(10);
-        filetime_set(&newer, later);
+        filetime_set(&newer, later).unwrap();
 
         let id = read_identity(&dir).expect("identity");
         assert_eq!(id.device_id, "new");
@@ -241,8 +241,13 @@ mod tests {
         .unwrap();
         // Identical mtimes: the timestamped filename must decide.
         let t = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        filetime_set(&older, t);
-        filetime_set(&newer, t);
+        filetime_set(&older, t).unwrap();
+        filetime_set(&newer, t).unwrap();
+        assert_eq!(
+            fs::metadata(&older).unwrap().modified().unwrap(),
+            fs::metadata(&newer).unwrap().modified().unwrap(),
+            "precondition: both sessions must share an mtime for a real tie",
+        );
 
         let id = read_identity(&dir).expect("identity");
         assert_eq!(id.device_id, "newer");
@@ -256,10 +261,9 @@ mod tests {
         assert_eq!(encode_segment("a/b?c#d"), "a%2Fb%3Fc%23d");
     }
 
-    // Set mtime without pulling in a dep: reuse std by writing then touching.
-    fn filetime_set(path: &Path, when: std::time::SystemTime) {
-        // Best-effort; if the platform rejects it the test still asserts on
-        // write-order which the harness preserves.
-        let _ = std::fs::File::open(path).and_then(|f| f.set_modified(when));
+    // Set mtime; returns the io result so tests fail loudly when the mtime
+    // precondition can't be established.
+    fn filetime_set(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
+        std::fs::File::open(path)?.set_modified(when)
     }
 }
