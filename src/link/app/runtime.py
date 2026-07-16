@@ -115,13 +115,18 @@ class AgentRuntime:
             )
         # Health server owns the update-available field; inject the checker.
         # Version check uses the device's api_url (Control); download uses GitHub.
-        from link.app.updater import check_update_available
+        from link.app.updater import check_ui_version_drift, check_update_available
 
         control_base = getattr(agent_config.identity, "api_url", None) if agent_config.identity else None
         self.health_server = HealthServer(
             self.health_state,
             update_checker=lambda: check_update_available(control_base_url=control_base),
         )
+
+        # If a prior OTA moved the runtime ahead but couldn't swap the macOS UI
+        # apps (pre-fix root-owned bundles), prompt a one-time reinstall. No-op
+        # off macOS / on source installs.
+        check_ui_version_drift()
 
         if threading.current_thread() is threading.main_thread():
             try:

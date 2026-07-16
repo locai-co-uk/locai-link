@@ -1194,7 +1194,12 @@ def _install_app(src: Path, dest: Path) -> None:
     tmp = dest.with_name(f".{dest.name}.new")
     _rm(tmp)
     if src.is_dir():
-        shutil.copytree(src, tmp, symlinks=True)
+        if sys.platform == "darwin":
+            # ditto preserves the code signature + xattrs that copytree drops,
+            # so the swapped .app isn't rejected by Gatekeeper as damaged.
+            subprocess.run(["ditto", str(src), str(tmp)], check=True)
+        else:
+            shutil.copytree(src, tmp, symlinks=True)
     else:
         shutil.copy2(src, tmp)
     # os.replace is atomic for files/empty dirs; .app bundles are non-empty dirs
@@ -1211,6 +1216,17 @@ def _install_app(src: Path, dest: Path) -> None:
         _rm(backup)
 
 
+def _macos_console_uid() -> str | None:
+    """UID of the logged-in GUI user, whose launchd ``gui`` domain owns the
+    companion. The OTA process may run in a different context than that session."""
+    try:
+        out = subprocess.run(["stat", "-f%u", "/dev/console"], capture_output=True, text=True, timeout=5)
+        uid = out.stdout.strip()
+        return uid if uid.isdigit() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _restart_ui_app(key: str) -> None:
     """Relaunch the companion so it picks up the swapped binary. Setup Assistant
     only runs during setup, so it has nothing to restart. Best-effort."""
@@ -1218,7 +1234,7 @@ def _restart_ui_app(key: str) -> None:
         return
     try:
         if sys.platform == "darwin":
-            uid = str(os.getuid())
+            uid = _macos_console_uid() or str(os.getuid())
             subprocess.run(
                 ["launchctl", "kickstart", "-k", f"gui/{uid}/uk.co.locai.link.companion"],
                 check=False,
@@ -1232,6 +1248,82 @@ def _restart_ui_app(key: str) -> None:
             )
     except Exception as e:  # noqa: BLE001 - a failed restart shouldn't fail the update
         logger.warning(f"Could not restart companion after update: {e}")
+
+
+# Latest-release download for a fresh reinstall, per platform (the asset name
+# and extension differ by OS/arch). Used when a macOS OTA updated the runtime
+# but couldn't swap the UI apps, so the install can't self-heal over OTA.
+_REINSTALL_EXT = {"darwin": "pkg", "linux": "tar.gz", "win32": "zip"}
+
+
+def _reinstall_url() -> str:
+    """Permanent 'latest' download URL for this host's platform/arch."""
+    ext = _REINSTALL_EXT.get(sys.platform, "pkg")
+    return f"https://github.com/{DEFAULT_RELEASES_REPO}/releases/latest/download/locai-link-{_platform_tag()}.{ext}"
+
+
+def _companion_installed_version(install_root: Path) -> str | None:
+    """Version of the installed companion .app (macOS), or None if unknown."""
+    if sys.platform != "darwin":
+        return None
+    import plistlib
+
+    for app in (Path("/Applications/Locai Link.app"), install_root / "Locai Link.app"):
+        plist = app / "Contents" / "Info.plist"
+        if not plist.exists():
+            continue
+        try:
+            data = plistlib.loads(plist.read_bytes())
+            version = str(data.get("CFBundleShortVersionString") or "").strip()
+            if version:
+                return version
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _notify_reinstall_required(version: str, url: str) -> None:
+    """Best-effort local notification that a reinstall is needed to finish the
+    update. Names the download URL but does not open it — no outbound navigation
+    happens without the user choosing to act."""
+    msg = f"Couldn't finish updating to {version}. Reinstall from {url} to finish."
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{msg}" with title "Locai Link update incomplete"'],
+            check=False,
+            timeout=15,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"reinstall notification failed: {e}")
+
+
+def check_ui_version_drift(install_root: Path | None = None, url: str | None = None) -> None:
+    """Warn once if the macOS UI apps didn't update alongside the runtime.
+
+    A pre-fix install has root-owned app bundles the user-context OTA can't
+    replace, so the runtime moves ahead while the companion stays behind. That
+    can't be healed over OTA, so this prompts a one-time reinstall. Frozen macOS
+    installs only; best-effort; notifies at most once per runtime version.
+    """
+    if not running_frozen_bundle() or sys.platform != "darwin":
+        return
+    try:
+        root = install_root or discover_install_root()
+        runtime_version = read_manifest(root).version
+        companion_version = _companion_installed_version(root)
+        if not companion_version or companion_version == runtime_version:
+            return
+        marker = root / "state" / "ui-drift-notified"
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == runtime_version:
+            return
+        logger.warning(
+            f"UI apps stale after update: runtime={runtime_version}, companion={companion_version}; reinstall needed"
+        )
+        _notify_reinstall_required(runtime_version, url or _reinstall_url())
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(runtime_version, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001 - the drift check must never crash the agent
+        logger.debug(f"ui drift check skipped: {e}")
 
 
 def swap_changed_ui_apps(
@@ -1253,10 +1345,16 @@ def swap_changed_ui_apps(
             dests = _ui_app_destinations(key, install_root)
             if not dests:
                 continue
+            ok_any = False
             for dest in dests:
-                _install_app(src, dest)
-            swapped.append(key)
-            logger.info(f"whole-app OTA: updated '{key}'")
+                try:
+                    _install_app(src, dest)
+                    ok_any = True
+                except Exception as e:  # noqa: BLE001 - one destination failing shouldn't skip the rest
+                    logger.error(f"whole-app OTA: failed to update '{key}' at {dest}: {e}")
+            if ok_any:
+                swapped.append(key)
+                logger.info(f"whole-app OTA: updated '{key}'")
         except Exception as e:  # noqa: BLE001 - one app failing shouldn't abort the rest
             logger.error(f"whole-app OTA: failed to update '{key}': {e}")
     return swapped

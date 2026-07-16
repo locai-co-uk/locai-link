@@ -273,6 +273,20 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
+      - name: Stamp UI app versions
+        # Tauri's config version defaults to a static 0.1.0. Stamp it from
+        # pyproject (the same source the runtime manifest uses) so the installed
+        # .app version matches the runtime version. The updater uses that match
+        # to detect a stale UI after an OTA that couldn't swap the apps.
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_bytes().decode())['project']['version'])")"
+          for conf in crates/companion/src-tauri/tauri.conf.json crates/setup_assistant/src-tauri/tauri.conf.json; do
+            python3 -c "import json,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d['version']=sys.argv[2]; p.write_text(json.dumps(d,indent=2)+chr(10))" "$conf" "$VERSION"
+          done
+          echo "stamped UI app versions to $VERSION"
+
       - name: Build Setup Assistant binary (Linux)
         # --no-bundle: skip .deb/.rpm/AppImage — pack.sh ships the raw
         # binary alongside the runtime bundle in the tarball layout.
