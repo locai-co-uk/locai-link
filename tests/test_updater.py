@@ -1221,6 +1221,37 @@ def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypa
         assert (d / "Contents" / "Info.plist").read_text() == "NEW"
 
 
+def test_swap_changed_ui_apps_partial_destination_failure(tmp_path, monkeypatch):
+    """One destination failing must not skip the others; the app still counts as
+    swapped if at least one destination succeeded."""
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    staging = tmp_path / "extract"
+    staging.mkdir()
+    (staging / "companion").write_text("NEW")
+    root = tmp_path / "root"
+    root.mkdir()
+
+    dest_a = root / "a" / "companion"
+    dest_b = root / "b" / "companion"
+    monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, ir: [dest_a, dest_b])
+
+    attempted = []
+    real_install = updater._install_app
+
+    def _flaky_install(src, dest):
+        attempted.append(dest)
+        if dest == dest_a:
+            raise PermissionError("cannot write first destination")
+        real_install(src, dest)
+
+    monkeypatch.setattr(updater, "_install_app", _flaky_install)
+
+    swapped = updater.swap_changed_ui_apps(staging, root, {"companion": "old"}, {"companion": "new"})
+    assert attempted == [dest_a, dest_b]  # second destination attempted despite the first failing
+    assert swapped == ["companion"]  # succeeded on at least one destination
+    assert dest_b.read_text() == "NEW"
+
+
 # --- check_ui_version_drift (post-OTA stale-UI prompt) -----------------------
 
 

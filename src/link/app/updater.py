@@ -1283,9 +1283,10 @@ def _companion_installed_version(install_root: Path) -> str | None:
 
 
 def _notify_reinstall_required(version: str, url: str) -> None:
-    """Best-effort macOS prompt: a banner plus opening the download, so the user
-    actually gets the reinstall link rather than a message they can't click."""
-    msg = f"Couldn't finish updating to {version}. Opening the download to reinstall."
+    """Best-effort local notification that a reinstall is needed to finish the
+    update. Names the download URL but does not open it — no outbound navigation
+    happens without the user choosing to act."""
+    msg = f"Couldn't finish updating to {version}. Reinstall from {url} to finish."
     try:
         subprocess.run(
             ["osascript", "-e", f'display notification "{msg}" with title "Locai Link update incomplete"'],
@@ -1294,10 +1295,6 @@ def _notify_reinstall_required(version: str, url: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"reinstall notification failed: {e}")
-    try:
-        subprocess.run(["open", url], check=False, timeout=15)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"opening reinstall link failed: {e}")
 
 
 def check_ui_version_drift(install_root: Path | None = None, url: str | None = None) -> None:
