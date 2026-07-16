@@ -33,10 +33,9 @@ class StorageBackend(ABC):
 
 
 class ZenohStorageBackend(StorageBackend):
-    """
-    Directly puts data into the Zenoh cache/network.
-    Technically a network adapter, but implements the Storage interface
-    for transparency in the Publisher component.
+    """Publishes data into the Zenoh network.
+
+    A network adapter exposed through the Storage interface so the Publisher treats it like any backend.
     """
 
     def __init__(self, session):
@@ -70,9 +69,7 @@ class ZenohStorageBackend(StorageBackend):
 
 
 class SQLiteStorageBackend(StorageBackend):
-    """
-    Persists data to a local SQLite database (e.g., for offline buffering).
-    """
+    """Persists data to a local SQLite database (e.g. for offline buffering)."""
 
     def __init__(self, db_path: str = "buffer.db"):
         """Initialises the SQLiteStorageBackend.

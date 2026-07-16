@@ -129,10 +129,8 @@ _DOWNLOAD_TIMEOUT = 30  # seconds per attempt; guards against a stalled CDN
 def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
     """Download ``url`` to ``dest``, retrying transient network failures.
 
-    GitHub's asset CDN occasionally drops the connection mid-transfer
-    ("Remote end closed connection"), notably on Windows runners. Each attempt
-    is bounded by a timeout so a stalled transfer can't hang the install, and
-    only transient transport errors are retried; a 4xx (e.g. 404) fails fast.
+    GitHub's asset CDN can drop connections mid-transfer (esp. Windows). Each
+    attempt is timeout-bounded; only transient errors retry (4xx fails fast).
     Streams to a ``.partial`` sidecar, renamed onto ``dest`` only on success.
     """
     partial = dest.with_suffix(dest.suffix + ".partial")

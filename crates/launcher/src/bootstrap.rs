@@ -1,22 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! First-launch bootstrap (Pattern B): no `current` is installed yet, so
-//! we read `boot.json`, resolve a release asset, download it, verify the
-//! SHA256, extract `versions/<v>/` into the install root, and write the
-//! `current` pointer. The main exec-dispatch loop picks up from there.
+//! First-launch bootstrap (Pattern B): no `current` yet, so read `boot.json`,
+//! resolve a release asset, download it, verify the SHA256, extract
+//! `versions/<v>/` into the install root, and write the `current` pointer.
 //!
 //! Failure mapping:
-//!   * exit 2 — anything we hit the network for and got back: bad SHA,
-//!     missing release asset, disk-full, malformed tarball.
-//!   * exit 3 — couldn't reach the network at all (DNS / connect refused
-//!     / no route). The host UI can use this to render
-//!     "you're offline, retry once connected" specifically.
+//!   * exit 2 — reached a server but the op failed: bad SHA, missing asset,
+//!     disk-full, malformed tarball.
+//!   * exit 3 — couldn't reach the network at all (DNS / connect / no route);
+//!     lets the host UI show an offline-specific "retry once connected".
 //!
-//! This module is the launcher-side mirror of `swap_bundle` in
-//! `src/link/app/updater.py`. We deliberately reimplement the small
-//! download/verify/extract subset in Rust (rather than shelling to
-//! Python) so the launcher stays a single self-contained binary.
+//! Launcher-side mirror of `swap_bundle` in `src/link/app/updater.py` —
+//! reimplemented in Rust so the launcher stays a single self-contained binary.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
@@ -39,7 +35,7 @@ const USER_AGENT: &str = concat!("locai-link-launcher/", env!("CARGO_PKG_VERSION
 const HTTP_TIMEOUT_SECS: u64 = 60;
 const DOWNLOAD_PROGRESS_EVERY_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Bootstrap exit codes (match the host-integration contract in OTA design §4.4).
+/// Bootstrap exit codes — part of the host-integration contract.
 pub const EXIT_BOOTSTRAP_FAILED: u8 = 2;
 pub const EXIT_BOOTSTRAP_NO_INTERNET: u8 = 3;
 
@@ -309,11 +305,9 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Extract the runtime's `versions/<v>/` subtree from the tarball into
-/// `target`. Entries outside that subtree (e.g. the launcher binary at
-/// the tarball root) are deliberately ignored — the launcher we're
-/// running came from the host installer and isn't meant to be auto-
-/// updated.
+/// Extract the tarball's `versions/<v>/` subtree into `target`. Entries
+/// outside it (e.g. the launcher binary at the root) are ignored — the
+/// running launcher comes from the host installer and isn't auto-updated.
 fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
     if target.exists() {
         // A previous failed bootstrap may have left a partial dir; nuke it.

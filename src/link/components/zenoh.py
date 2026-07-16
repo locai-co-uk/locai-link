@@ -80,10 +80,7 @@ class ZenohPublisher(Sink):
 
 @ComponentRegistry.register("zenoh_sub")
 class ZenohListener(Source):
-    """
-    Queue-based Zenoh subscriber.
-    Acts as a Pipeline Source - messages are buffered and returned via __call__().
-    """
+    """Queue-based Zenoh subscriber (pipeline source); buffers messages and returns them via __call__()."""
 
     def __init__(self, session, topic):
         """Initialise ZenohListener.

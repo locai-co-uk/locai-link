@@ -14,10 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class StateManager:
-    """
-    Manages persistence of the Agent's entire configuration and runtime state.
-    Serves as the Single Source of Truth for crash recovery.
-    """
+    """Persists the agent's full config and runtime state; the source of truth for crash recovery."""
 
     # Stores state directly in the main configs folder
     STATE_DIR = Path("configs")

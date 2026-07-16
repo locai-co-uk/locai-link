@@ -93,14 +93,11 @@ class _FakeUpstream:
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                # Emit five SSE chunks with a 200 ms gap between each.
-                # The gap has to be larger than urllib3's read coalescing
-                # threshold (~50 ms in practice) so honest streaming is
-                # observable on the receiving end — if the proxy were
-                # buffering, the chunks would all arrive within a few
-                # milliseconds at the end. Each chunk is padded above
-                # urllib3's read-ahead size so it can't fit two together
-                # into one yielded chunk on the client side.
+                # Five SSE chunks with a 200 ms gap — larger than urllib3's
+                # ~50 ms read-coalescing threshold so honest streaming is
+                # observable (buffering would deliver everything at the end).
+                # Each chunk is padded above urllib3's read-ahead size so two
+                # can't coalesce into one client-side chunk.
                 pad = " " * 200
                 try:
                     for i in range(5):

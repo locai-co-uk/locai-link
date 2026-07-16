@@ -25,10 +25,9 @@ const COMPANION_LABEL: &str = "uk.co.locai.link.companion";
 /// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The first post-boot call can wake a scaled-to-zero backend instance, and a
-/// cold start can exceed HTTP_TIMEOUT — which surfaced as a sign-in "timed out
-/// reading response" that only cleared on manual retry. Give the device-code
-/// request a longer per-attempt budget so a cold start completes in one go.
+/// Longer per-attempt budget for the device-code request: the first post-boot
+/// call can wake a scaled-to-zero backend, and a cold start exceeding
+/// HTTP_TIMEOUT surfaced as a sign-in timeout that only cleared on retry.
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Google-fronted endpoints have been observed to stall on requests without an explicit UA.
@@ -281,12 +280,10 @@ pub struct SignInState {
     inner: Mutex<Option<Session>>,
 }
 
-/// Kick off RFC 8628 device authorization. The first post-boot call to
-/// `/auth/device/code` can hit a cold (scaled-to-zero) backend instance and
-/// time out; uses a longer per-attempt timeout (DEVICE_CODE_TIMEOUT) plus one
-/// backed-off retry on transport errors so a cold start doesn't surface as a
-/// sign-in failure. An *immediate* retry doesn't help — the instance is still
-/// warming — so the retry waits first.
+/// Kick off RFC 8628 device authorization. Uses DEVICE_CODE_TIMEOUT plus one
+/// backed-off retry on transport errors so a cold (scaled-to-zero) backend
+/// doesn't surface as a sign-in failure. The retry waits first — an immediate
+/// one doesn't help while the instance is still warming.
 #[tauri::command]
 async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
     // HTTP + optional retry sleep runs on the blocking pool so the SA
@@ -577,11 +574,10 @@ fn install_agent_config(install_root: String, config: serde_json::Value) -> Resu
         return Err("config from register_device was null — nothing to write".to_string());
     }
 
-    // Backend ships topics like "locai/devices/${identity.device_id}/metrics"
-    // with placeholders unfilled — if we wrote those verbatim the runtime
-    // would pub/sub to literal "${...}" paths. Substitute using the resolved
-    // identity block; unknown placeholders pass through untouched (matches
-    // Python's resolve_templates() so per-emit markers like {cid}/{mid} survive).
+    // Backend ships topics with unfilled `${identity.*}` placeholders; writing
+    // them verbatim would make the runtime pub/sub to literal "${...}" paths.
+    // Substitute from the identity block; unknown placeholders pass through
+    // (matches Python's resolve_templates() so markers like {cid}/{mid} survive).
     let identity = config.get("identity").cloned().unwrap_or_default();
     let context = serde_json::json!({ "identity": identity });
     let config = resolve_config_templates(&config, &context);
@@ -776,15 +772,10 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
     }
 }
 
-/// Block until the freshly-kickstarted agent is reachable AND its Zenoh
-/// transport reports `connected: true`. Without this the Finish flow
-/// races: SA fires `deploy_model` on Control, Control dispatches the
-/// DEPLOY_MODEL over Zenoh, the agent hasn't yet subscribed to its
-/// command topic, and the message is dropped. The user sees Control
-/// accept the deploy but no download ever starts. Retries the poll for
-/// up to ~15 s — the Python runtime cold-starts in a couple of seconds
-/// on macOS but PyInstaller unpack + zenoh handshake can burn more on
-/// a slow disk.
+/// Block until the agent is reachable AND its Zenoh transport reports
+/// `connected: true`. Otherwise Control's DEPLOY_MODEL races the agent's
+/// subscriber setup and the command is dropped (deploy accepted, no download).
+/// Polls up to ~15 s to cover PyInstaller unpack + zenoh handshake on slow disks.
 #[tauri::command]
 async fn wait_for_agent_ready() -> Result<(), String> {
     // 15 s of polling on the main thread froze the SA window; hop onto the
@@ -1052,10 +1043,9 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         }
     }
 
-    // Belt-and-braces: `open -a` the companion so LaunchServices activates it
-    // via NSWorkspace. Idempotent — if kickstart already brought the tray up,
-    // this is a no-op. If kickstart raced or a stale service state suppressed
-    // the launch, this makes the tray icon appear.
+    // Belt-and-braces: `open -a` the companion via LaunchServices. Idempotent —
+    // a no-op if kickstart already raised the tray; recovers a raced or
+    // suppressed launch otherwise.
     for path in [
         "/Applications/Locai Link.app",
         "/Library/Locai/Locai Link.app",
@@ -1352,17 +1342,14 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
 #[tauri::command]
 #[cfg(target_os = "macos")]
 fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
-    // Ignore the frontend-supplied install_root and resolve canonically.
-    // The uninstaller runs `with administrator privileges` — we don't want
-    // an injectable path input on that surface.
+    // Ignore the frontend-supplied install_root and resolve canonically — the
+    // uninstaller runs with admin privileges, so no injectable path on that surface.
     let script = format!("{}/uninstall.sh", resolve_install_root());
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
-    // AppleScript's `quoted form of` is the safe shell-argument escape —
-    // handles single quotes, spaces, backslashes without manual escaping.
-    // Build the AppleScript string with `&` concatenation so the path
-    // literal stays inside AppleScript's own double-quoted-string escape.
+    // AppleScript's `quoted form of` safely escapes the shell argument; `&`
+    // concatenation keeps the path inside AppleScript's own string escaping.
     let escaped_path = script.replace('\\', "\\\\").replace('"', "\\\"");
     let apple_script = format!(
         "do shell script \"/bin/bash \" & quoted form of \"{escaped_path}\" with administrator privileges"

@@ -16,10 +16,9 @@
 #     3. Launches Setup Assistant.app so the user picks up in the
 #        wizard the moment Installer.app's conclusion pane appears.
 #
-# We deliberately do NOT register the runtime or menu-bar LaunchAgents
-# here — the user's "Run at login" choice is captured by Setup Assistant
-# on its Permissions step, so LaunchAgent registration happens on
-# Finish rather than at .pkg install time.
+# We deliberately do NOT register the runtime or LaunchAgents here — the
+# "Run at login" choice is captured by Setup Assistant's Permissions step,
+# so registration happens on Finish, not at .pkg install time.
 #
 # pkgbuild passes these positional args:
 #     $1 — the .pkg's own path (unused)
@@ -47,17 +46,14 @@ if [[ ! -f "$LAUNCHER" ]]; then
     exit 1
 fi
 chmod 755 "$LAUNCHER"
-# Root-owned: the launcher itself never needs write access. Only the
-# launcher binary is locked down; the rest of INSTALL_ROOT stays
-# writeable so the OTA updater (running as the user via the
-# LaunchAgent) can drop new versions under versions/, flip the
-# `current` pointer, and manage its own state.
+# Root-owned: the launcher never needs write access. Only the binary is
+# locked down; the rest of INSTALL_ROOT stays writeable so the OTA updater
+# (running as the user via the LaunchAgent) can drop new versions, flip the
+# `current` pointer, and manage state.
 chown root:wheel "$LAUNCHER"
-# Give the invoking user ownership of the install root itself + the
-# subtrees the runtime + OTA touch. The console user is resolved
-# below; use $SUDO_USER when available (pkg installs run as root via
-# sudo), otherwise fall back to the console user we detect for the
-# Setup Assistant handoff.
+# Give the invoking user ownership of the install root + the subtrees the
+# runtime + OTA touch. Prefer $SUDO_USER (pkg installs run as root via sudo),
+# else fall back to the console user detected for the SA handoff.
 INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
 # LaunchAgents write to $INSTALL_ROOT/logs/*.log — create it here so the
 # first launchctl kickstart doesn't fail on a fresh install.
@@ -73,18 +69,15 @@ fi
 log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
 
 # --- 2. /usr/local/bin/locai symlink ---------------------------------
-# /usr/local/bin exists on macOS 14+ but isn't guaranteed writable in
-# every environment. mkdir -p is safe; ln -sf overwrites an existing
-# symlink (e.g. from a previous install) without complaint.
+# /usr/local/bin isn't guaranteed writable everywhere. mkdir -p is safe; ln
+# -sf overwrites an existing symlink from a previous install.
 mkdir -p "$(dirname "$CLI_SYMLINK")"
 ln -sf "$LAUNCHER" "$CLI_SYMLINK"
 log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
 
 # --- 3. Uninstaller script -------------------------------------------
-# uninstall.sh is shipped in the payload but permissions on files
-# copied by pkgbuild aren't guaranteed to be executable. Force 755 so
-# both the tray menu ("Uninstall Locai Link…" via osascript) and
-# `sudo /Library/Locai/uninstall.sh` from Terminal can invoke it.
+# pkgbuild doesn't guarantee copied files are executable. Force 755 so both
+# the tray menu (osascript) and `sudo /Library/Locai/uninstall.sh` can run it.
 if [[ -f "$UNINSTALLER" ]]; then
     chmod 755 "$UNINSTALLER"
     chown root:wheel "$UNINSTALLER"
@@ -94,26 +87,20 @@ else
 fi
 
 # --- 4. /Applications/Locai Link.app ---------------------------------
-# The companion menubar app is the user-facing entry point ("open
-# Locai Link" in Applications / Spotlight / Launchpad). We used to
-# symlink from /Applications back into /Library/Locai; macOS's Launch
-# Services doesn't index symlinked .apps into Applications the same
-# way it does real bundles, so Spotlight can't find the app and the
-# Finder Applications sidebar view misses it.
+# The companion menubar app is the user-facing entry point. We copy (not
+# symlink) it: Launch Services doesn't index symlinked .apps like real
+# bundles, so Spotlight / the Finder Applications view would miss it.
 #
-# `ditto` is the macOS-native copy for .apps — preserves the code
-# signature, resource forks, and extended attributes that a plain
-# `cp -R` may drop. First remove any stale copy/symlink so a repeat
-# install lands cleanly.
-# lsregister lives outside PATH; used to force LaunchServices to pick up the
-# freshly-copied .app (Launchpad + `open -a` + Spotlight-via-LS all read this).
-# mdimport alone updates the Spotlight metadata store but not the LS database.
+# `ditto` preserves the code signature, resource forks, and xattrs a plain
+# `cp -R` may drop. Remove any stale copy/symlink first so a repeat install
+# lands cleanly.
+# lsregister (outside PATH) forces LaunchServices to pick up the copied .app;
+# mdimport updates only the Spotlight store, not the LS database.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
-# The console user (person driving Installer.app). Resolved before
-# registration: the LS database is per-user, and this script runs as
-# root — registering as root doesn't reliably surface the app for the
-# logged-in user (app intermittently missing from search otherwise).
+# The console user (driving Installer.app). The LS database is per-user and
+# this runs as root — registering as root doesn't reliably surface the app
+# for the logged-in user (intermittently missing from search).
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 
 # Register an .app with Launch Services + Spotlight, as the console
@@ -167,11 +154,9 @@ else
 fi
 
 # --- 4b. /Applications/Locai Setup Assistant.app ---------------------
-# The SA is also copied into /Applications so it's discoverable via
-# Spotlight / Launchpad / the Applications sidebar. Users who quit the
-# auto-launched SA before completing setup would otherwise have no way
-# to reopen it (the /Library/Locai copy isn't indexed by Launch
-# Services).
+# Copied into /Applications so it's discoverable via Spotlight / Launchpad.
+# Otherwise a user who quit the auto-launched SA before finishing couldn't
+# reopen it (the /Library/Locai copy isn't indexed by Launch Services).
 if [[ -d "$SETUP_ASSISTANT" ]]; then
     rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
     ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
@@ -185,13 +170,11 @@ else
 fi
 
 # --- 5. Launch Setup Assistant ---------------------------------------
-# The postinstall runs as root; the Setup Assistant must run as the
-# actual user for LaunchAgent registration and Keychain access to work
-# correctly. CONSOLE_USER was resolved above; hand off with "sudo -u".
+# postinstall runs as root, but the SA must run as the actual user for
+# LaunchAgent registration + Keychain access. Hand off via "sudo -u".
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
-    # No graphical console user (headless install, remote deployment,
-    # or the user is running via Terminal as root). Skip the launch —
-    # the user can open Setup Assistant.app manually from Applications.
+    # No graphical console user (headless / remote / root Terminal). Skip the
+    # launch — the user can open Setup Assistant.app manually.
     log "no console user detected; skipping Setup Assistant auto-launch"
     exit 0
 fi

@@ -21,17 +21,15 @@
 # UI, `launchctl kickstart gui/$uid` picking up the new binary, OAuth + device
 # registration against live Control, notarized .pkg double-click Gatekeeper.
 #
-# Cost: the fast swap gate runs every PR to main; the heavier macOS jobs run
-# post-merge + nightly (if: not a PR) so unrelated PRs don't pay for them.
+# Runs on every PR to main (and push to main) — the point is to block a
+# regression before it merges, not to find it post-merge when the damage is done.
 
 name: E2E
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 5 * * *"
   push:
-    branches: ["main", "dev"]
+    branches: ["main"]
   pull_request:
     branches: ["main"]
 
@@ -72,11 +70,10 @@ jobs:
           DEVICE_MODE: "LOCAL"
         run: uv run pytest tests/test_ota_e2e_macos.py -v -m ci
 
-  # Real install ownership + reinstall data-preservation. Post-merge + nightly.
+  # Real install ownership + reinstall data-preservation.
   macos-lifecycle:
     name: macOS install → reinstall
     runs-on: macos-latest
-    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v7
 
@@ -173,11 +170,10 @@ jobs:
           [ "$v2" = "1.1.0" ] || { echo "::error::/Applications companion not refreshed (got $v2)"; exit 1; }
           echo "reinstall preserved data and refreshed both app copies"
 
-  # Uninstall cleans everything and refuses to run without root. Post-merge + nightly.
+  # Uninstall cleans everything and refuses to run without root.
   macos-uninstall:
     name: macOS uninstall roundtrip
     runs-on: macos-latest
-    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v7
         with:

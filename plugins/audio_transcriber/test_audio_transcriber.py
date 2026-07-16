@@ -30,10 +30,8 @@ TEST_PORT = 8098
 def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
     """Download url to path, retrying on 429 with jittered backoff.
 
-    Returns True on success, False when all retries are exhausted on a
-    429 (i.e. the CDN is rate-limiting us — a transient infrastructure
-    condition the caller should skip on, not fail). Non-429 HTTP errors
-    still raise, so genuine bugs surface immediately.
+    Returns False when 429 retries are exhausted (CDN rate-limiting — caller
+    should skip). Non-429 HTTP errors raise so genuine bugs surface.
     """
     for attempt in range(1, max_attempts + 1):
         try:
@@ -65,10 +63,8 @@ def setup_teardown():
         if not path.exists():
             print(f"\nDownloading {label} to {path}...")
             if not _download(url, path, label):
-                # Skip rather than fail — HuggingFace / raw.githubusercontent
-                # both rate-limit anonymous downloads and a 429 shouldn't
-                # block unrelated PR merges. Mirrors language_model /
-                # audio_classifier test behaviour.
+                # Skip, don't fail — CDN rate-limiting (429) shouldn't block
+                # unrelated PR merges.
                 pytest.skip(f"{label} CDN unavailable; skipping audio_transcriber integration test.")
 
     yield

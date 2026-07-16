@@ -111,10 +111,8 @@ _DOWNLOAD_TIMEOUT = 30  # seconds per attempt; guards against a stalled CDN
 def _download_with_retry(url: str, dest: Path, attempts: int = 3) -> None:
     """Download ``url`` to ``dest``, retrying transient network failures.
 
-    GitHub's asset CDN occasionally drops the connection mid-transfer
-    ("Remote end closed connection"), notably on Windows runners. Each attempt
-    is bounded by a timeout so a stalled transfer can't hang the install, and
-    only transient transport errors are retried; a 4xx (e.g. 404) fails fast.
+    GitHub's asset CDN can drop connections mid-transfer (esp. Windows). Each
+    attempt is timeout-bounded; only transient errors retry (4xx fails fast).
     Streams to a ``.partial`` sidecar, renamed onto ``dest`` only on success.
     """
     partial = dest.with_suffix(dest.suffix + ".partial")
@@ -248,12 +246,11 @@ def _detect_gpu_cmake_flags():
 
 
 def _missing_build_prerequisites():
-    """Return a list of (tool, install_hint) pairs for any build tools that are missing.
+    """Return (tool, install_hint) pairs for any missing build tools.
 
-    whisper.cpp doesn't ship Linux/macOS prebuilt server binaries, so building from
-    source is the only supported path on those platforms — and the user needs git
-    and cmake on PATH. Surfacing the full list (and the platform-appropriate install
-    command) is more useful than reporting them one at a time mid-build.
+    whisper.cpp has no Linux/macOS prebuilt server binaries, so source builds
+    need git and cmake on PATH. Reporting the full list at once is more useful
+    than failing one at a time mid-build.
     """
     system = platform.system()
     if system == "Darwin":

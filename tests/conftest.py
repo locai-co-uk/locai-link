@@ -14,23 +14,13 @@ def _block_real_browser_opens(  # pyright: ignore[reportUnusedFunction]
     # static analysis can't see the callsite.)
     """Guard rail: no test may launch the system browser for real.
 
-    `_device_flow` calls `_open_in_browser(url)` when
-    `_running_detached()` is True. Under pytest stdin isn't a TTY, so
-    the detached branch fires — which shells out to `xdg-open` /
-    `open` / `cmd start` on the actual URL. Without this guard,
-    running the suite spams the user's browser with device-flow URLs.
-
-    Intercept `subprocess.run` at the boundary: any command with an
-    argv[0] of `xdg-open` / `open` / `cmd` (the three OS-level
-    browser openers) returns a success `CompletedProcess` without
-    executing. Everything else runs normally.
-
-    Deliberately does NOT mock `_open_in_browser` or
-    `_running_detached` themselves — the four tests in
-    `test_onboarding.py` that exercise those helpers directly need
-    them to run natively. Tests that mock `subprocess.run` themselves
-    (e.g. per-platform browser-opener tests) still work because their
-    per-test patch stacks on top of this one.
+    Under pytest stdin isn't a TTY, so ``_device_flow`` takes the detached
+    branch and shells out to ``xdg-open``/``open``/``cmd`` on a real URL,
+    spamming the user's browser. This intercepts ``subprocess.run`` and no-ops
+    those three openers (returning a success ``CompletedProcess``); everything
+    else runs normally. Deliberately does NOT mock ``_open_in_browser`` or
+    ``_running_detached`` — the onboarding tests exercise those natively, and
+    per-test ``subprocess.run`` patches still stack on top of this one.
     """
     real_run = subprocess.run
 

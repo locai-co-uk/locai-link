@@ -3,19 +3,13 @@
 
 """Lifecycle tests for SwapManager's ownership of ServingProxy.
 
-These pin the contract that fixes the "port already in use; refusing to
-start" flap: the proxy is owned by SwapManager (one per public port),
-brought up with llama-swap, kept across model reloads, and torn down
-BEFORE llama-swap when the last model goes — so two servings on one
-port can never race two proxies for the same socket.
+Pins the contract: one proxy per public port, brought up with llama-swap,
+kept across model reloads, and torn down BEFORE llama-swap when the last
+model goes — so two servings on one port never race for the socket. The
+proxy is universal (also the telemetry capture point), so the no-CORS
+fixture still gets one; only ACAO emission is gated on ``allowed_origins``.
 
-ServingProxy is universal — present whether or not CORS is configured —
-because it's also the inference-telemetry capture point. The no-CORS
-fixture still gets a proxy; only the ACAO-emitting behavior is gated on
-``allowed_origins`` (covered by the serving_proxy test suite, not here).
-
-llama-swap and the real proxy socket are mocked out so the test needs no
-binaries and binds no real ports.
+llama-swap and the proxy socket are mocked, so no binaries and no real ports.
 """
 
 from __future__ import annotations

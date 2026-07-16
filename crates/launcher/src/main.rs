@@ -3,20 +3,16 @@
 
 //! Stable launcher for the locai-link runtime.
 //!
-//! Lives at `<install_root>/locai-link`. On start, resolves the `current`
-//! pointer at `<install_root>/current` (a symlink to `versions/<v>/`) — or
-//! the `CURRENT` text file fallback on hosts where symlinks aren't
-//! permitted — and spawns `<install_root>/versions/<v>/locai-link-runtime`
-//! with the original argv. Stays alive while the runtime runs; on exit
-//! code 42 (the runtime's "restart for update" signal) re-resolves
-//! `current` and respawns.
+//! Lives at `<install_root>/locai-link`. Resolves the `current` pointer
+//! (`current` symlink → `versions/<v>/`, or the `CURRENT` text file where
+//! symlinks aren't permitted) and spawns the runtime with the original argv.
+//! Exit code 42 = the runtime's "restart for update" signal: re-resolve
+//! `current` (an OTA may have flipped it) and respawn.
 //!
-//! Post-update rollback: when the runtime exits non-zero shortly after an
-//! OTA flip (within `POST_UPDATE_HEALTH_WINDOW_SECS`), the launcher reads
-//! the `.update-pending` stamp the OTA wrote, points `current` back at the
-//! previous version, deletes the stamp, and respawns. The window puts a
-//! ceiling on how long a "still proving itself" flip is rollback-eligible —
-//! after that, normal crash behaviour applies and the stamp is cleared.
+//! Rollback: a non-zero runtime exit within `POST_UPDATE_HEALTH_WINDOW_SECS`
+//! of an OTA flip reads the `.update-pending` stamp, points `current` back at
+//! the previous version, clears the stamp, and respawns. Past the window,
+//! normal crash handling applies and the stamp is cleared.
 
 mod boot;
 mod bootstrap;

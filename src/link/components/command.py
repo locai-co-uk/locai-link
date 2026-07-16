@@ -17,14 +17,11 @@ logger = logging.getLogger(__name__)
 
 @ComponentRegistry.register("command")
 class AgentCommand(Sink):
-    """
-    Routes pipeline data directly to the Agent Runtime's command handler.
+    """Routes pipeline data to the runtime's command handler.
 
-    Bounded `id` dedup deque rejects duplicates silently. The same command can
-    reach this sink twice when the runtime drains a Firestore backlog over HTTP
-    and a live Zenoh inbox sample for the same id arrives in parallel - the
-    dedup window lets `mark_seen()` pre-populate from the HTTP response so the
-    live sample is recognised and dropped.
+    A bounded `id` dedup deque drops duplicates silently: the same command can
+    arrive twice (HTTP backlog drain + live Zenoh sample), so `mark_seen()`
+    pre-populates the window from the HTTP response and the live duplicate is dropped.
     """
 
     def __init__(self, callback, dedup_window: int = 2000):

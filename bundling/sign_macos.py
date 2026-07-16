@@ -126,19 +126,13 @@ def codesign_bundle(bundle: Path, identity: str, entitlements: Path) -> None:
     if not mach_o_files:
         raise SystemExit("No Mach-O files found — is this actually a built bundle?")
 
-    # Sign every binary individually so dylibs deep inside the tree get
-    # hardened runtime. --force overwrites any existing ad-hoc signature
-    # PyInstaller may have applied to its bootloader. The leaves-first
-    # sort means the top-level executable (locai-link/locai-link) is the
-    # last file signed in the walk; we deliberately do NOT then run an
-    # "outer" codesign on the bundle directory because a PyInstaller
-    # onedir output is a plain directory, not an .app bundle. On a plain
-    # directory `codesign --sign X dist/locai-link/` re-signs the main
-    # executable a second time with a --identifier override, which
-    # produced a notarisation-invalid signature on the previous
-    # iteration (Apple's log: "The signature of the binary is invalid."
-    # against locai-link.zip/locai-link/locai-link). Individual signing
-    # of every Mach-O is sufficient for notarisation of onedir bundles.
+    # Sign each binary individually so deep dylibs get hardened runtime.
+    # --force overwrites PyInstaller's ad-hoc bootloader signature. Leaves-first
+    # means the top-level executable is signed last. We deliberately do NOT then
+    # run an "outer" codesign on the bundle dir: a PyInstaller onedir output is a
+    # plain directory, not an .app, and re-signing it with an --identifier
+    # override produced a notarisation-invalid signature ("The signature of the
+    # binary is invalid."). Individual signing suffices for onedir bundles.
     for binary in mach_o_files:
         _run(
             [
@@ -155,11 +149,9 @@ def codesign_bundle(bundle: Path, identity: str, entitlements: Path) -> None:
             ]
         )
 
-    # Sanity check on the main executable — catches signature mismatches
-    # before we waste 10 minutes on Apple's notarisation queue. We verify
-    # the top-level binary specifically because that's the file Apple's
-    # Gatekeeper checks on launch; --strict ensures no per-architecture
-    # slice is unsigned in a fat binary.
+    # Verify the top-level binary (the file Gatekeeper checks on launch) before
+    # wasting ~10 min in Apple's queue. --strict catches an unsigned slice in a
+    # fat binary.
     main_exe = bundle / bundle.name
     if not main_exe.exists():
         # Some onedir layouts name the main exe identically to the bundle
@@ -191,22 +183,13 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
             ]
         )
 
-        # notarytool --wait blocks until Apple returns Accepted/Invalid.
-        # Two distinct failure modes to handle:
-        #
-        #  (a) notarytool itself fails to run (network, auth, Apple service
-        #      outage, submission too large). Exits non-zero, may not
-        #      produce JSON. Need to surface whatever it wrote.
-        #
-        #  (b) Submission reaches Apple and gets a verdict, but the verdict
-        #      is `Invalid` (signature problem, missing entitlement, etc.).
-        #      notarytool exits 0 in this case — Apple considers the
-        #      SUBMISSION successful, just the verdict is negative. We
-        #      detect this by parsing --output-format json's status field.
-        #
-        # check=False so we handle the exit code ourselves; both stdout
-        # and stderr always get echoed so CI logs show the diagnostic
-        # without a separate manual notarytool-log fetch.
+        # notarytool --wait blocks until Accepted/Invalid. Two failure modes:
+        #  (a) notarytool fails to run (network/auth/outage/too-large): exits
+        #      nonzero, maybe no JSON — surface whatever it wrote.
+        #  (b) reaches a verdict but it's Invalid: notarytool exits 0 (the
+        #      SUBMISSION succeeded), so detect it via the JSON status field.
+        # check=False to handle the exit code ourselves; echo both streams so CI
+        # logs carry Apple's diagnostic without a separate fetch.
         result = _run(
             [
                 "xcrun",
@@ -232,10 +215,9 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
             logger.info("notarytool stderr:\n%s", result.stderr)
 
         if result.returncode != 0:
-            # Failure mode (a): notarytool couldn't reach a verdict. The
-            # echoed stdout/stderr above contains Apple's diagnostic — read
-            # the build log to triage. Common causes: transient Apple-side
-            # 5xx (retry usually works), corrupt zip, expired API key.
+            # Failure mode (a): no verdict. Diagnostic is in the echoed output
+            # above. Common causes: transient Apple 5xx (retry), corrupt zip,
+            # expired API key.
             raise SystemExit(
                 f"notarytool submit exited with code {result.returncode} before "
                 f"producing a verdict. See stdout/stderr above for the cause."
@@ -254,9 +236,8 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
         logger.info("Notarytool verdict: status=%s id=%s", status, submission_id)
 
         if status != "Accepted":
-            # Fetch Apple's diagnostic log inline so CI shows the
-            # rejection reason without a separate manual `notarytool log`
-            # round-trip. The log lists each file Apple objected to and why.
+            # Fetch Apple's diagnostic log inline (lists each objected-to file)
+            # so CI shows the reason without a manual `notarytool log` round-trip.
             logger.error("Notarisation rejected — fetching diagnostic log.")
             _run(
                 [
@@ -278,23 +259,13 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
                 f"See the log output above for per-file objections."
             )
 
-    # Attempt to staple the notarisation ticket onto the bundle so first-
-    # launch works without contacting Apple. This is BEST-EFFORT for our
-    # distribution shape: `xcrun stapler` only supports container formats
-    # it knows how to write into (.app bundles, .dmg disk images, .pkg
-    # installers). A PyInstaller onedir output is a plain directory —
-    # stapler has nowhere to embed the ticket and exits with code 73.
-    #
-    # Skipping the staple is safe here because:
-    #   - The bundle is notarised. Apple's database knows it's accepted.
-    #   - On first launch with internet present, Gatekeeper queries that
-    #     database online and accepts the binary. End users see no warning.
-    #   - Link's first action on every device is registering with the
-    #     control plane, which requires network — so the online-lookup
-    #     path is always available.
-    #
-    # If we ever wrap the onedir in a .dmg or .pkg, stapling THAT outer
-    # container will succeed and bake the ticket in for offline launches.
+    # Staple the ticket so first launch works offline. BEST-EFFORT: stapler only
+    # writes into .app/.dmg/.pkg; a PyInstaller onedir is a plain dir, so it
+    # exits 73. Skipping is safe here — the bundle is notarised, and on first
+    # launch (which always has network, since Link registers with the control
+    # plane immediately) Gatekeeper accepts it via online lookup. Wrapping the
+    # onedir in a .dmg/.pkg later would let stapling that container bake the
+    # ticket in for offline launches.
     try:
         _run(["xcrun", "stapler", "staple", str(bundle)], check=False)
         # Validate only runs cleanly if staple succeeded; same skip
@@ -319,16 +290,12 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
         # anything unexpected and continue to spctl.
         logger.warning("Stapler step raised unexpectedly: %s. Continuing.", exc)
 
-    # Final Gatekeeper assessment — same check macOS does on first launch.
-    # IMPORTANT: target the main executable directly, NOT the bundle
-    # directory. spctl against a directory treats it as a `.app` bundle
-    # and expects Contents/Resources/, which a PyInstaller onedir output
-    # doesn't have; it then fails with "code has no resources but
-    # signature indicates they must be present". The canonical Gatekeeper
-    # check for a CLI binary is against the Mach-O itself.
-    #
-    # With internet present, spctl resolves notarisation status from
-    # Apple's servers even when the bundle isn't stapled.
+    # Final Gatekeeper assessment (what macOS does on first launch).
+    # IMPORTANT: target the main executable, NOT the bundle dir — spctl treats a
+    # directory as a .app and expects Contents/Resources/, failing with "code
+    # has no resources but signature indicates they must be present". The
+    # canonical check for a CLI binary is against the Mach-O itself. With
+    # internet, spctl resolves notarisation from Apple even when unstapled.
     main_exe = bundle / bundle.name
     if not main_exe.exists():
         # Fall back to the shallowest signed Mach-O if the bundle's main
@@ -350,12 +317,10 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
     if spctl.returncode == 0:
         logger.info("Notarisation + spctl assessment passed.")
     else:
-        # spctl can fail for environment reasons unrelated to trust
-        # (notarisation database propagation lag, network gating the
-        # online lookup, etc.). The authoritative signal that end users
-        # will trust the bundle is notarytool's "Accepted" verdict above,
-        # which Apple's servers will return to Gatekeeper on user-side
-        # first launch. Log loudly but don't fail the build.
+        # spctl can fail for reasons unrelated to trust (notarisation DB lag,
+        # network). The authoritative signal is notarytool's "Accepted" verdict
+        # above, which Gatekeeper honours on the user's first launch. Log
+        # loudly, don't fail the build.
         logger.warning(
             "spctl --assess exited %d. Notarisation was Accepted by Apple "
             "(see verdict above), so end-user Gatekeeper will still pass on "

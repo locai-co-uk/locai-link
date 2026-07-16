@@ -4,12 +4,9 @@
 #
 # Locai Link installer for Linux (per-user, no sudo).
 #
-# Lays down the Rust launcher + PyInstaller-bundled runtime under
-# versions/ + a `current` symlink + the Setup Assistant and companion
-# binaries + boot.json + service units, all under ~/.local/share/locai/.
-# Service activation is deferred to the Setup Assistant on Finish —
-# it enables the systemd user units according to the "Start at login"
-# toggle.
+# Lays down the launcher + bundled runtime, GUI binaries, boot.json, and
+# service units under ~/.local/share/locai/. Service activation is deferred
+# to the Setup Assistant on Finish (per the "Start at login" toggle).
 #
 # Layout after install:
 #
@@ -29,19 +26,13 @@
 #     ~/.config/systemd/user/locai-link-{agent,companion}.service
 #     ~/.local/share/applications/locai-{link,setup-assistant}.desktop
 #
-# Payload discovery (see resolve_paths):
+# Payload discovery (see resolve_paths): either an extracted release tarball
+# (install.sh next to bundle/ + binaries) or a local repo checkout (picks up
+# dist/locai-link/ + crates/target/release/ for iteration without packing).
 #
-#   * Extracted release tarball — install.sh sits next to `bundle/`,
-#     Tauri binaries, boot.json, systemd/, applications/.
-#   * Local repo checkout — this script is at bundling/linux/install.sh
-#     and picks up dist/locai-link/ + crates/target/release/ from the
-#     repo root. Enables `./install.sh` iteration without packing.
-#
-# Curl-from-URL note: this script is self-contained once the payload
-# is next to it. Real `curl … | bash` still needs (a) CI that packs
-# the tarball on tag push (see bundling/linux/pack.sh) and uploads to
-# GitHub Releases, and (b) a stable hosted URL for install.sh itself.
-# Neither is set up yet.
+# Curl-from-URL note: self-contained once the payload is next to it. Real
+# `curl … | bash` still needs CI packing on tag push (see pack.sh) + a stable
+# hosted URL for install.sh. Neither is set up yet.
 set -euo pipefail
 
 INSTALL_ROOT="${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}"
@@ -69,11 +60,9 @@ ICONS_SRC=""       # dir with 32x32.png / 128x128.png / 128x128@2x.png
 BOOT_JSON=""
 
 resolve_paths() {
-    # Case 1 — extracted tarball. pack.sh writes install.sh next to a
-    # `bundle/` subdir + Tauri binaries renamed to `setup-assistant` +
-    # `companion` (no `locai-link-` prefix) + boot.json + systemd/ +
-    # applications/ + icons/. Fall through to the repo-source case if
-    # the shape doesn't match.
+    # Case 1 — extracted tarball: install.sh sits next to bundle/ + Tauri
+    # binaries renamed setup-assistant/companion (no locai-link- prefix) +
+    # boot.json + systemd/ + applications/ + icons/. Fall through if no match.
     if [[ -d "$SCRIPT_DIR/bundle" && -f "$SCRIPT_DIR/setup-assistant" ]]; then
         BUNDLE_DIR="$SCRIPT_DIR/bundle"
         SA_BIN="$SCRIPT_DIR/setup-assistant"
@@ -85,11 +74,9 @@ resolve_paths() {
         return
     fi
 
-    # Case 2 — local repo checkout, install.sh at bundling/linux/.
-    # Expect `bundling/build.py` and `cargo tauri build --no-bundle`
-    # to have been run first. Cargo target names carry the crate prefix.
-    # Icons come straight from the SA crate's tauri icons/ dir; the
-    # companion has an identical brand set so we don't need both.
+    # Case 2 — local repo checkout. Expects build.py + `cargo tauri build
+    # --no-bundle` run first; cargo target names carry the crate prefix.
+    # Icons come from the SA crate (companion shares the same brand set).
     local repo_root
     repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
     if [[ -f "$repo_root/dist/locai-link/locai-link" ]]; then
@@ -134,10 +121,8 @@ LAUNCHER_BIN="$BUNDLE_DIR/locai-link"
 mkdir -p "$INSTALL_ROOT/configs" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/systemd"
 
 # 1. Runtime bundle: launcher + versions/ + current + manifest etc.
-# Straight `cp -a` preserves the `current` symlink and everything
-# else about the bundle exactly. --no-target-directory + trailing /.
-# variant to copy CONTENTS of BUNDLE_DIR into INSTALL_ROOT rather than
-# nesting a locai-link/ subdir.
+# `cp -a …/.` preserves the `current` symlink and copies CONTENTS into
+# INSTALL_ROOT rather than nesting a locai-link/ subdir.
 cp -a "$BUNDLE_DIR"/. "$INSTALL_ROOT"/
 log "runtime bundle copied to $INSTALL_ROOT"
 
@@ -155,29 +140,23 @@ install -m 0755 "$SCRIPT_DIR/uninstall.sh" "$INSTALL_ROOT/uninstall.sh"
 log "tauri binaries + boot.json + uninstall.sh installed"
 
 # --- systemd units (staged, not activated) ----------------------------
-# Stage the source .service files under $INSTALL_ROOT/systemd/; the
-# Setup Assistant copies them into the user's systemd domain on Finish
-# and enables them per the "Start at login" toggle. Staging here (vs
-# writing directly to ~/.config/systemd/user/) means the toggle
-# actually controls behavior — if we enabled at install time, unchecking
-# on Finish would be too late.
+# Stage .service files under $INSTALL_ROOT/systemd/; the Setup Assistant
+# copies them into the user's systemd domain on Finish, per the "Start at
+# login" toggle. Staged (not written to ~/.config/systemd/user/ now) so the
+# toggle controls behavior — enabling at install time would ignore it.
 install -m 0644 "$UNITS_DIR/locai-link-agent.service"     "$INSTALL_ROOT/systemd/"
 install -m 0644 "$UNITS_DIR/locai-link-companion.service" "$INSTALL_ROOT/systemd/"
 log "systemd units staged at $INSTALL_ROOT/systemd/"
 
 # --- .desktop entries -------------------------------------------------
-# Menu integration so "Locai Link" is discoverable in the user's app
-# launcher (GNOME activities overview, KDE Kickoff, dmenu, rofi, etc.).
-# Locai Link's Exec= is `systemctl --user start locai-link-companion.service`
-# — idempotent by design. If the companion isn't running, systemd
-# starts it; if it is, the call is a no-op and the existing tray
-# instance keeps going.
+# Menu integration so "Locai Link" is discoverable in the app launcher.
+# Exec= is `systemctl --user start locai-link-companion.service` —
+# idempotent: starts the companion if down, no-op if already running.
 mkdir -p "$DESKTOP_DIR"
-# Substitute `@HOME@` with the real home dir at copy time. The .desktop
-# spec doesn't define a portable home-dir field code — `%h` is a
-# KDE-only extension, GNOME/xdg-open treat it as a literal — so the
-# only reliable answer is an absolute path baked in per-user at install
-# time. `sed | install /dev/stdin` avoids leaving a tmp file behind.
+# Substitute `@HOME@` with the real home dir at copy time: the .desktop spec
+# has no portable home-dir field code (`%h` is KDE-only), so an absolute path
+# baked in per-user is the only reliable option. `install /dev/stdin` avoids
+# leaving a tmp file behind.
 for entry in locai-link.desktop locai-setup-assistant.desktop; do
     sed "s|@HOME@|$HOME|g" "$DESKTOPS_DIR/$entry" \
         | install -m 0644 /dev/stdin "$DESKTOP_DIR/$entry"
@@ -189,10 +168,9 @@ fi
 log "menu entries installed to $DESKTOP_DIR"
 
 # --- Icons ------------------------------------------------------------
-# `.desktop` files reference `Icon=locai-link` (a themed icon name);
-# without a matching PNG in the hicolor theme, launchers show a
-# placeholder. Copy the SA-crate icons into the user hicolor tree in
-# the sizes their launcher will actually look up.
+# `.desktop` files reference `Icon=locai-link` (themed name); without a
+# matching PNG in the hicolor theme, launchers show a placeholder. Copy the
+# SA-crate icons into the user hicolor tree at the sizes launchers look up.
 ICON_ROOT="$HOME/.local/share/icons/hicolor"
 if [[ -d "$ICONS_SRC" ]]; then
     for size in 32 128; do
@@ -217,14 +195,12 @@ else
 fi
 
 # --- Launch Setup Assistant ------------------------------------------
-# The wizard picks up from here — sign-in, models, permissions
-# (including the "start at login" toggle that enables the systemd
-# units), and Finish. Backgrounded so this script returns immediately.
+# The wizard picks up from here (sign-in, models, permissions incl. the
+# "start at login" toggle, Finish). Backgrounded so this script returns.
 
 log "launching Setup Assistant…"
-# WebKit's DMABUF renderer errors out on many Wayland setups (Nvidia,
-# some Intel), and forcing GDK_BACKEND=x11 sidesteps the DE-dependent
-# Wayland window story. Also baked into locai-link-companion.service.
+# WebKit's DMABUF renderer breaks on many Wayland setups (Nvidia, some
+# Intel); GDK_BACKEND=x11 sidesteps it. Also set in the companion service.
 WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=x11 \
     nohup "$INSTALL_ROOT/setup-assistant" >/dev/null 2>&1 &
 disown

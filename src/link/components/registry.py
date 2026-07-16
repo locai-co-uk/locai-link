@@ -48,10 +48,7 @@ class Sink(Component):
 
 
 class ComponentRegistry:
-    """
-    Singleton registry mapping type names to component classes.
-    Components register themselves using the @register decorator.
-    """
+    """Maps type names to component classes; components self-register via @register."""
 
     _components: dict[str, type] = {}
     _installed_plugins: set[str] = set()

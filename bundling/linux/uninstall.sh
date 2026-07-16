@@ -4,15 +4,13 @@
 #
 # Locai Link uninstaller for Linux.
 #
-# Stops + disables both systemd user units, removes their .service
-# files, and deletes the install root. No sudo required (matches the
-# no-sudo install).
+# Stops + disables both systemd user units, removes their .service files, and
+# deletes the install root. No sudo (matches the no-sudo install). Invoked
+# directly (~/.local/share/locai/uninstall.sh) or from the companion's
+# Preferences → Advanced → Uninstall button.
 #
-# Invoked either directly (`~/.local/share/locai/uninstall.sh`) or
-# from the companion's Preferences → Advanced → Uninstall button.
-#
-# The device stays registered in Control after uninstall; operators
-# who want it fully gone should delete the device row in Control.
+# The device stays registered in Control after uninstall; delete the device
+# row in Control to fully remove it.
 set -uo pipefail
 
 INSTALL_ROOT="${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}"
@@ -23,24 +21,21 @@ log() {
     echo "[locai-uninstall] $*"
 }
 
-# Refuse to run `rm -rf` unless the directory looks like an actual Locai
-# install root — must contain boot.json (dropped by install.sh). Positive
-# check catches arbitrary paths like LOCAI_INSTALL_ROOT=$HOME/... that a
-# blocklist can't enumerate.
+# Refuse `rm -rf` unless the dir looks like a real Locai install root (has
+# boot.json, dropped by install.sh). A positive check catches arbitrary
+# LOCAI_INSTALL_ROOT paths a blocklist can't enumerate.
 if [[ ! -f "$INSTALL_ROOT/boot.json" ]]; then
     log "refusing to remove '$INSTALL_ROOT': not a Locai install root (no boot.json)"
     exit 1
 fi
 
 # --- 1. Stop + disable user services (best-effort) --------------------
-# `disable --now` stops and prevents auto-start in one call. Failures
-# (unit not enabled, already gone, etc.) are non-fatal — we just want
-# to make sure they're not running before we delete the binary.
+# `disable --now` stops and prevents auto-start in one call. Failures are
+# non-fatal — just ensure nothing's running before we delete the binary.
 systemctl --user disable --now locai-link-companion.service 2>/dev/null || true
 systemctl --user disable --now locai-link-agent.service     2>/dev/null || true
 
-# Belt-and-braces: bootout equivalent — kill anything that's still
-# running under our binary paths.
+# Belt-and-braces: kill anything still running under our binary paths.
 pkill -f "$INSTALL_ROOT/companion"       2>/dev/null || true
 pkill -f "$INSTALL_ROOT/setup-assistant" 2>/dev/null || true
 

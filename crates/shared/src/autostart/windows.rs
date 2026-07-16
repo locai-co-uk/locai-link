@@ -3,14 +3,10 @@
 
 //! Windows autostart stub.
 //!
-//! Real implementation writes to
-//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` — a REG_SZ
-//! value keyed on `app_id` whose data is the quoted `exec_path`. That
-//! runs the exe once per user session at logon.
-//!
-//! Lands when the Windows shipping target moves onto the roadmap; the
-//! stub keeps [`crate::autostart`]'s API stable so the companion
-//! doesn't grow a macOS-only autostart path in the meantime.
+//! Real implementation writes a REG_SZ under
+//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, keyed on `app_id`
+//! with the quoted `exec_path` as data — runs the exe once per logon. Stub
+//! keeps [`crate::autostart`]'s API stable until the Windows target lands.
 
 use std::io;
 use std::path::Path;

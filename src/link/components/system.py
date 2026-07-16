@@ -19,10 +19,7 @@ logger = logging.getLogger(__name__)
 
 @ComponentRegistry.register("system_monitor")
 class SystemMonitor(Source):
-    """
-    Collects system metrics.
-    Acts as a Pipeline Source.
-    """
+    """Collects system metrics as a pipeline source."""
 
     # Registry of available keys for validation/reference
     AVAILABLE_METRICS = {"cpu_usage", "ram_usage", "storage_available_gb", "temperature_celsius"}

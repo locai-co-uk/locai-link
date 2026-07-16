@@ -3,14 +3,10 @@
 
 //! Linux autostart stub.
 //!
-//! Real implementation writes a freedesktop.org autostart entry to
-//! `~/.config/autostart/<app_id>.desktop`. That file is picked up by
-//! any compliant desktop (GNOME, KDE, XFCE, Cinnamon…) at login and
-//! results in `Exec=<exec_path>` being run once.
-//!
-//! Lands when the Linux shipping target moves onto the roadmap; the
-//! stub keeps [`crate::autostart`]'s API stable so the companion
-//! doesn't grow a macOS-only autostart path in the meantime.
+//! Real implementation writes a freedesktop.org autostart entry at
+//! `~/.config/autostart/<app_id>.desktop` — any compliant desktop runs
+//! `Exec=<exec_path>` once at login. Stub keeps [`crate::autostart`]'s API
+//! stable until the Linux shipping target lands.
 
 use std::io;
 use std::path::Path;
