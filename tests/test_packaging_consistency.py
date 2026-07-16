@@ -14,7 +14,7 @@ swap_changed_ui_apps actually fires (a stable hash would skip the swap).
 from __future__ import annotations
 
 import plistlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import inject_app_hashes
 
@@ -25,7 +25,9 @@ PKG = REPO_ROOT / "bundling" / "pkg"
 LAUNCH_AGENTS = PKG / "LaunchAgents"
 
 # Canonical macOS install root — the single value all three artifacts must use.
-MACOS_INSTALL_ROOT = Path("/Library/Locai")
+# PurePosixPath (not Path) so str() yields forward slashes on any host, incl.
+# the Windows CI runner, matching the POSIX paths stored in the plists.
+MACOS_INSTALL_ROOT = PurePosixPath("/Library/Locai")
 COMPANION_LABEL = "uk.co.locai.link.companion"
 
 
