@@ -1287,9 +1287,22 @@ def _notify_reinstall_required(version: str, url: str) -> None:
     update. Names the download URL but does not open it — no outbound navigation
     happens without the user choosing to act."""
     msg = f"Couldn't finish updating to {version}. Reinstall from {url} to finish."
+    title = "Locai Link update incomplete"
     try:
+        # Pass msg/title as osascript args (argv), not interpolated into the
+        # AppleScript source, so URL/text content can't alter the program.
         subprocess.run(
-            ["osascript", "-e", f'display notification "{msg}" with title "Locai Link update incomplete"'],
+            [
+                "osascript",
+                "-e",
+                "on run argv",
+                "-e",
+                "display notification (item 1 of argv) with title (item 2 of argv)",
+                "-e",
+                "end run",
+                msg,
+                title,
+            ],
             check=False,
             timeout=15,
         )
