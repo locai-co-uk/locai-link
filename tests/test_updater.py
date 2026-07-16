@@ -1181,11 +1181,11 @@ def test_swap_changed_ui_apps_skips_when_missing_from_payload(tmp_path, monkeypa
     assert (root / "companion").read_text() == "OLD"
 
 
-def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypatch):
+def test_swap_changed_ui_apps_macos_updates_install_root(tmp_path, monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "darwin")
 
     # On darwin _install_app copies via `ditto`, which isn't present off macOS;
-    # emulate it with copytree so the dual-destination logic is what's tested.
+    # emulate it with copytree so the swap logic is what's tested.
     import shutil as _shutil
 
     def _fake_run(cmd, *a, **k):
@@ -1198,27 +1198,21 @@ def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypa
     root = tmp_path / "root"
     root.mkdir()
 
-    # Real darwin branch: companion syncs into /Applications and the install root.
-    assert updater._ui_app_destinations(updater._APP_COMPANION, root) == [
-        Path("/Applications/Locai Link.app"),
-        root / "Locai Link.app",
-    ]
+    # macOS OTA targets only the user-owned install-root copy (the /Applications
+    # copy is pkg-managed and can't be rewritten unprivileged).
+    assert updater._ui_app_destinations(updater._APP_COMPANION, root) == [root / "Locai Link.app"]
 
-    # Redirect to writable temp dirs, then exercise the dual-destination swap of a
-    # non-empty .app bundle (so the swap-aside path in _install_app runs too).
-    stub_dests = [tmp_path / "Applications" / "Locai Link.app", root / "Locai Link.app"]
-    monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, ir: stub_dests)
-    for d in stub_dests:
-        (d / "Contents").mkdir(parents=True)
-        (d / "Contents" / "Info.plist").write_text("OLD")
+    # Non-empty .app bundle so the swap-aside path in _install_app runs too.
+    dest = root / "Locai Link.app"
+    (dest / "Contents").mkdir(parents=True)
+    (dest / "Contents" / "Info.plist").write_text("OLD")
     payload = tmp_path / "extract" / "Locai Link.app" / "Contents"
     payload.mkdir(parents=True)
     (payload / "Info.plist").write_text("NEW")
 
     swapped = updater.swap_changed_ui_apps(tmp_path / "extract", root, {"companion": "old"}, {"companion": "new"})
     assert swapped == ["companion"]
-    for d in stub_dests:
-        assert (d / "Contents" / "Info.plist").read_text() == "NEW"
+    assert (dest / "Contents" / "Info.plist").read_text() == "NEW"
 
 
 def test_swap_changed_ui_apps_partial_destination_failure(tmp_path, monkeypatch):

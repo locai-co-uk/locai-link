@@ -1163,11 +1163,15 @@ def _ui_app_payload_name(key: str) -> str:
 
 
 def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
-    """Every installed copy of the app to keep in sync on this platform."""
+    """Installed app copy the OTA can update. On macOS this is the install-root
+    copy (user-owned, so the user-context OTA can replace it); the LaunchAgent
+    runs that copy. The /Applications copy is pkg-managed for discoverability —
+    the OTA can't rewrite it (writing inside /Applications needs admin) so it's
+    left alone and refreshed on the next pkg install."""
     if sys.platform == "darwin":
         if key == _APP_COMPANION:
-            return [Path("/Applications/Locai Link.app"), install_root / "Locai Link.app"]
-        return [Path("/Applications/Locai Setup Assistant.app"), install_root / "Setup Assistant.app"]
+            return [install_root / "Locai Link.app"]
+        return [install_root / "Setup Assistant.app"]
     if sys.platform == "win32":
         return []  # no companion OTA on Windows yet
     name = "companion" if key == _APP_COMPANION else "setup-assistant"
@@ -1235,10 +1239,13 @@ def _restart_ui_app(key: str) -> None:
     try:
         if sys.platform == "darwin":
             uid = _macos_console_uid() or str(os.getuid())
-            subprocess.run(
+            # Fire-and-forget: kickstart -k can block, and the update must not
+            # hang on it. Detach so it completes after the runtime exits to relaunch.
+            subprocess.Popen(
                 ["launchctl", "kickstart", "-k", f"gui/{uid}/uk.co.locai.link.companion"],
-                check=False,
-                timeout=15,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         elif sys.platform.startswith("linux"):
             subprocess.run(
@@ -1263,12 +1270,14 @@ def _reinstall_url() -> str:
 
 
 def _companion_installed_version(install_root: Path) -> str | None:
-    """Version of the installed companion .app (macOS), or None if unknown."""
+    """Version of the running companion .app (macOS), or None if unknown. Checks
+    the install-root copy first — that's the one the LaunchAgent runs and the OTA
+    updates — so drift reflects the live UI, not the pkg-managed /Applications copy."""
     if sys.platform != "darwin":
         return None
     import plistlib
 
-    for app in (Path("/Applications/Locai Link.app"), install_root / "Locai Link.app"):
+    for app in (install_root / "Locai Link.app", Path("/Applications/Locai Link.app")):
         plist = app / "Contents" / "Info.plist"
         if not plist.exists():
             continue
