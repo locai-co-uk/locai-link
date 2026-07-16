@@ -1,12 +1,51 @@
 # Changelog
 
+<!-- Each version entry leads with a short bullet summary. Those bullets are
+published verbatim as the GitHub release notes by .github/workflows/release.yml,
+so write them for the reader of the release. Keep pending work under
+[Unreleased] and rename it to the version on release. Detail goes in the ###
+sections below the summary. -->
+
+## [Unreleased]
+
+- End-to-end update coverage: install → update → reinstall → uninstall now
+  runs in CI on macOS, so update regressions are caught before release instead
+  of on a user's Mac.
+
+### Added — E2E update tests (`.github/workflows/e2e.yml`, `tests/`)
+
+- `macos-ota-e2e` asserts the on-disk app version actually changes after an OTA
+  (real `ditto` swap), gating every PR to main.
+- `macos-lifecycle` runs the real `postinstall` as root and asserts the
+  root→user ownership handoff the swap depends on, then reinstall-over-top
+  preserves models and session data.
+- Cross-artifact + hash-gating unit tests guard that the LaunchAgent, updater,
+  and postinstall agree on where the app lives, and that a version bump changes
+  the app hash so the swap actually fires.
+
+## [1.1.1]
+
+- macOS whole-app OTA reliably swaps the desktop apps: the update relaunches
+  the install-root companion copy the LaunchAgent actually starts.
+- A stale UI after an incomplete update is detected and prompts a reinstall, so
+  a device can't silently sit on a new runtime behind an old UI.
+
+### Fixed — macOS whole-app OTA (`src/link/app/updater.py`, `bundling/pkg/`)
+
+- The companion LaunchAgent and the OTA now target the user-owned install-root
+  copy (`/Library/Locai/Locai Link.app`), not the admin-owned `/Applications`
+  copy the user-context updater can't rewrite.
+- The post-update companion relaunch is fire-and-forget, so a slow
+  `launchctl kickstart` can't hang the update.
+- Added a one-time drift check + reinstall prompt when the UI apps can't be
+  swapped over OTA.
+
 ## [1.1.0]
 
-Whole-app over-the-air updates and in-app model downloads. Updating a
-device now refreshes the menu-bar companion and the Setup Assistant
-alongside the runtime, and macOS gains a working OTA path for the first
-time. The companion can also pull new models on demand, without
-rerunning the Setup Assistant.
+- Whole-app OTA: updates refresh the menu-bar companion and Setup Assistant
+  alongside the runtime, and macOS gets a working OTA path for the first time.
+- The companion can pull new models on demand, without rerunning the Setup
+  Assistant.
 
 ### Added — Whole-app OTA (`src/link/app/updater.py`)
 
