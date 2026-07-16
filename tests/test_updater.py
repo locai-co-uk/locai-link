@@ -1183,6 +1183,18 @@ def test_swap_changed_ui_apps_skips_when_missing_from_payload(tmp_path, monkeypa
 
 def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "darwin")
+
+    # On darwin _install_app copies via `ditto`, which isn't present off macOS;
+    # emulate it with copytree so the dual-destination logic is what's tested.
+    import shutil as _shutil
+
+    def _fake_run(cmd, *a, **k):
+        if cmd and cmd[0] == "ditto":
+            _shutil.copytree(cmd[1], cmd[2], symlinks=True)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(updater.subprocess, "run", _fake_run)
+
     root = tmp_path / "root"
     root.mkdir()
 
@@ -1207,6 +1219,48 @@ def test_swap_changed_ui_apps_macos_updates_both_destinations(tmp_path, monkeypa
     assert swapped == ["companion"]
     for d in stub_dests:
         assert (d / "Contents" / "Info.plist").read_text() == "NEW"
+
+
+# --- check_ui_version_drift (post-OTA stale-UI prompt) -----------------------
+
+
+def test_check_ui_version_drift_notifies_once_on_mismatch(tmp_path, monkeypatch):
+    root = _setup_install_root(tmp_path, "1.1.1")
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+    monkeypatch.setattr(updater, "_companion_installed_version", lambda r: "1.1.0")
+    calls = []
+    monkeypatch.setattr(updater, "_notify_reinstall_required", lambda v, u: calls.append((v, u)))
+
+    updater.check_ui_version_drift()
+    updater.check_ui_version_drift()  # marker → second call is a no-op
+    assert len(calls) == 1
+    version, url = calls[0]
+    assert version == "1.1.1"
+    assert url == updater._reinstall_url()  # platform-correct download link
+    assert url.endswith(".pkg")  # macOS asset (sys.platform patched to darwin)
+    assert (root / "state" / "ui-drift-notified").read_text().strip() == "1.1.1"
+
+
+def test_check_ui_version_drift_quiet_when_matched(tmp_path, monkeypatch):
+    root = _setup_install_root(tmp_path, "1.1.1")
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+    monkeypatch.setattr(updater, "_companion_installed_version", lambda r: "1.1.1")
+    calls = []
+    monkeypatch.setattr(updater, "_notify_reinstall_required", lambda v, u: calls.append(v))
+    updater.check_ui_version_drift()
+    assert calls == []
+
+
+def test_check_ui_version_drift_noop_when_not_frozen(monkeypatch):
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: False)
+    called = []
+    monkeypatch.setattr(updater, "_notify_reinstall_required", lambda v, u: called.append(v))
+    updater.check_ui_version_drift()
+    assert called == []
 
 
 # --- _version_gt -------------------------------------------------------------

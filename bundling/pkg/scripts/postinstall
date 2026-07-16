@@ -154,6 +154,12 @@ register_app() {
 if [[ -d "$COMPANION_APP" ]]; then
     rm -rf "$COMPANION_SYMLINK"
     ditto "$COMPANION_APP" "$COMPANION_SYMLINK"
+    # The OTA runs as the user (LaunchAgent) and must own the bundles to replace
+    # them on update, same as versions/. Without this the whole-app OTA can't swap
+    # the companion and the UI stays on the old build.
+    if [[ "$INSTALL_USER" != "root" ]]; then
+        chown -R "$INSTALL_USER:staff" "$COMPANION_APP" "$COMPANION_SYMLINK"
+    fi
     log "companion copied: $COMPANION_APP -> $COMPANION_SYMLINK"
     register_app "$COMPANION_SYMLINK"
 else
@@ -169,6 +175,9 @@ fi
 if [[ -d "$SETUP_ASSISTANT" ]]; then
     rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
     ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
+    if [[ "$INSTALL_USER" != "root" ]]; then
+        chown -R "$INSTALL_USER:staff" "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
+    fi
     log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
     register_app "$SETUP_ASSISTANT_IN_APPLICATIONS"
 else
