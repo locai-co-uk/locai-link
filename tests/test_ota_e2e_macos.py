@@ -168,23 +168,7 @@ def _serve_release(*, repo: str, asset: str, tar_bytes: bytes, version: str):
     sha_name = f"{asset}.sha256"
     sha_body = f"{hashlib.sha256(tar_bytes).hexdigest()}  {asset}\n".encode()
 
-    with socketserver.TCPServer(("127.0.0.1", 0), None) as probe:
-        port = probe.server_address[1]
-    base = f"http://127.0.0.1:{port}"
-    latest = json.dumps(
-        {
-            "tag_name": f"v{version}",
-            "assets": [
-                {"name": asset, "browser_download_url": f"{base}/{asset}"},
-                {"name": sha_name, "browser_download_url": f"{base}/{sha_name}"},
-            ],
-        }
-    ).encode()
-    routes = {
-        f"/repos/{repo}/releases/latest": (latest, "application/json"),
-        f"/{asset}": (tar_bytes, "application/gzip"),
-        f"/{sha_name}": (sha_body, "text/plain"),
-    }
+    routes: dict[str, tuple[bytes, str]] = {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_a):  # quiet
@@ -202,7 +186,25 @@ def _serve_release(*, repo: str, asset: str, tar_bytes: bytes, version: str):
             self.end_headers()
             self.wfile.write(body)
 
-    httpd = socketserver.TCPServer(("127.0.0.1", port), Handler)
+    # Bind once on port 0 — no gap between picking a free port and binding it.
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    latest = json.dumps(
+        {
+            "tag_name": f"v{version}",
+            "assets": [
+                {"name": asset, "browser_download_url": f"{base}/{asset}"},
+                {"name": sha_name, "browser_download_url": f"{base}/{sha_name}"},
+            ],
+        }
+    ).encode()
+    routes.update(
+        {
+            f"/repos/{repo}/releases/latest": (latest, "application/json"),
+            f"/{asset}": (tar_bytes, "application/gzip"),
+            f"/{sha_name}": (sha_body, "text/plain"),
+        }
+    )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:

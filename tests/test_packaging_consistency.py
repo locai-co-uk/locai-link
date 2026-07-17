@@ -59,12 +59,22 @@ def test_agent_launchagent_points_at_launcher():
     assert plist["WorkingDirectory"] == str(MACOS_INSTALL_ROOT)
 
 
-def test_restart_label_matches_companion_plist():
-    """updater kickstarts gui/<uid>/<label> — <label> must be the plist's Label."""
+def test_restart_targets_companion_plist_label(monkeypatch):
+    """The service _restart_ui_app kickstarts must be gui/<uid>/<the plist Label>.
+    Assert the generated launchctl command, not the updater source text."""
     label = _load_plist("uk.co.locai.link.companion.plist")["Label"]
     assert label == COMPANION_LABEL
-    src = (REPO_ROOT / "src" / "link" / "app" / "updater.py").read_text(encoding="utf-8")
-    assert COMPANION_LABEL in src
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(updater.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    updater._restart_ui_app("companion")
+
+    kickstarts = [c for c in calls if c[:3] == ["launchctl", "kickstart", "-k"]]
+    assert any(c[-1] == f"gui/501/{label}" for c in kickstarts), calls
 
 
 def test_payload_names_match_release_workflow(monkeypatch):

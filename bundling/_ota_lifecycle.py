@@ -22,6 +22,13 @@ from pathlib import Path
 ASSET_STEM = "locai-link-llm-stt"
 
 
+# Real bundle identifiers per app, so a swapped .app carries its own identity.
+_APP_IDENTIFIERS = {
+    "Locai Link": "uk.co.locai.link.companion",
+    "Setup Assistant": "uk.co.locai.link.setup-assistant",
+}
+
+
 def make_app(path: str, version: str, executable: str, marker: str) -> None:
     p = Path(path)
     (p / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
@@ -32,7 +39,7 @@ def make_app(path: str, version: str, executable: str, marker: str) -> None:
                 "CFBundleShortVersionString": version,
                 "CFBundleVersion": version,
                 "CFBundleExecutable": executable,
-                "CFBundleIdentifier": "uk.co.locai.link.companion",
+                "CFBundleIdentifier": _APP_IDENTIFIERS.get(executable, "uk.co.locai.link.companion"),
             }
         )
     )
