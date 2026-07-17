@@ -21,7 +21,7 @@ use tauri_plugin_opener::OpenerExt;
 
 /// Install root. Mirrored in the Setup Assistant's `get_install_root` —
 /// a change here has to travel to both.
-fn install_root() -> String {
+pub(crate) fn install_root() -> String {
     #[cfg(target_os = "macos")]
     {
         "/Library/Locai".to_string()

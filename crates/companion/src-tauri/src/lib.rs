@@ -160,6 +160,21 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // Publish our running build version so the runtime's post-OTA drift
+            // check can tell whether the companion actually relaunched onto the
+            // new build (a swapped .app whose relaunch silently failed leaves the
+            // runtime ahead of the live UI). Best-effort.
+            {
+                let version = app.package_info().version.to_string();
+                let vpath = std::path::Path::new(&preferences::install_root())
+                    .join("state")
+                    .join("companion-running-version");
+                if let Some(parent) = vpath.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&vpath, version);
+            }
+
             // Accessory activation policy is the load-bearing switch that keeps
             // this off the Dock and out of Cmd-Tab; tauri.conf's `visible: false`
             // isn't enough on macOS.

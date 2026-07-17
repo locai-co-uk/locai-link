@@ -1231,6 +1231,9 @@ def _macos_console_uid() -> str | None:
         return None
 
 
+_COMPANION_LABEL = "uk.co.locai.link.companion"
+
+
 def _restart_ui_app(key: str) -> None:
     """Relaunch the companion so it picks up the swapped binary. Setup Assistant
     only runs during setup, so it has nothing to restart. Best-effort."""
@@ -1238,15 +1241,7 @@ def _restart_ui_app(key: str) -> None:
         return
     try:
         if sys.platform == "darwin":
-            uid = _macos_console_uid() or str(os.getuid())
-            # Fire-and-forget: kickstart -k can block, and the update must not
-            # hang on it. Detach so it completes after the runtime exits to relaunch.
-            subprocess.Popen(
-                ["launchctl", "kickstart", "-k", f"gui/{uid}/uk.co.locai.link.companion"],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            _restart_companion_macos()
         elif sys.platform.startswith("linux"):
             subprocess.run(
                 ["systemctl", "--user", "restart", "locai-link-companion.service"],
@@ -1255,6 +1250,43 @@ def _restart_ui_app(key: str) -> None:
             )
     except Exception as e:  # noqa: BLE001 - a failed restart shouldn't fail the update
         logger.warning(f"Could not restart companion after update: {e}")
+
+
+def _restart_companion_macos() -> None:
+    """Relaunch the companion, mirroring the Setup Assistant's proven sequence:
+    kickstart in place; if the service isn't reachable in this domain (stale /
+    legacy-domain registration), rebootstrap from the installed plist and retry;
+    fall back to LaunchServices. Each launchctl call is bounded so a hung
+    kickstart can't stall the update."""
+    uid = _macos_console_uid() or str(os.getuid())
+    service = f"gui/{uid}/{_COMPANION_LABEL}"
+    plist = Path.home() / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
+
+    def _lc(*args: str) -> int:
+        try:
+            return subprocess.run(["launchctl", *args], check=False, timeout=10).returncode
+        except subprocess.TimeoutExpired:
+            return 1  # treat a hang as failure and move on — never block the update
+
+    # Non-destructive first: kickstart a live service in place.
+    ok = _lc("kickstart", "-k", service) == 0
+    if not ok:
+        # Not reachable in this domain — refresh the registration and retry.
+        _lc("bootout", service)
+        _lc("bootstrap", f"gui/{uid}", str(plist))
+        ok = _lc("kickstart", "-k", service) == 0
+    if not ok:
+        # Last resort: LaunchServices. Prefer the OTA-owned install-root copy
+        # (the one we de-quarantine), then the pkg-managed /Applications copy.
+        for app in (Path("/Library/Locai/Locai Link.app"), Path("/Applications/Locai Link.app")):
+            if app.exists():
+                subprocess.Popen(
+                    ["open", "-a", str(app)],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                break
 
 
 # Latest-release download for a fresh reinstall, per platform (the asset name
@@ -1291,6 +1323,19 @@ def _companion_installed_version(install_root: Path) -> str | None:
     return None
 
 
+def _companion_running_version(install_root: Path) -> str | None:
+    """Version the *running* companion published at launch (state file), or None
+    when absent (pre-fix companion). This reflects the live process — unlike the
+    on-disk bundle, which reads new right after a swap even if the old companion
+    is still running because the relaunch silently failed."""
+    marker = install_root / "state" / "companion-running-version"
+    try:
+        version = marker.read_text(encoding="utf-8").strip()
+        return version or None
+    except OSError:
+        return None
+
+
 def _notify_reinstall_required(version: str, url: str) -> None:
     """Best-effort local notification that a reinstall is needed to finish the
     update. Names the download URL but does not open it — no outbound navigation
@@ -1319,20 +1364,37 @@ def _notify_reinstall_required(version: str, url: str) -> None:
         logger.warning(f"reinstall notification failed: {e}")
 
 
-def check_ui_version_drift(install_root: Path | None = None, url: str | None = None) -> None:
-    """Warn once if the macOS UI apps didn't update alongside the runtime.
+# Settle window for the drift check: a just-relaunched companion needs a moment
+# to publish its running version. Only spent when a mismatch is seen (the failure
+# path), so a healthy update pays nothing.
+_DRIFT_SETTLE_TRIES = 3
+_DRIFT_SETTLE_SECONDS = 1.5
 
-    A pre-fix install has root-owned app bundles the user-context OTA can't
-    replace, so the runtime moves ahead while the companion stays behind. That
-    can't be healed over OTA, so this prompts a one-time reinstall. Frozen macOS
-    installs only; best-effort; notifies at most once per runtime version.
+
+def check_ui_version_drift(install_root: Path | None = None, url: str | None = None) -> None:
+    """Warn once if the macOS companion UI didn't update alongside the runtime.
+
+    Compares the runtime version against the *running* companion version, so it
+    catches both a swap that never landed and a swapped bundle whose relaunch
+    silently failed (old process still showing the old UI). Prompts a one-time
+    reinstall. Frozen macOS installs only; best-effort; at most once per version.
     """
     if not running_frozen_bundle() or sys.platform != "darwin":
         return
     try:
         root = install_root or discover_install_root()
         runtime_version = read_manifest(root).version
-        companion_version = _companion_installed_version(root)
+        running = _companion_running_version(root)
+        companion_version = running or _companion_installed_version(root)
+        # Only the running-version path has a relaunch race — give a just-
+        # relaunched companion a moment to publish its version before deciding
+        # it's stale, so we don't fire a false prompt during the relaunch window.
+        settle = 0
+        while running and companion_version != runtime_version and settle < _DRIFT_SETTLE_TRIES:
+            time.sleep(_DRIFT_SETTLE_SECONDS)
+            running = _companion_running_version(root)
+            companion_version = running or _companion_installed_version(root)
+            settle += 1
         if not companion_version or companion_version == runtime_version:
             return
         marker = root / "state" / "ui-drift-notified"
@@ -1346,6 +1408,28 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
         marker.write_text(runtime_version, encoding="utf-8")
     except Exception as e:  # noqa: BLE001 - the drift check must never crash the agent
         logger.debug(f"ui drift check skipped: {e}")
+
+
+def _harden_swapped_app(dest: Path) -> None:
+    """After a macOS .app swap: strip com.apple.quarantine (which silently blocks
+    a launchctl-driven relaunch, as the Setup Assistant install path documents)
+    and re-verify the code signature. Best-effort + logged — the drift check
+    catches a bundle that still won't launch."""
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest)], check=False, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"whole-app OTA: could not de-quarantine {dest}: {e}")
+    try:
+        subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(dest)],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"whole-app OTA: swapped app failed codesign verify: {dest}: {e}")
 
 
 def swap_changed_ui_apps(
@@ -1371,6 +1455,7 @@ def swap_changed_ui_apps(
             for dest in dests:
                 try:
                     _install_app(src, dest)
+                    _harden_swapped_app(dest)
                     ok_any = True
                 except Exception as e:  # noqa: BLE001 - one destination failing shouldn't skip the rest
                     logger.error(f"whole-app OTA: failed to update '{key}' at {dest}: {e}")

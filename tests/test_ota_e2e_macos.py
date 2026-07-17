@@ -133,30 +133,6 @@ def test_swapped_companion_is_exactly_the_launchd_target(tmp_path):
     assert _app_version(install_root / rel.parts[0]) == "1.1.0"
 
 
-def test_restart_is_non_blocking_and_targets_companion(tmp_path, monkeypatch):
-    """The relaunch must be fire-and-forget (Popen), not a blocking run() that
-    can hang the update — the exact regression that made 1.1.1 'hang'."""
-    calls: dict[str, object] = {}
-
-    class _FakePopen:
-        def __init__(self, argv, **kwargs):
-            calls["argv"] = argv
-            calls["kwargs"] = kwargs
-
-    def _no_blocking_run(*a, **k):  # pragma: no cover - fails the test if hit
-        raise AssertionError("restart used a blocking subprocess.run — must be Popen")
-
-    monkeypatch.setattr(updater.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(updater.subprocess, "run", _no_blocking_run)
-
-    updater._restart_ui_app("companion")
-
-    argv = calls["argv"]
-    assert argv[:3] == ["launchctl", "kickstart", "-k"]
-    assert argv[-1].endswith("uk.co.locai.link.companion")
-    assert calls["kwargs"].get("start_new_session") is True
-
-
 # ---------------------------------------------------------------------------
 # Full swap_bundle chain: download → verify → extract → flip → UI swap
 # ---------------------------------------------------------------------------

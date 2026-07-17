@@ -1288,6 +1288,42 @@ def test_check_ui_version_drift_noop_when_not_frozen(monkeypatch):
     assert called == []
 
 
+def test_check_ui_version_drift_uses_running_version(tmp_path, monkeypatch):
+    """A stale *running* companion triggers drift even when the on-disk bundle
+    already reads new — the swap landed but the relaunch silently failed."""
+    root = _setup_install_root(tmp_path, "1.1.1")
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "companion-running-version").write_text("1.1.0")  # old live UI
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.time, "sleep", lambda *a, **k: None)  # skip the settle wait
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+    # On-disk bundle is already new — the old drift check would have stayed silent.
+    monkeypatch.setattr(updater, "_companion_installed_version", lambda r: "1.1.1")
+    calls = []
+    monkeypatch.setattr(updater, "_notify_reinstall_required", lambda v, u: calls.append(v))
+
+    updater.check_ui_version_drift()
+    assert calls == ["1.1.1"]
+
+
+def test_check_ui_version_drift_quiet_when_running_matches(tmp_path, monkeypatch):
+    """A matching running version stays silent even if the on-disk bundle is old
+    — the running process is authoritative."""
+    root = _setup_install_root(tmp_path, "1.1.1")
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "state" / "companion-running-version").write_text("1.1.1")
+    monkeypatch.setattr(updater, "running_frozen_bundle", lambda: True)
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater, "discover_install_root", lambda: root)
+    monkeypatch.setattr(updater, "_companion_installed_version", lambda r: "1.0.0")  # stale, ignored
+    calls = []
+    monkeypatch.setattr(updater, "_notify_reinstall_required", lambda v, u: calls.append(v))
+
+    updater.check_ui_version_drift()
+    assert calls == []
+
+
 # --- _version_gt -------------------------------------------------------------
 
 

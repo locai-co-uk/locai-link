@@ -8,9 +8,23 @@ sections below the summary. -->
 
 ## [Unreleased]
 
-- End-to-end update coverage: install → update → reinstall → uninstall now
-  runs in CI on macOS, so update regressions are caught before release instead
-  of on a user's Mac.
+- macOS whole-app OTA reliably relaunches the companion onto the updated build:
+  the swap strips com.apple.quarantine and the relaunch mirrors the installer's
+  proven sequence; a companion that still didn't refresh is detected and prompts
+  a reinstall instead of silently staying on the old UI.
+- End-to-end update coverage (install → update → reinstall → uninstall) now runs
+  in CI on macOS, so update regressions are caught before release.
+
+### Fixed — macOS whole-app OTA relaunch (`src/link/app/updater.py`, `crates/companion/`)
+
+- After swapping a UI `.app`, strip `com.apple.quarantine` and re-verify its code
+  signature — a quarantined bundle silently blocks a launchctl-driven relaunch.
+- The companion relaunch kickstarts in place, and if the service isn't reachable
+  rebootstraps from the installed plist and retries, then falls back to
+  LaunchServices — mirroring the Setup Assistant's proven install path.
+- Drift detection compares the *running* companion version (published by the
+  companion at launch), not the on-disk bundle, so a swap that landed but didn't
+  relaunch is caught and prompts a one-time reinstall.
 
 ### Added — E2E update tests (`.github/workflows/e2e.yml`, `tests/`)
 

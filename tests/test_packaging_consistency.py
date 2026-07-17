@@ -59,22 +59,59 @@ def test_agent_launchagent_points_at_launcher():
     assert plist["WorkingDirectory"] == str(MACOS_INSTALL_ROOT)
 
 
-def test_restart_targets_companion_plist_label(monkeypatch):
-    """The service _restart_ui_app kickstarts must be gui/<uid>/<the plist Label>.
-    Assert the generated launchctl command, not the updater source text."""
+def _mock_launchctl(monkeypatch, *, kickstart_rc: int = 0) -> list[list[str]]:
+    """Record launchctl/open argvs and make subprocess.run return a chosen rc for
+    kickstart, so _restart_companion_macos takes the matching branch."""
+    calls: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, rc: int) -> None:
+            self.returncode = rc
+
+    def _run(argv, **_k):
+        calls.append(list(argv))
+        rc = kickstart_rc if list(argv[:2]) == ["launchctl", "kickstart"] else 0
+        return _Result(rc)
+
+    monkeypatch.setattr(updater.subprocess, "run", _run)
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **_k: calls.append(list(argv)))
+    return calls
+
+
+def test_restart_kickstarts_companion_in_place(monkeypatch):
+    """A live companion is kickstarted at gui/<uid>/<the plist Label> — no
+    destructive bootout and no LaunchServices fallback on the happy path.
+    Asserts the generated launchctl command, not updater source text."""
     label = _load_plist("uk.co.locai.link.companion.plist")["Label"]
     assert label == COMPANION_LABEL
 
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
-    calls: list[list[str]] = []
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **k: calls.append(argv))
-    monkeypatch.setattr(updater.subprocess, "run", lambda argv, **k: calls.append(argv))
+    calls = _mock_launchctl(monkeypatch, kickstart_rc=0)
 
     updater._restart_ui_app("companion")
 
-    kickstarts = [c for c in calls if c[:3] == ["launchctl", "kickstart", "-k"]]
-    assert any(c[-1] == f"gui/501/{label}" for c in kickstarts), calls
+    kicks = [c for c in calls if c[:3] == ["launchctl", "kickstart", "-k"]]
+    assert kicks and kicks[0][-1] == f"gui/501/{label}"
+    assert not any(c[:2] == ["launchctl", "bootout"] for c in calls)
+    assert not any(c and c[0] == "open" for c in calls)
+
+
+def test_restart_recovers_when_kickstart_misses(monkeypatch):
+    """If kickstart can't reach the service, refresh the registration (bootout +
+    bootstrap) and retry, then fall back to opening the install-root copy."""
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
+    monkeypatch.setattr(updater.Path, "exists", lambda self: str(self).startswith("/Library/Locai"))
+    calls = _mock_launchctl(monkeypatch, kickstart_rc=1)
+
+    updater._restart_ui_app("companion")
+
+    assert any(c[:2] == ["launchctl", "bootout"] for c in calls)
+    assert any(c[:2] == ["launchctl", "bootstrap"] for c in calls)
+    assert sum(1 for c in calls if c[:3] == ["launchctl", "kickstart", "-k"]) >= 2
+    opens = [c for c in calls if c and c[0] == "open"]
+    assert opens and opens[0][-1] == "/Library/Locai/Locai Link.app"
 
 
 def test_payload_names_match_release_workflow(monkeypatch):
