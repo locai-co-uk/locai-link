@@ -102,7 +102,9 @@ def test_restart_recovers_when_kickstart_misses(monkeypatch):
     bootstrap) and retry, then fall back to opening the install-root copy."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
-    monkeypatch.setattr(updater.Path, "exists", lambda self: str(self).startswith("/Library/Locai"))
+    # exists() True so the fallback picks the first (install-root) copy; assert
+    # against the host's own rendering of that path so this holds on Windows too.
+    monkeypatch.setattr(updater.Path, "exists", lambda self: True)
     calls = _mock_launchctl(monkeypatch, kickstart_rc=1)
 
     updater._restart_ui_app("companion")
@@ -111,7 +113,7 @@ def test_restart_recovers_when_kickstart_misses(monkeypatch):
     assert any(c[:2] == ["launchctl", "bootstrap"] for c in calls)
     assert sum(1 for c in calls if c[:3] == ["launchctl", "kickstart", "-k"]) >= 2
     opens = [c for c in calls if c and c[0] == "open"]
-    assert opens and opens[0][-1] == "/Library/Locai/Locai Link.app"
+    assert opens and opens[0][-1] == str(Path("/Library/Locai/Locai Link.app"))
 
 
 def test_payload_names_match_release_workflow(monkeypatch):
