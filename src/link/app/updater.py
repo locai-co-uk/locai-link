@@ -1252,6 +1252,13 @@ def _restart_ui_app(key: str) -> None:
         logger.warning(f"Could not restart companion after update: {e}")
 
 
+def _current_uid() -> str:
+    """os.getuid() is POSIX-only; fall back to "0" where it is unavailable (e.g.
+    Windows), so these darwin-only helpers stay importable/testable cross-platform."""
+    getuid = getattr(os, "getuid", None)
+    return str(getuid()) if getuid else "0"
+
+
 def _home_for_uid(uid: str) -> Path:
     """Home directory of ``uid`` (the console user) - where the companion
     LaunchAgent plist lives. Path.home() would give the updater's own home (e.g.
@@ -1270,7 +1277,7 @@ def _restart_companion_macos() -> None:
     legacy-domain registration), rebootstrap from the installed plist and retry;
     fall back to LaunchServices. Each launchctl call is bounded so a hung
     kickstart can't stall the update."""
-    uid = _macos_console_uid() or str(os.getuid())
+    uid = _macos_console_uid() or _current_uid()
     service = f"gui/{uid}/{_COMPANION_LABEL}"
     plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
 
@@ -1395,7 +1402,7 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
         return False
     import plistlib
 
-    uid = _macos_console_uid() or str(os.getuid())
+    uid = _macos_console_uid() or _current_uid()
     plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
     correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link-companion")
     try:
