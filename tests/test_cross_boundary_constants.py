@@ -59,3 +59,39 @@ def test_companion_label_matches_plist_and_bundle_id():
         "identifier"
     ]
     assert updater_label == plist_label == bundle_id
+
+
+def test_distribution_archs_are_all_built_for_macos():
+    """The installer must only advertise macOS architectures the release actually
+    builds; otherwise that Mac installs but can never find an OTA asset."""
+    dist = (REPO_ROOT / "bundling" / "pkg" / "Distribution.xml").read_text(encoding="utf-8")
+    m = re.search(r'hostArchitectures="([^"]+)"', dist)
+    assert m, "hostArchitectures not found in Distribution.xml"
+    advertised = {a.strip() for a in m.group(1).split(",")}
+
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    tags = re.findall(r"platform_tag:\s*(\S+)", release)
+    built_macos = {t.split("macos-", 1)[1] for t in tags if t.startswith("macos-")}
+    assert built_macos, "no macOS build lane found in release.yml"
+
+    missing = advertised - built_macos
+    assert not missing, f"Distribution.xml advertises {missing} with no macOS build lane"
+
+
+def test_release_platform_tags_use_updater_vocabulary():
+    """Every platform_tag the release workflow builds must be one _platform_tag can
+    produce, or the updater can never request an asset the release published."""
+    updater = (SRC / "app" / "updater.py").read_text(encoding="utf-8")
+    os_map = re.search(r"os_tag = \{([^}]+)\}", updater)
+    arch_map = re.search(r"arch_tag = \{([^}]+)\}", updater)
+    assert os_map and arch_map, "os_tag/arch_tag maps not found in updater"
+    os_values = set(re.findall(r':\s*"([^"]+)"', os_map.group(1)))
+    arch_values = set(re.findall(r':\s*"([^"]+)"', arch_map.group(1)))
+
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    tags = re.findall(r"platform_tag:\s*(\S+)", release)
+    assert tags, "no platform_tag matrix entries found in release.yml"
+    for tag in tags:
+        os_part, _, arch_part = tag.partition("-")
+        assert os_part in os_values, f"{tag}: os '{os_part}' not in updater os map {os_values}"
+        assert arch_part in arch_values, f"{tag}: arch '{arch_part}' not in updater arch map {arch_values}"
