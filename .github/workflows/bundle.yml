@@ -56,7 +56,7 @@ jobs:
           cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
 
