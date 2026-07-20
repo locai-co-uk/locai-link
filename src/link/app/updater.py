@@ -1271,12 +1271,15 @@ def _home_for_uid(uid: str) -> Path:
         return Path.home()
 
 
-def _restart_companion_macos() -> None:
+def _restart_companion_macos(force_reload: bool = False) -> None:
     """Relaunch the companion, mirroring the Setup Assistant's proven sequence:
     kickstart in place; if the service isn't reachable in this domain (stale /
     legacy-domain registration), rebootstrap from the installed plist and retry;
     fall back to LaunchServices. Each launchctl call is bounded so a hung
-    kickstart can't stall the update."""
+    kickstart can't stall the update. Pass force_reload=True when the plist on
+    disk just changed (self-heal): skip the in-place kickstart and bootout +
+    bootstrap so launchd reloads the corrected definition instead of restarting
+    the stale in-memory job."""
     uid = _macos_console_uid() or _current_uid()
     service = f"gui/{uid}/{_COMPANION_LABEL}"
     plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
@@ -1287,8 +1290,9 @@ def _restart_companion_macos() -> None:
         except subprocess.TimeoutExpired:
             return 1  # treat a hang as failure and move on — never block the update
 
-    # Non-destructive first: kickstart a live service in place.
-    ok = _lc("kickstart", "-k", service) == 0
+    # Non-destructive first: kickstart a live service in place. When the plist
+    # just changed, skip this so we reload the corrected definition below.
+    ok = False if force_reload else _lc("kickstart", "-k", service) == 0
     if not ok:
         # Not reachable in this domain — refresh the registration and retry.
         _lc("bootout", service)
@@ -1416,11 +1420,12 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
         tmp = plist.with_name(plist.name + ".new")
         tmp.write_bytes(plistlib.dumps(data))
         os.replace(tmp, plist)
+        os.chmod(plist, 0o644)  # macOS 12+ refuses to bootstrap a non-0644 plist
         logger.info(f"self-heal: repaired companion LaunchAgent program path -> {correct}")
         # A companion started via `open -a` isn't launchd-managed, so bootout won't
         # stop it; kill it so the relaunch below doesn't leave two trays.
         subprocess.run(["pkill", "-f", "locai-link-companion"], check=False, timeout=10)
-        _restart_companion_macos()
+        _restart_companion_macos(force_reload=True)
         return True
     except Exception as e:  # noqa: BLE001 - self-heal must never crash the agent
         logger.warning(f"self-heal: could not repair companion LaunchAgent: {e}")
@@ -1483,9 +1488,19 @@ def _harden_swapped_app(dest: Path) -> None:
         subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest)], check=False, timeout=30)
     except Exception as e:  # noqa: BLE001 - quarantine strip is best-effort
         logger.warning(f"whole-app OTA: could not de-quarantine {dest}: {e}")
-    # check=True: a bad signature must fail the swap, not just log.
+    # Re-verify post quarantine-strip; raises on a bad signature.
+    _verify_app_signature(dest)
+
+
+def _verify_app_signature(app: Path) -> None:
+    """Raise if ``app`` fails codesign --verify (darwin only). Verified on the
+    STAGED bundle before it replaces the live app, so a bad signature never
+    overwrites a good install (no rollback exists once _install_app replaces it),
+    and again after the swap as defense-in-depth."""
+    if sys.platform != "darwin":
+        return
     subprocess.run(
-        ["codesign", "--verify", "--deep", "--strict", str(dest)],
+        ["codesign", "--verify", "--deep", "--strict", str(app)],
         check=True,
         capture_output=True,
         timeout=60,
@@ -1511,6 +1526,9 @@ def swap_changed_ui_apps(
             dests = _ui_app_destinations(key, install_root)
             if not dests:
                 continue
+            # Verify the staged bundle BEFORE any destructive replace, so a bad
+            # signature never overwrites the good installed app.
+            _verify_app_signature(src)
             ok_any = False
             for dest in dests:
                 try:
@@ -1518,7 +1536,11 @@ def swap_changed_ui_apps(
                     _harden_swapped_app(dest)
                     ok_any = True
                 except Exception as e:  # noqa: BLE001 - one destination failing shouldn't skip the rest
-                    logger.error(f"whole-app OTA: failed to update '{key}' at {dest}: {e}")
+                    detail = getattr(e, "stderr", None)
+                    if isinstance(detail, (bytes, bytearray)):
+                        detail = detail.decode(errors="replace")
+                    suffix = f" | {detail.strip()}" if detail else ""
+                    logger.error(f"whole-app OTA: failed to update '{key}' at {dest}: {e}{suffix}")
             if ok_any:
                 swapped.append(key)
                 logger.info(f"whole-app OTA: updated '{key}'")

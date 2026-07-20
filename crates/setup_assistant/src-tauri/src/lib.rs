@@ -1049,8 +1049,10 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
     // path), so LaunchServices spawns another tray. Gate it on kickstart failure.
     if !kickstart_failures.is_empty() {
         for path in [
-            "/Applications/Locai Link.app",
+            // Prefer the OTA-updated install-root copy over the pkg-managed
+            // /Applications copy, matching updater.py::_restart_companion_macos.
             "/Library/Locai/Locai Link.app",
+            "/Applications/Locai Link.app",
         ] {
             if std::path::Path::new(path).exists() {
                 let _ = std::process::Command::new("open")

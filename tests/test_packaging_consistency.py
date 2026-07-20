@@ -125,22 +125,25 @@ def test_restart_recovers_when_kickstart_misses(monkeypatch):
     assert opens and opens[0][-1] == str(Path("/Library/Locai/Locai Link.app"))
 
 
-def test_swap_drops_app_when_signature_fails(monkeypatch, tmp_path):
-    """A failed codesign check (raised by _harden_swapped_app) must NOT mark the
-    swap successful, so the OTA never relaunches an unverified/corrupt bundle."""
+def test_swap_skips_app_when_staged_signature_fails(monkeypatch, tmp_path):
+    """A staged bundle that fails codesign must NOT be installed (so a good live
+    app is never overwritten by an unverified one) and must not be marked swapped."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     monkeypatch.setattr(updater, "_ui_app_payload_name", lambda key: "Locai Link.app")
     monkeypatch.setattr(updater, "_locate_in_payload", lambda staging, name: tmp_path / "src.app")
     monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, root: [tmp_path / "dest.app"])
-    monkeypatch.setattr(updater, "_install_app", lambda src, dest: None)  # pretend the copy landed
 
-    def _boom(dest):
+    installed: list = []
+    monkeypatch.setattr(updater, "_install_app", lambda src, dest: installed.append(dest))
+
+    def _boom(app):
         raise RuntimeError("codesign verify failed")
 
-    monkeypatch.setattr(updater, "_harden_swapped_app", _boom)
+    monkeypatch.setattr(updater, "_verify_app_signature", _boom)
 
     swapped = updater.swap_changed_ui_apps(tmp_path, tmp_path, {"companion": "a"}, {"companion": "b"})
     assert swapped == []
+    assert installed == []  # bad staged signature -> never replace the live app
 
 
 def test_payload_names_match_release_workflow(monkeypatch):

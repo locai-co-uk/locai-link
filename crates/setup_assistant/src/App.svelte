@@ -320,10 +320,16 @@
   // so raw backend text never reaches the user.
   function friendlyRegisterError(raw: string): string {
     const s = raw.toLowerCase();
+    // Rate limiting ("too many requests"/429) is not a device-limit; classify it first.
+    if (s.includes("too many requests") || s.includes("rate limit") || s.includes("429")) {
+      return "Too many attempts right now. Wait a moment, then try again.";
+    }
     const deviceLimit =
-      s.includes("too many") ||
-      (s.includes("device") &&
-        (s.includes("limit") || s.includes("maximum") || s.includes("quota")));
+      s.includes("device") &&
+      (s.includes("limit") ||
+        s.includes("maximum") ||
+        s.includes("quota") ||
+        s.includes("too many"));
     if (deviceLimit) {
       return "You've reached the maximum number of registered devices. Remove a device from your Locai dashboard, then try again.";
     }
