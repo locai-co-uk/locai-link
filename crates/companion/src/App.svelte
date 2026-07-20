@@ -1159,12 +1159,43 @@
     cursor: pointer;
     margin-top: 8px;
   }
+  /* Custom checkbox — appearance:none so it renders identically on
+     webkit2gtk and WKWebView, in light and dark. Colors come from tokens
+     that flip with the theme, so no per-mode overrides are needed. */
+  :global(input[type="checkbox"]) {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    flex-shrink: 0;
+    cursor: pointer;
+    border: 1.5px solid var(--color-border-checkbox-off, #C9C6BE);
+    border-radius: var(--radius-checkbox, 5px);
+    background: var(--color-surface, #FFFFFF);
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  :global(input[type="checkbox"]:checked) {
+    background: var(--color-primary, #00B85A);
+    border-color: var(--color-primary, #00B85A);
+  }
+  /* Checkmark — a rotated border shown only when checked. The on-dark
+     token stays light in both themes, so it reads on the green fill. */
+  :global(input[type="checkbox"]:checked)::after {
+    content: "";
+    position: absolute;
+    left: 4.5px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--color-text-on-dark, #FFFFFF);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
   .toggle-row input[type="checkbox"] {
     width: 15px;
     height: 15px;
-    accent-color: var(--color-primary, #00B85A);
-    cursor: pointer;
-    flex-shrink: 0;
     margin-top: 1px;
   }
   .toggle-copy {

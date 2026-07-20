@@ -1043,22 +1043,22 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
         }
     }
 
-    // Belt-and-braces: `open -a` the companion via LaunchServices. Idempotent —
-    // a no-op if kickstart already raised the tray; recovers a raced or
-    // suppressed launch otherwise.
-    for path in [
-        "/Applications/Locai Link.app",
-        "/Library/Locai/Locai Link.app",
-    ] {
-        if std::path::Path::new(path).exists() {
-            let _ = std::process::Command::new("open")
-                .args(["-a", path])
-                .output();
-            break;
-        }
-    }
-
+    // Fallback ONLY when kickstart didn't bring the service up. An unconditional
+    // `open -a` starts a SECOND instance: it opens the /Applications copy while
+    // launchd already runs the /Library/Locai copy (same bundle id, different
+    // path), so LaunchServices spawns another tray. Gate it on kickstart failure.
     if !kickstart_failures.is_empty() {
+        for path in [
+            "/Applications/Locai Link.app",
+            "/Library/Locai/Locai Link.app",
+        ] {
+            if std::path::Path::new(path).exists() {
+                let _ = std::process::Command::new("open")
+                    .args(["-a", path])
+                    .output();
+                break;
+            }
+        }
         return Err(kickstart_failures.join("\n"));
     }
     Ok(())

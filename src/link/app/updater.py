@@ -1274,7 +1274,9 @@ def _restart_companion_macos() -> None:
         # Not reachable in this domain — refresh the registration and retry.
         _lc("bootout", service)
         _lc("bootstrap", f"gui/{uid}", str(plist))
-        ok = _lc("kickstart", "-k", service) == 0
+        # bootstrap with RunAtLoad already starts the (correct) binary; kickstart
+        # WITHOUT -k here just ensures it's up, so we don't race a second instance.
+        ok = _lc("kickstart", service) == 0
     if not ok:
         # Last resort: LaunchServices. Prefer the OTA-owned install-root copy
         # (the one we de-quarantine), then the pkg-managed /Applications copy.
@@ -1371,6 +1373,40 @@ _DRIFT_SETTLE_TRIES = 3
 _DRIFT_SETTLE_SECONDS = 1.5
 
 
+def _heal_companion_launchagent(install_root: Path) -> bool:
+    """Repair a companion LaunchAgent whose ProgramArguments point at a binary that
+    never shipped (installs that predate the path fix). The OTA can't refresh the
+    plist, so correct it in place on startup, drop any stale open-a companion, and
+    re-bootstrap the launchd copy so the tray runs the current build. No-op once the
+    plist is already correct. Returns True if it repaired + relaunched."""
+    if sys.platform != "darwin":
+        return False
+    import plistlib
+
+    plist = Path.home() / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
+    correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link-companion")
+    try:
+        if not plist.exists():
+            return False  # fresh installs get the plist from the Setup Assistant
+        data = plistlib.loads(plist.read_bytes())
+        args = data.get("ProgramArguments") or []
+        if args and args[0] == correct:
+            return False  # already correct
+        data["ProgramArguments"] = [correct]
+        tmp = plist.with_name(plist.name + ".new")
+        tmp.write_bytes(plistlib.dumps(data))
+        os.replace(tmp, plist)
+        logger.info(f"self-heal: repaired companion LaunchAgent program path -> {correct}")
+        # A companion started via `open -a` isn't launchd-managed, so bootout won't
+        # stop it; kill it so the relaunch below doesn't leave two trays.
+        subprocess.run(["pkill", "-f", "locai-link-companion"], check=False, timeout=10)
+        _restart_companion_macos()
+        return True
+    except Exception as e:  # noqa: BLE001 - self-heal must never crash the agent
+        logger.warning(f"self-heal: could not repair companion LaunchAgent: {e}")
+        return False
+
+
 def check_ui_version_drift(install_root: Path | None = None, url: str | None = None) -> None:
     """Warn once if the macOS companion UI didn't update alongside the runtime.
 
@@ -1384,6 +1420,11 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
     try:
         root = install_root or discover_install_root()
         runtime_version = read_manifest(root).version
+        # Proactively repair a stale/broken companion LaunchAgent (installs whose
+        # plist predates the path fix) and relaunch the tray. No-op when the plist
+        # is already correct; the drift prompt below is the fallback if it can't heal.
+        if _heal_companion_launchagent(root):
+            time.sleep(_DRIFT_SETTLE_SECONDS)
         running = _companion_running_version(root)
         companion_version = running or _companion_installed_version(root)
         # Only the running-version path has a relaunch race — give a just-

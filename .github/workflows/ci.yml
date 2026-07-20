@@ -44,6 +44,18 @@ jobs:
           fi
           echo "Version bumped: $MAIN_VERSION -> $PR_VERSION"
 
+      - name: Warn if a plugin binary changed without a tag bumps
+        run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD -- 'plugins/*/install.py' || true)
+          for f in $CHANGED; do
+            new=$(grep -E '_RELEASE[[:space:]]*=[[:space:]]*"' "$f" | sort || true)
+            [ -n "$new" ] || continue   # plugin pins no binaries — nothing to bump
+            old=$(git show "origin/main:$f" 2>/dev/null | grep -E '_RELEASE[[:space:]]*=[[:space:]]*"' | sort || true)
+            if [ "$old" = "$new" ]; then
+              echo "::warning file=$f::$f changed but no pinned *_RELEASE tag moved. If the plugin binary changed, bump its pinned tag so devices re-fetch (binary fetch is tag-cached)."
+            fi
+          done
+
   # 1. Standard Unit Tests (Fast)
   unit-test:
     name: Unit Test on ${{ matrix.os }}

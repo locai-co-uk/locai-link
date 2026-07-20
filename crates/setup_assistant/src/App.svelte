@@ -315,6 +315,21 @@
     }
   }
 
+  // Map a raw registration failure to user-facing copy. The device-limit
+  // case gets a specific hint; anything else falls back to a generic line
+  // so raw backend text never reaches the user.
+  function friendlyRegisterError(raw: string): string {
+    const s = raw.toLowerCase();
+    const deviceLimit =
+      s.includes("too many") ||
+      (s.includes("device") &&
+        (s.includes("limit") || s.includes("maximum") || s.includes("quota")));
+    if (deviceLimit) {
+      return "You've reached the maximum number of registered devices. Remove a device from your Locai dashboard, then try again.";
+    }
+    return "We couldn't register this device. Check your connection and try again.";
+  }
+
   async function completeSetup() {
     // Idempotency guard: `register_device` isn't safe to call twice — each call
     // makes a new device on Control, so retrying after a config-write failure
@@ -358,7 +373,7 @@
         finish = {
           kind: "error",
           phase: "minting",
-          message: e instanceof Error ? e.message : String(e),
+          message: friendlyRegisterError(e instanceof Error ? e.message : String(e)),
         };
         return;
       }
@@ -387,7 +402,7 @@
         finish = {
           kind: "error",
           phase: "registering",
-          message: e instanceof Error ? e.message : String(e),
+          message: friendlyRegisterError(e instanceof Error ? e.message : String(e)),
         };
         return;
       }
@@ -1357,12 +1372,40 @@
     cursor: pointer;
     width: 100%;
   }
-  .model-row__label input[type="checkbox"] {
+  /* Custom checkbox — appearance:none so it renders identically on
+     webkit2gtk and WKWebView, in light and dark. Colors come from tokens
+     that flip with the theme, so no per-mode overrides are needed. */
+  :global(input[type="checkbox"]) {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
     width: 16px;
     height: 16px;
-    accent-color: var(--color-primary);
-    cursor: pointer;
+    margin: 0;
     flex-shrink: 0;
+    cursor: pointer;
+    border: 1.5px solid var(--color-border-checkbox-off);
+    border-radius: var(--radius-checkbox);
+    background: var(--color-surface);
+    transition: background var(--motion-hover) var(--easing-standard),
+                border-color var(--motion-hover) var(--easing-standard);
+  }
+  :global(input[type="checkbox"]:checked) {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  /* Checkmark — a rotated border shown only when checked. The on-dark
+     token stays light in both themes, so it reads on the green fill. */
+  :global(input[type="checkbox"]:checked)::after {
+    content: "";
+    position: absolute;
+    left: 4.5px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--color-text-on-dark);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
   }
   .model-row__body {
     display: flex;
@@ -1421,11 +1464,6 @@
     border-color: var(--color-border-strong);
   }
   .toggle-row input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--color-primary);
-    cursor: pointer;
-    flex-shrink: 0;
     margin-top: 2px;
   }
   .toggle-copy {
