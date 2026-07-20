@@ -4,16 +4,12 @@
 //! macOS autostart via a per-user LaunchAgent under
 //! `~/Library/LaunchAgents/<app_id>.plist`.
 //!
-//! Chose LaunchAgent (not Login Items via SMAppService) because:
-//! * LaunchAgents work identically across the .pkg installer flow
-//!   (postinstall drops the plist) and the developer flow (the app
-//!   drops it on first launch) — same file, same effect.
-//! * SMAppService requires code-signing entitlements and .app bundles
-//!   registered with the framework; overkill for our surface.
+//! LaunchAgent (not SMAppService Login Items): same plist works for both the
+//! .pkg installer and developer flows, and it avoids SMAppService's
+//! code-signing entitlement + registered-.app requirements.
 //!
-//! Mirrors the plist format that `link.infra.service::MacOSBackend`
-//! writes for the agent, so both entries look uniform to the user
-//! opening System Settings → General → Login Items.
+//! Matches the plist format `link.infra.service::MacOSBackend` writes for the
+//! agent, so both entries look uniform in System Settings → Login Items.
 
 use std::fs;
 use std::io;

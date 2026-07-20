@@ -100,12 +100,9 @@ class AgentRuntime:
             models_provider=self._snapshot_models,
             command_handler=self.handle_command,
         )
-        # Populate the transport diagnostic. The session is opened
-        # before AgentRuntime is constructed (`get_or_create_zenoh_session`
-        # in main.py) — if we hold one here, `connected=True` is a fair
-        # first-order truth. The runtime doesn't observe silent
-        # mid-session disconnects today; `shutdown()` flips this back
-        # to False when we tear down.
+        # Transport diagnostic: the session is opened before AgentRuntime exists,
+        # so holding one here means connected=True. Mid-session disconnects aren't
+        # observed today; shutdown() flips this back to False.
         if zenoh_session is not None:
             endpoints = agent_config.transport.args.get("endpoints", []) if agent_config.transport else []
             self.health_state.set_transport(

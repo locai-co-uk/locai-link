@@ -4,11 +4,9 @@
   import locaiLogo from "./lib/locai-logo.png";
   import { onMount } from "svelte";
 
-  // Release-channel marker shown next to the version in the sidebar foot.
-  // Read at build time from VITE_CHANNEL (defaults to "alpha" if unset —
-  // covers local dev + workflows that forget to set it, safer than
-  // silently shipping without a label). Set VITE_CHANNEL=prod in the
-  // release workflow when going GA to drop the label entirely.
+  // Release-channel marker shown by the version in the sidebar foot. From
+  // VITE_CHANNEL at build time (defaults to "alpha" so unset builds still get
+  // a label); set VITE_CHANNEL=prod to drop it entirely.
   const CHANNEL = (import.meta.env.VITE_CHANNEL ?? "alpha").toLowerCase();
   const channelLabel =
     CHANNEL === "prod" || CHANNEL === ""
@@ -42,15 +40,9 @@
     device_name: string | null;
   };
 
-  // Default install root. macOS location — the .pkg postinstall
-  // (bundling/pkg/scripts/postinstall) lays the launcher, boot.json,
-  // and Setup Assistant.app here.
-  //
-  // Loaded from Rust on mount so the value branches per OS:
-  //   * macOS  → /Library/Locai
-  //   * Linux  → $HOME/.local/share/locai
-  // Empty string until the async fetch resolves; every call site is
-  // gated so an empty root doesn't leak into an invoke() call.
+  // Install root, loaded from Rust on mount (macOS → /Library/Locai,
+  // Linux → $HOME/.local/share/locai). Empty until the async fetch resolves;
+  // every call site gates on it so an empty root never reaches an invoke().
   let installRoot = $state<string>("");
 
   // OS the SA is running on ("macos" / "linux" / other). Frontend uses
@@ -58,20 +50,15 @@
   // Loaded from Rust on mount alongside installRoot.
   let platform = $state<string>("");
 
-  // "splash" — check_install found a registered device, so show the
-  //   "already set up" chooser (Open Preferences / Re-register /
-  //   Uninstall). This is the default landing state for re-runs of the
-  //   SA on a machine that's already onboarded.
-  // "wizard" — either a fresh install (no session file) OR the user
-  //   picked Re-register on the splash and confirmed. Runs the normal
-  //   sign-in → models → permissions → finish flow.
+  // "splash" — check_install found a registered device: show the "already set
+  //   up" chooser (Open Preferences / Re-register / Uninstall). Default for re-runs.
+  // "wizard" — fresh install (no session) or user confirmed Re-register on the
+  //   splash. Runs sign-in → models → permissions → finish.
   let mode = $state<"splash" | "wizard">("wizard");
 
-  // When set, the Finish step's completeSetup() runs `re_register`
-  // (Control DELETE + local wipe) before minting the new registration
-  // key. Cleared after that call succeeds. Carrying the old id here —
-  // rather than re-reading check_install at Finish time — means the
-  // wipe uses the id the user actually saw on the splash.
+  // When set, completeSetup() runs `re_register` (Control DELETE + local wipe)
+  // before minting the new key, then clears this. Carrying the old id here (vs
+  // re-reading check_install at Finish) wipes the id the user saw on the splash.
   let pendingReRegister = $state<{ deviceId: string; deviceName: string | null } | null>(null);
 
   // Splash action UI state — one at a time, no concurrency.
@@ -154,10 +141,8 @@
         kind: "error";
         message: string;
         registered?: RegisteredDevice;
-        // Which phase of completeSetup failed — drives the fine-print
-        // suggestion under the error message so we don't tell the user
-        // "the local config couldn't be written" when it was actually a
-        // deploy that failed after the config was already on disk.
+        // Which completeSetup phase failed — drives the fine-print suggestion so
+        // e.g. a deploy failure isn't reported as "config couldn't be written".
         phase?: "minting" | "registering" | "writing" | "bootstrapping" | "deploying";
       };
 
@@ -166,17 +151,14 @@
   let signIn = $state<SignIn>({ kind: "idle" });
   let models = $state<Models>({ kind: "idle" });
   let finish = $state<Finish>({ kind: "idle" });
-  // Default on — matches the wording on the Permissions step and the
-  // "quietly in the background" pitch. Users who don't want auto-start
-  // uncheck it; either way we still kickstart both LaunchAgents on
-  // Finish, so setup pays off immediately.
+  // Default on — matches the Permissions step's "quietly in the background"
+  // pitch. Either way both LaunchAgents are kickstarted on Finish.
   let runAtLogin = $state(true);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Lazy-load the model catalog the first time the user lands on the
-  // Models step (after sign-in, so we have a JWT). Re-navigating back
-  // doesn't refetch — the list is stable enough for a single wizard
-  // pass, and re-running the request would lose any selections.
+  // Lazy-load the catalog the first time the user reaches the Models step
+  // (post sign-in, so we have a JWT). No refetch on re-nav — it would lose
+  // selections and the list is stable enough for one wizard pass.
   $effect(() => {
     if (
       STEPS[current].id === "models" &&
@@ -333,22 +315,39 @@
     }
   }
 
+  // Map a raw registration failure to user-facing copy. The device-limit
+  // case gets a specific hint; anything else falls back to a generic line
+  // so raw backend text never reaches the user.
+  function friendlyRegisterError(raw: string): string {
+    const s = raw.toLowerCase();
+    // Rate limiting ("too many requests"/429) is not a device-limit; classify it first.
+    if (s.includes("too many requests") || s.includes("rate limit") || s.includes("429")) {
+      return "Too many attempts right now. Wait a moment, then try again.";
+    }
+    const deviceLimit =
+      s.includes("device") &&
+      (s.includes("limit") ||
+        s.includes("maximum") ||
+        s.includes("quota") ||
+        s.includes("too many"));
+    if (deviceLimit) {
+      return "You've reached the maximum number of registered devices. Remove a device from your Locai dashboard, then try again.";
+    }
+    return "We couldn't register this device. Check your connection and try again.";
+  }
+
   async function completeSetup() {
-    // Idempotency guard for the retry path. `register_device` is not
-    // safe to call twice — each call creates a new device on Control,
-    // and re-clicking Try Again after a config-write failure would
-    // push the account over its device cap. If we already have a
-    // registered device from a prior attempt, resume from the
-    // install_agent_config phase instead of starting over.
+    // Idempotency guard: `register_device` isn't safe to call twice — each call
+    // makes a new device on Control, so retrying after a config-write failure
+    // could blow the device cap. If one exists from a prior attempt, resume from
+    // the install_agent_config phase.
     const already: RegisteredDevice | undefined =
       finish.kind === "error" ? finish.registered : undefined;
 
-    // Re-register: user picked this on the splash. Delete the old
-    // device on Control + wipe local state (session file, models,
-    // pipeline state) BEFORE minting a fresh registration key.
-    // Skipped when `already` is set — that's the retry path for a
-    // registered-but-not-config-written state, where wiping would
-    // orphan the new device we just created.
+    // Re-register (picked on the splash): delete the old device on Control +
+    // wipe local state (session, models, pipeline state) before minting a key.
+    // Skipped when `already` is set — the retry path, where wiping would orphan
+    // the device we just created.
     if (pendingReRegister && !already) {
       finish = { kind: "minting" };
       try {
@@ -380,15 +379,13 @@
         finish = {
           kind: "error",
           phase: "minting",
-          message: e instanceof Error ? e.message : String(e),
+          message: friendlyRegisterError(e instanceof Error ? e.message : String(e)),
         };
         return;
       }
 
-      // Phase 2: derive the device name, then redeem the key. The
-      // redemption is the call that most often feels slow (Control
-      // creates the row, provisions the Zenoh credentials, hands back
-      // the AgentConfig).
+      // Phase 2: derive the device name, then redeem the key. Redemption is the
+      // slow one (Control creates the row, provisions Zenoh creds, returns config).
       let deviceName: string;
       try {
         deviceName = await invoke<string>("suggest_device_name");
@@ -411,7 +408,7 @@
         finish = {
           kind: "error",
           phase: "registering",
-          message: e instanceof Error ? e.message : String(e),
+          message: friendlyRegisterError(e instanceof Error ? e.message : String(e)),
         };
         return;
       }
@@ -439,10 +436,8 @@
       return;
     }
 
-    // Phase 4: bootstrap the LaunchAgents (register + kickstart). Only
-    // errors on truly weird macOS states; best-effort — if this fails
-    // the user can still launch Locai Link from Applications later
-    // and the companion's kickstart logic recovers.
+    // Phase 4: bootstrap the LaunchAgents (register + kickstart). Best-effort —
+    // on failure the user can still launch from Applications and kickstart recovers.
     finish = { kind: "bootstrapping", registered };
     try {
       await invoke("install_launchagents", {
@@ -453,10 +448,8 @@
       console.warn("install_launchagents failed:", e);
     }
 
-    // Phase 5: queue deploys for any models the user selected. Runs
-    // them in parallel — each is an independent HTTP POST + Zenoh
-    // command dispatch, so N models take ~1 RTT rather than N × RTT.
-    // Failures don't roll back the earlier steps.
+    // Phase 5: queue deploys for selected models, in parallel (independent
+    // POST + Zenoh dispatch each, so ~1 RTT not N). Failures don't roll back.
     const selected =
       models.kind === "ready"
         ? models.models.filter((m) => models.selected.has(m.id))
@@ -467,13 +460,10 @@
       done: 0,
       total: selected.length,
     };
-    // Pre-register each selected model as "queued 0%" with the local
-    // runtime so the companion's Models panel shows every row from t=0
-    // rather than one row at a time as the runtime processes deploys
-    // serially. Loopback POST — cheap, doesn't gate the real Control
-    // dispatch below. Any failure is swallowed inside the Tauri
-    // command; the runtime registers the model itself the moment it
-    // starts downloading.
+    // Pre-register each selected model "queued 0%" with the local runtime so the
+    // companion's Models panel shows all rows from t=0 (the runtime deploys
+    // serially otherwise). Best-effort loopback POST; the runtime registers the
+    // model itself once the download starts.
     await Promise.allSettled(
       selected.map((m) =>
         invoke<void>("mark_deployment_pending", {
@@ -482,12 +472,9 @@
         })
       )
     );
-    // Block until the agent is reachable AND its Zenoh transport reports
-    // connected=true. Otherwise Control's DEPLOY_MODEL dispatch races the
-    // agent's subscriber setup and the command is silently dropped — the
-    // user sees Control accept the deploy but no download ever starts.
-    // Non-fatal if it times out: the user can still deploy from Control
-    // later, and the mark_deployment_pending rows stay as "queued".
+    // Wait until the agent's Zenoh transport is connected, else Control's
+    // DEPLOY_MODEL races the subscriber setup and is dropped (deploy accepted,
+    // no download). Non-fatal on timeout — queued rows stay, deploy still works later.
     try {
       await invoke<void>("wait_for_agent_ready");
     } catch (e) {
@@ -578,10 +565,8 @@
     splashAction = { kind: "working", message: "Removing Locai Link…" };
     try {
       await invoke<void>("launch_uninstaller_from_sa", { installRoot });
-      // Uninstaller runs as a transient user-scope service (cgroup
-      // isolated) — it survives us exiting. Close the SA to get out of
-      // the way; the tray will disappear as the uninstaller stops the
-      // companion service.
+      // Uninstaller runs as a transient user-scope service, so it survives us
+      // exiting. Close the SA; the tray disappears as it stops the companion.
       await invoke<void>("exit_app");
     } catch (e) {
       splashAction = {
@@ -634,10 +619,8 @@
   </div>
 {:else if mode === "splash" && bootstrap.install.device_id}
   <!-- ============ ALREADY-INSTALLED CHOOSER ============ -->
-  <!-- Reuses the wizard's sidebar + stage layout so the "already set
-       up" surface looks like the rest of the SA rather than a separate
-       app. The steps list is dropped (no step machine to render); the
-       brand + version foot stay. -->
+  <!-- Reuses the wizard's sidebar + stage layout so this surface matches the
+       rest of the SA; the steps list is dropped (no step machine here). -->
   <main class="wizard">
     <aside class="sidebar">
       <div class="brand">
@@ -1129,13 +1112,9 @@
   }
 
   .brand__logo {
-    /* Source PNG is 501×200 (aspect ~2.5:1), designed black-on-light.
-       Sidebar is near-black, so invert to render the two-tone
-       (black "Loc" + black ".ai" pill with white inner text) as
-       (white "Loc" + white pill with black inner text). Preserves
-       the design's polarity while making it legible on a dark
-       background. Height chosen to sit at the same visual weight
-       as the previous 22px text mark. */
+    /* Black-on-light source PNG; sidebar is near-black, so invert(1) to render
+       it legibly (white "Loc" + white pill, black inner text). Height matches
+       the previous 22px text mark's visual weight. */
     height: 32px;
     width: auto;
     display: block;
@@ -1399,12 +1378,40 @@
     cursor: pointer;
     width: 100%;
   }
-  .model-row__label input[type="checkbox"] {
+  /* Custom checkbox — appearance:none so it renders identically on
+     webkit2gtk and WKWebView, in light and dark. Colors come from tokens
+     that flip with the theme, so no per-mode overrides are needed. */
+  :global(input[type="checkbox"]) {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
     width: 16px;
     height: 16px;
-    accent-color: var(--color-primary);
-    cursor: pointer;
+    margin: 0;
     flex-shrink: 0;
+    cursor: pointer;
+    border: 1.5px solid var(--color-border-checkbox-off);
+    border-radius: var(--radius-checkbox);
+    background: var(--color-surface);
+    transition: background var(--motion-hover) var(--easing-standard),
+                border-color var(--motion-hover) var(--easing-standard);
+  }
+  :global(input[type="checkbox"]:checked) {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  /* Checkmark — a rotated border shown only when checked. The on-dark
+     token stays light in both themes, so it reads on the green fill. */
+  :global(input[type="checkbox"]:checked)::after {
+    content: "";
+    position: absolute;
+    left: 4.5px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--color-text-on-dark);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
   }
   .model-row__body {
     display: flex;
@@ -1463,11 +1470,6 @@
     border-color: var(--color-border-strong);
   }
   .toggle-row input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--color-primary);
-    cursor: pointer;
-    flex-shrink: 0;
     margin-top: 2px;
   }
   .toggle-copy {

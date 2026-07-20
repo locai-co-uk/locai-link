@@ -69,6 +69,38 @@ jobs:
             echo "checkout_ref=$NAME" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Extract release notes from CHANGELOG
+        # The bullet summary at the top of the version's CHANGELOG.md entry
+        # becomes the release body (generate_release_notes appends the auto PR
+        # list below it). Warn — don't fail — if the entry is missing, so a
+        # release is never blocked on the changelog.
+        id: notes
+        if: inputs.tag == '' && !inputs.dry_run
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          OUT="$RUNNER_TEMP/release-notes.md"
+          python3 - "$VERSION" "$OUT" <<'PY'
+          import pathlib, re, sys
+          version, out = sys.argv[1], sys.argv[2]
+          lines = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          hdr = re.compile(r"^##\s*\[" + re.escape(version) + r"\]")
+          start = next((i + 1 for i, ln in enumerate(lines) if hdr.match(ln)), None)
+          summary: list[str] = []
+          if start is not None:
+              for ln in lines[start:]:
+                  if re.match(r"^###?\s", ln):  # next ## version or ### section ends the summary
+                      break
+                  summary.append(ln)
+          body = "\n".join(summary).strip()
+          if not body:
+              print(f"::warning::No CHANGELOG.md summary for {version}; using auto-generated notes only")
+          pathlib.Path(out).write_text(body + ("\n" if body else ""), encoding="utf-8")
+          PY
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub release
         # Skip when re-attaching to an existing release (workflow_dispatch
         # with tag input), and skip entirely when dry_run is true — dry-run
@@ -78,6 +110,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Release ${{ steps.tag.outputs.name }}
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true
           draft: false
           make_latest: true

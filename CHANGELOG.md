@@ -1,12 +1,107 @@
 # Changelog
 
+<!-- Each version entry leads with a short bullet summary. Those bullets are
+published verbatim as the GitHub release notes by .github/workflows/release.yml,
+so write them for the reader of the release. Keep pending work under
+[Unreleased] and rename it to the version on release. Detail goes in the ###
+sections below the summary. -->
+
+## [Unreleased]
+
+## [1.1.2]
+
+- macOS whole-app OTA now updates the menu-bar companion, not just the runtime.
+  The companion's LaunchAgent pointed at a binary name that never shipped, so
+  launchd could never run or relaunch it; correcting the path fixes the OTA
+  relaunch, first launch, and relaunch at login.
+- Devices installed before this fix repair themselves over OTA: on startup the
+  runtime detects a companion LaunchAgent with the wrong path, rewrites it, and
+  relaunches the tray, so no reinstall is needed. A companion that still cannot
+  refresh prompts a reinstall as a fallback.
+- The Setup Assistant and the OTA relaunch no longer leave two menu-bar icons.
+- Checkboxes in the Setup Assistant and companion render consistently across
+  platforms and themes, and hitting the device limit during setup shows a clear
+  next step instead of a raw backend error.
+- End-to-end update coverage (install, update, reinstall, uninstall) runs in CI
+  on macOS, so update regressions are caught before release.
+
+### Fixed: companion LaunchAgent binary path, the OTA root cause (`bundling/pkg/LaunchAgents/uk.co.locai.link.companion.plist`)
+
+- The plist `ProgramArguments` pointed at `.../Contents/MacOS/Locai Link`, but the
+  Tauri build produces `.../Contents/MacOS/locai-link-companion`. That path never
+  existed, so `launchctl` could not launch the companion (EX_CONFIG) and it only
+  came up via an `open -a` fallback. Correcting the path lets launchd run the
+  install-root copy the OTA swaps, so `kickstart -k` after a swap relaunches it.
+
+### Added: self-heal for stale companion LaunchAgents (`src/link/app/updater.py`)
+
+- On startup the runtime detects a companion LaunchAgent whose program path is
+  wrong (installs from before the fix), rewrites it in place, drops any stale
+  open-a instance, and re-bootstraps the launchd copy. This repairs existing
+  installs over OTA, since the OTA payload does not carry the plist. The
+  drift-detection reinstall prompt remains as a fallback.
+
+### Fixed: no duplicate companion on relaunch (`crates/setup_assistant/src-tauri/src/lib.rs`, `src/link/app/updater.py`)
+
+- The Setup Assistant falls back to `open -a` only when `kickstart` fails, so it
+  no longer starts a second tray once the plist is correct.
+- The OTA recovery relaunch bootstraps then kickstarts without `-k`, so it does
+  not race a second companion instance.
+
+### Fixed: macOS whole-app OTA relaunch hardening (`src/link/app/updater.py`, `crates/companion/`)
+
+- After swapping a UI `.app`, strip `com.apple.quarantine` and re-verify its code
+  signature; a quarantined bundle silently blocks a launchctl-driven relaunch.
+- The companion relaunch kickstarts in place, and if the service is not reachable
+  rebootstraps from the installed plist and retries, then falls back to
+  LaunchServices.
+- Drift detection compares the running companion version (published by the
+  companion at launch), not the on-disk bundle, so a swap that landed but did not
+  relaunch is caught.
+
+### Fixed: cross-platform checkboxes + device-limit error (`crates/setup_assistant/src/App.svelte`, `crates/companion/src/App.svelte`)
+
+- Replaced native `accent-color` checkboxes with a fully custom `appearance:none`
+  control so they render identically on webkit2gtk and WKWebView, in light and
+  dark, instead of being invisible in dark mode on macOS.
+- Registration surfaces a friendly "maximum number of registered devices" message
+  with a remediation step, and a generic fallback for other errors, so raw
+  backend text is never shown to the user.
+
+### Added: E2E update tests (`.github/workflows/e2e.yml`, `tests/`)
+
+- `macos-ota-e2e` asserts the on-disk app version actually changes after an OTA
+  (real `ditto` swap), gating every PR to main.
+- `macos-lifecycle` runs the real `postinstall` as root and asserts the
+  root-to-user ownership handoff the swap depends on, then reinstall-over-top
+  preserves models and session data.
+- Cross-artifact + hash-gating unit tests guard that the LaunchAgent, updater,
+  and postinstall agree on where the app lives, and that a version bump changes
+  the app hash so the swap actually fires.
+
+## [1.1.1]
+
+- macOS whole-app OTA reliably swaps the desktop apps: the update relaunches
+  the install-root companion copy the LaunchAgent actually starts.
+- A stale UI after an incomplete update is detected and prompts a reinstall, so
+  a device can't silently sit on a new runtime behind an old UI.
+
+### Fixed — macOS whole-app OTA (`src/link/app/updater.py`, `bundling/pkg/`)
+
+- The companion LaunchAgent and the OTA now target the user-owned install-root
+  copy (`/Library/Locai/Locai Link.app`), not the admin-owned `/Applications`
+  copy the user-context updater can't rewrite.
+- The post-update companion relaunch is fire-and-forget, so a slow
+  `launchctl kickstart` can't hang the update.
+- Added a one-time drift check + reinstall prompt when the UI apps can't be
+  swapped over OTA.
+
 ## [1.1.0]
 
-Whole-app over-the-air updates and in-app model downloads. Updating a
-device now refreshes the menu-bar companion and the Setup Assistant
-alongside the runtime, and macOS gains a working OTA path for the first
-time. The companion can also pull new models on demand, without
-rerunning the Setup Assistant.
+- Whole-app OTA: updates refresh the menu-bar companion and Setup Assistant
+  alongside the runtime, and macOS gets a working OTA path for the first time.
+- The companion can pull new models on demand, without rerunning the Setup
+  Assistant.
 
 ### Added — Whole-app OTA (`src/link/app/updater.py`)
 

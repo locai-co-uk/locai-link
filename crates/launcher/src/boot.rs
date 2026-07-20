@@ -17,10 +17,9 @@ const BOOT_JSON: &str = "boot.json";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BootConfig {
-    // host_app + channel are part of the documented schema but unused
-    // at runtime today; they exist so partner installers can write the
-    // full payload now and we can light up telemetry / staged-rollout
-    // routing later without a boot.json schema migration.
+    // host_app + channel are documented schema fields, unused at runtime today —
+    // present so partner installers write the full payload now and we can enable
+    // telemetry / staged-rollout routing later without a schema migration.
     #[allow(dead_code)]
     pub host_app: String,
     #[serde(default)]
@@ -40,21 +39,14 @@ fn default_channel() -> String {
     "stable".to_string()
 }
 
-/// Canonical order of plugin codes in the asset name. MUST mirror
-/// `PLUGIN_ORDER` in `bundling/manifest.py` — the build pipeline names
-/// the tarball with codes in this order, so the launcher has to look up
-/// by the same order.
+/// Canonical order of plugin codes in the asset name. MUST mirror `PLUGIN_ORDER`
+/// in `bundling/manifest.py` — the tarball is named in this order.
 const PLUGIN_ORDER: &[&str] = &["llm", "stt"];
 
 impl BootConfig {
-    /// Derive the runtime tarball's asset-name stem from `plugin_set`.
-    /// Matches the convention in `bundling/build.py`:
-    ///
-    ///     locai-link-<codes-in-canonical-order>-<os>-<arch>
-    ///
-    /// e.g. `locai-link-llm-macos-arm64`, `locai-link-llm-stt-linux-x86_64`.
-    /// The version + extension are appended later when we resolve a
-    /// concrete release asset.
+    /// Derive the tarball asset-name stem from `plugin_set`, matching
+    /// `bundling/build.py`: `locai-link-<codes-in-canonical-order>-<os>-<arch>`
+    /// (e.g. `locai-link-llm-stt-linux-x86_64`). Version + extension appended later.
     pub fn asset_basename(&self) -> String {
         let codes: Vec<&str> = PLUGIN_ORDER
             .iter()

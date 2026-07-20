@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class ZenohClient:
-    """
-    Manages the Zenoh session using direct configuration arguments.
-    """
+    """Manages the Zenoh session from direct configuration arguments."""
 
     def __init__(self, args: dict[str, Any] | None = None):
         """Initialises the ZenohClient.

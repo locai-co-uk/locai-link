@@ -1,18 +1,12 @@
 <script lang="ts">
-  // The Preferences window for the Locai Link companion. Tray click
-  // on "Preferences…" un-hides + focuses this window; the "close"
-  // button on the window hides it (see `on_window_event` in
-  // src-tauri/src/lib.rs) so the tray stays running.
+  // Preferences window for the Locai Link companion. Tray "Preferences…"
+  // un-hides + focuses it; the window's close button hides it (see
+  // `on_window_event` in src-tauri/src/lib.rs) so the tray stays running.
   //
-  // State model:
-  //   - `state` is the full snapshot from `get_prefs_state`, loaded
-  //     once on mount. Everything not-agent-status (device identity,
-  //     install root, log path) is stable for the window's lifetime.
-  //   - `poll_status` refreshes agent state + transport every 4s while
-  //     visible so the Status pill and Network panel are live.
-  //
-  // Failures collapse to a Down agent state; the "Start Locai Link"
-  // button is the primary recovery gesture from there.
+  // `state` is the full `get_prefs_state` snapshot, loaded once on mount
+  // (device identity, install root, log path — stable for the window's life).
+  // `poll_status` refreshes agent state + transport while visible. Failures
+  // collapse to a Down state; "Start Locai Link" is the recovery gesture.
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, onMount, tick } from "svelte";
@@ -47,10 +41,8 @@
     network: TransportHealth | null;
     advanced: AdvancedInfo;
     /// Host OS — "macos" | "linux" | "windows" | …
-    /// Gates the UI for controls that only exist on macOS today
-    /// (Start/Stop/Restart, Start-at-login, Uninstall). On other
-    /// platforms those widgets are hidden until the equivalent
-    /// service management (systemd, etc.) is wired.
+    /// Gates macOS-only controls (Start/Stop/Restart, Start-at-login,
+    /// Uninstall); hidden elsewhere until that service management is wired.
     platform: string;
   };
 
@@ -97,29 +89,25 @@
     status: string; // "dispatched" | "pending" | "already_installed"
   };
 
-  // Models + in-flight deployments are refreshed by the same
-  // `poll_status` tick as everything else. Kept outside `prefs` because
-  // they aren't part of the initial `get_prefs_state` snapshot — they
-  // only exist once the poll has run at least once, and the Models
-  // panel handles the empty case naturally.
+  // Models + in-flight deployments refresh on each `poll_status` tick. Kept
+  // outside `prefs` — they aren't in the initial `get_prefs_state` snapshot
+  // and only exist once a poll has run; the Models panel handles empty fine.
   let models = $state<ModelInfo[]>([]);
   let deployments = $state<DeploymentProgress[]>([]);
   let updateAvailable = $state(false);
   let latestVersion = $state<string | null>(null);
-  // Update-in-progress tracking. The agent's health server goes down during
-  // the swap, so we infer "Updating" client-side: set on trigger, confirmed
-  // once we've seen the agent drop, cleared when it returns (success clears
-  // the banner via update_available=false; failure re-shows it).
+  // Update-in-progress is inferred client-side (the agent's health server
+  // drops during the swap): set on trigger, confirmed once we see it drop,
+  // cleared when it returns — success via update_available=false, failure re-shows.
   let updateStarted = $state(false);
   let updateSawDown = $state(false);
   // Suppress the tray-trigger inference during a user-initiated stop/restart
   // so a manual Stop while an update is available isn't mislabelled "Updating".
   let suppressUpdateInfer = $state(false);
 
-  // Available-models catalog. Fetched from Control (device-key
-  // authed) on demand, not part of the /healthz poll. `requested` tracks
-  // models the user just tapped Download on, for instant feedback before the
-  // queued deployment row shows up in the poll.
+  // Available-models catalog: fetched from Control (device-key authed) on
+  // demand, not via the /healthz poll. `requested` tracks just-tapped
+  // Downloads for instant feedback before the queued row shows in the poll.
   let availableModels = $state<AvailableModel[]>([]);
   let availableLoading = $state(false);
   let availableError = $state<string | null>(null);
@@ -135,11 +123,9 @@
   let downloadsSection = $state<HTMLElement | null>(null);
 
   let prefs = $state<PrefsState | null>(null);
-  // Gate the Agent status pill until we've had at least one poll_status
-  // confirmation. get_prefs_state's /healthz probe occasionally returns
-  // Down on cold start (first WebView open + cold connection pool) even
-  // though the runtime is up; without this gate the pill flashed "Stopped"
-  // for ~one poll tick before self-correcting.
+  // Gate the Agent status pill until the first poll_status confirmation:
+  // get_prefs_state's cold-start probe can return Down even when the runtime
+  // is up, which flashed "Stopped" for one tick before self-correcting.
   let hasPolled = $state(false);
   let loadError = $state<string | null>(null);
   let pending = $state<Set<string>>(new Set());
@@ -283,11 +269,9 @@
     }
   }
 
-  // Join models + deployments by pipeline_id so the panel can render
-  // one row per pipeline, showing progress inline when a deployment is
-  // in flight for that id. Deployments without a matching model row
-  // (models list hasn't caught up yet, or the runtime is still creating
-  // the pipeline) get their own row keyed by pipeline_id.
+  // Join models + deployments by pipeline_id: one row per pipeline, progress
+  // inline for in-flight deploys. Deployments with no matching model row
+  // (models list lagging, or pipeline still being created) get their own row.
   const modelRows = $derived.by(() => {
     type Row = {
       pipeline_id: string;
@@ -330,20 +314,18 @@
     return supportedTypes.includes(m.model_type);
   }
 
-  // Installed on THIS device. The local /models list is authoritative and
-  // immediate; Control's installed_on_device flag lags (it round-trips through
-  // Firestore after the deploy reports back), so prefer local and fall back to
-  // the flag. Fixes Setup-Assistant-installed models showing "Download" and a
-  // just-finished download sticking on "Starting…".
+  // Installed on THIS device. Local /models is authoritative and immediate;
+  // Control's installed_on_device flag lags (Firestore round-trip), so prefer
+  // local and fall back to the flag. Fixes SA-installed models showing
+  // "Download" and finished downloads sticking on "Starting…".
   const installedIds = $derived(new Set(models.map((m) => m.id)));
   function isInstalled(m: AvailableModel): boolean {
     return installedIds.has(m.model_id) || m.installed_on_device;
   }
 
-  // Catalog rows for the download list. Servable types only (see isServable). A
-  // model with an in-flight deployment already shows (with progress) in the
-  // Models panel above, so hide it here to avoid a duplicate row. Installed
-  // models stay, marked "Installed" below.
+  // Catalog rows for the download list. Servable types only (see isServable).
+  // Models with an in-flight deployment already show in the Models panel above,
+  // so hide them here to avoid duplicates; installed models stay, marked below.
   const availableRows = $derived.by(() => {
     const deploying = new Set(deployments.map((d) => d.pipeline_id));
     return availableModels.filter((m) => isServable(m) && !deploying.has(m.model_id));
@@ -687,10 +669,9 @@
         </div>
       {/if}
       {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updateStarted}
-        <!-- Service management is wired for both macOS (launchctl) and
-             Linux (systemctl --user). Windows still lacks a backend,
-             so those buttons stay hidden there. Hidden mid-update: the
-             agent bounces on its own, so Start/Stop/Restart shouldn't show. -->
+        <!-- Service management wired for macOS (launchctl) + Linux
+             (systemctl --user); hidden on Windows (no backend) and mid-update
+             (the agent bounces on its own). -->
         <div class="row row--action">
           {#if prefs.agent.status === "up"}
             <button
@@ -912,10 +893,8 @@
         <span class="row__label">Install root</span>
         <span class="row__value mono">{prefs.advanced.install_root}</span>
       </div>
-      <!-- Uninstall lives on the Setup Assistant chooser (Applications
-           menu → Locai Setup Assistant), not here. Preferences is for
-           tweaking a running install; lifecycle ops (re-register,
-           uninstall) belong on the SA. -->
+      <!-- Uninstall lives on the Setup Assistant, not here: Preferences tweaks
+           a running install; lifecycle ops (re-register, uninstall) go to the SA. -->
     </section>
   {/if}
 </div>
@@ -1180,12 +1159,43 @@
     cursor: pointer;
     margin-top: 8px;
   }
+  /* Custom checkbox — appearance:none so it renders identically on
+     webkit2gtk and WKWebView, in light and dark. Colors come from tokens
+     that flip with the theme, so no per-mode overrides are needed. */
+  :global(input[type="checkbox"]) {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    flex-shrink: 0;
+    cursor: pointer;
+    border: 1.5px solid var(--color-border-checkbox-off, #C9C6BE);
+    border-radius: var(--radius-checkbox, 5px);
+    background: var(--color-surface, #FFFFFF);
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  :global(input[type="checkbox"]:checked) {
+    background: var(--color-primary, #00B85A);
+    border-color: var(--color-primary, #00B85A);
+  }
+  /* Checkmark — a rotated border shown only when checked. The on-dark
+     token stays light in both themes, so it reads on the green fill. */
+  :global(input[type="checkbox"]:checked)::after {
+    content: "";
+    position: absolute;
+    left: 4.5px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--color-text-on-dark, #FFFFFF);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
   .toggle-row input[type="checkbox"] {
     width: 15px;
     height: 15px;
-    accent-color: var(--color-primary, #00B85A);
-    cursor: pointer;
-    flex-shrink: 0;
     margin-top: 1px;
   }
   .toggle-copy {

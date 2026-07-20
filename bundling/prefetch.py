@@ -27,18 +27,12 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-# Executables that the bundle's plugins actually invoke at runtime. Anything
-# else in the prefetched bin-* directories is dev/debug/bench tooling shipped
-# alongside the real binaries in the upstream release archives — we delete it
-# before PyInstaller picks it up so the bundle is smaller, signs faster, and
-# notarises faster.
-#
-# Listed per-platform with extensions because the same set covers macOS / Linux
-# (no extension) and Windows (.exe). Shared libraries (libllama.dylib,
-# libggml-*.dylib, libmtmd.dylib, libwhisper.dylib, .so, .dll, .metallib, etc.)
-# are NEVER pruned — they're identified by name prefix / suffix in
-# _is_shared_library() and preserved unconditionally because llama-server /
-# whisper-server dynamically link against them.
+# Executables the plugins actually invoke at runtime. Everything else in the
+# prefetched bin-* dirs is dev/debug/bench tooling from the upstream archives;
+# we delete it before PyInstaller so the bundle is smaller and signs/notarises
+# faster. Listed per-platform (no ext on macOS/Linux, .exe on Windows). Shared
+# libraries are NEVER pruned — _is_shared_library() preserves them because
+# llama-server / whisper-server dynamically link against them.
 LLAMA_RUNTIME_EXECUTABLES: set[str] = {
     "llama-server",
     "llama-server.exe",
@@ -99,21 +93,12 @@ def _is_executable_file(path: Path) -> bool:
 def _prune_unused_executables(bin_dir: Path, keep: set[str]) -> None:
     """Delete executables under ``bin_dir`` whose name isn't in ``keep``.
 
-    Walks ``bin_dir`` recursively. For each regular file:
-
-    - If it's a shared library (lib*, .dylib/.so/.dll/.metallib/.metal, or a
-      versioned .so.N) it's preserved unconditionally.
-    - If its name is in ``keep`` it's preserved.
-    - Otherwise, only files that the magic-byte check identifies as Mach-O,
-      ELF, or PE executables are deleted. Data files (READMEs, headers,
-      configs) are left alone to keep the prune behaviour minimally invasive.
-
-    A second pass cleans up symlinks whose target was deleted so notarisation
-    doesn't choke on dangling links.
-
-    Net effect on a typical llama.cpp release archive: ~25 dev/bench
-    executables totalling 200-400 MB are removed, leaving just llama-server +
-    llama-swap and all the shared libraries they link against.
+    Preserves shared libraries and ``keep``-named files unconditionally; of the
+    rest, only magic-byte-confirmed Mach-O/ELF/PE files are deleted (data files
+    are left alone to stay minimally invasive). A second pass drops symlinks
+    whose target was deleted so notarisation doesn't choke on dangling links.
+    Net effect on a llama.cpp archive: ~25 dev/bench executables (200-400 MB)
+    removed, leaving llama-server + llama-swap and their shared libs.
     """
     dropped: list[tuple[str, int]] = []
     kept: list[str] = []
@@ -140,10 +125,9 @@ def _prune_unused_executables(bin_dir: Path, keep: set[str]) -> None:
         except OSError as exc:
             logger.warning(f"Could not delete {entry.name}: {exc}")
 
-    # Drop dangling symlinks left behind by the deletion pass — some
-    # llama.cpp builds include short-name symlinks pointing at versioned
-    # binaries (rare for executables, common for shared libs). Skipping
-    # this leaves notarytool with broken links and ddebug-level confusion.
+    # Drop dangling symlinks left by the deletion pass — some llama.cpp builds
+    # ship short-name symlinks to versioned binaries. Skipping this leaves
+    # notarytool with broken links.
     for entry in bin_dir.rglob("*"):
         if entry.is_symlink() and not entry.exists():
             try:
@@ -214,11 +198,9 @@ def prefetch_language_model(dest_root: Path) -> Path:
     elif not install._install_swap_prebuilt(swap_url, bin_dir, swap_tag):
         raise SystemExit(f"Failed to install llama-swap prebuilt from {swap_url}")
 
-    # Strip dev/bench tooling shipped alongside llama-server in the upstream
-    # archive (llama-bench, llama-quantize, rpc-server, etc.). Each is its
-    # own Mach-O that codesign+notarise spend real time on for zero runtime
-    # value. Allowlist is the binaries the language_model plugin actually
-    # invokes; everything else executable goes.
+    # Strip dev/bench tooling shipped alongside llama-server (llama-bench,
+    # llama-quantize, rpc-server, etc.) — each costs codesign+notarise time for
+    # zero runtime value. Keep only what the plugin invokes.
     _prune_unused_executables(bin_dir, LLAMA_RUNTIME_EXECUTABLES)
 
     return bin_dir
@@ -240,10 +222,9 @@ def prefetch_audio_transcriber(dest_root: Path) -> Path:
     url = install._prebuilt_url(tag)
     if url is not None:
         if install._install_prebuilt(url, bin_dir, tag):
-            # Defensive: whisper.cpp's Windows prebuilt is already filtered
-            # to whisper-server.exe + DLLs at install time, but a future
-            # release could change that. The prune is a no-op in steady
-            # state and a safety net otherwise.
+            # Defensive: the Windows prebuilt is already filtered to
+            # whisper-server.exe + DLLs, but a future release could change that.
+            # No-op in steady state.
             _prune_unused_executables(bin_dir, WHISPER_RUNTIME_EXECUTABLES)
             return bin_dir
         raise SystemExit(f"Failed to install whisper.cpp prebuilt from {url}")

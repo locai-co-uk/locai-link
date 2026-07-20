@@ -22,7 +22,9 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
-  # 0. Version bump check (PRs to main only)
+  # 0. Version bump check (PRs to main only). The check step is skipped for
+  # Dependabot (dependency bumps legitimately don't touch the app version); the
+  # job still succeeds so a required status check stays green.
   version-bump:
     name: Check Version Bump
     runs-on: ubuntu-latest
@@ -33,6 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check version was bumped
+        if: github.actor != 'dependabot[bot]'
         run: |
           PR_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
           MAIN_VERSION=$(git show origin/main:pyproject.toml | grep '^version' | head -1 | sed 's/.*= *"\(.*\)"/\1/')
@@ -43,6 +46,18 @@ jobs:
             exit 1
           fi
           echo "Version bumped: $MAIN_VERSION -> $PR_VERSION"
+
+      - name: Warn if a plugin binary changed without a tag bumps
+        run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD -- 'plugins/*/install.py' || true)
+          for f in $CHANGED; do
+            new=$(grep -E '_RELEASE[[:space:]]*=[[:space:]]*"' "$f" | sort || true)
+            [ -n "$new" ] || continue   # plugin pins no binaries — nothing to bump
+            old=$(git show "origin/main:$f" 2>/dev/null | grep -E '_RELEASE[[:space:]]*=[[:space:]]*"' | sort || true)
+            if [ "$old" = "$new" ]; then
+              echo "::warning file=$f::$f changed but no pinned *_RELEASE tag moved. If the plugin binary changed, bump its pinned tag so devices re-fetch (binary fetch is tag-cached)."
+            fi
+          done
 
   # 1. Standard Unit Tests (Fast)
   unit-test:

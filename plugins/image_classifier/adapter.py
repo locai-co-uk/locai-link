@@ -99,21 +99,17 @@ class ImageClassifier:
 
     def __call__(self):
         """Retrieves the next inference result (blocking/non-blocking via queue)."""
-        # 1. Try to get data
         try:
             result = self.queue.get_nowait()
             return result
         except queue.Empty:
-            # 2. If no data, CHECK IF WE ARE DEAD
-            # This is the fix: If the thread stopped (window closed), tell the Runtime to stop.
+            # No data — if the capture thread died (window closed), stop.
             if not self.running or not self.thread.is_alive():
                 raise StopIteration("User closed the window.")
             return None
 
     def stop(self):
-        """
-        Graceful Shutdown with Force Quit fallback.
-        """
+        """Graceful shutdown with force-quit fallback."""
         logger.info(f"Stopping {self.__class__.__name__}...")
         self.running = False
 

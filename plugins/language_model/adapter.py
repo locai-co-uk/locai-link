@@ -182,9 +182,8 @@ class LanguageModel:
                     "source": record.get("source", "serving_proxy"),
                 },
             )
-            # put_nowait + Full is race-free; full() then put() leaves a
-            # window where another producer can fill the queue and we'd
-            # block the ServingProxy's handler thread on insertion.
+            # put_nowait is race-free; full()+put() could block the
+            # ServingProxy handler thread if another producer fills the queue.
             try:
                 self.queue.put_nowait(payload)
             except queue.Full:

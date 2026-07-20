@@ -69,11 +69,8 @@ fn plugin_model_type(plugin: &str) -> Option<&'static str> {
     }
 }
 
-/// Model types this install can actually serve, derived from the plugins baked
-/// into the current bundle (`current/manifest.json`). Source of truth for
-/// filtering model lists to what the build supports. Falls back to
-/// `language_models` (the always-present core) when the manifest is unreadable
-/// or lists no known servable plugins (e.g. a source checkout with no manifest).
+/// Model types this install can serve, derived from the current bundle's
+/// plugins (`current/manifest.json`). Source of truth for filtering model lists.
 pub fn supported_model_types(install_root: &Path) -> Vec<String> {
     // Unreadable manifest (source checkout / missing) → LLM fallback. A readable
     // manifest with no servable plugins → empty, so nothing unsupported is offered.

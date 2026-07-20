@@ -1,94 +1,181 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: CC0-1.0
 #
-# Installers — shellcheck + install/uninstall roundtrip smoke tests.
+# End-to-end: the whole lifecycle we have no human tester for — install,
+# update, reinstall, uninstall — plus shellcheck on the shipped scripts.
 #
-# Guards the class of "shipped a broken installer" bugs by running the
-# install/uninstall scripts end-to-end against a synthetic bundle. Fast
-# (~90 s per platform), no secrets required.
+# THE RULE: every new user-facing feature adds a stage/assertion here. If it
+# can be observed headlessly (a file lands, a version changes, an endpoint
+# answers), it gets a check. "Worked on my Mac once" is not coverage.
 #
-# Coverage:
-#   1. Shellcheck — static analysis of every shipped shell script.
-#      Catches typos, missing quotes, unused vars, set-e / exit-code
-#      gaps at build time rather than at the user's laptop.
-#   2. macOS roundtrip — fakes the file layout a real .pkg install
-#      would produce (INSTALL_ROOT, both /Applications bundles,
-#      user-domain LaunchAgents, per-user Tauri caches / prefs /
-#      WebKit / saved state, /usr/local/bin symlink), then runs
-#      uninstall.sh and asserts every artefact is gone. Also runs
-#      uninstall.sh WITHOUT sudo and asserts it exits non-zero with
-#      the system layout still intact — the exact bug that shipped
-#      in the last release.
-#   3. Linux roundtrip — assembles a synthetic tarball, runs
-#      install.sh against a scratch install root, verifies the install
-#      root + systemd units + .desktop entries + icons + @HOME@
-#      substitution all landed, then uninstall.sh and verifies the
-#      cleanup.
+# Non-overlapping jobs:
+#   macos-ota-e2e  — swap correctness: the .app version on disk actually
+#                    changes after an OTA. Fast, pure Python, every PR to main.
+#   macos-lifecycle— real postinstall as root: the root→user ownership handoff
+#                    the swap depends on, then reinstall-over-top preserves data.
+#   macos-uninstall— uninstall cleans everything AND refuses to run non-root.
+#   linux-roundtrip— install.sh → assert layout → uninstall.sh → assert clean.
+#   shellcheck     — static analysis of every shipped shell script.
 #
-# What this workflow deliberately does NOT test:
-#   * codesign / notarization on real .pkg — release.yml covers that
-#     on tag push.
-#   * Zenoh deploy race at Finish — needs a live Control server.
-#   * Tray icon visibility / Spotlight UI — no GUI on hosted runners.
+# Can't run headless (track as manual pre-release checks): companion tray/WebKit
+# UI, `launchctl kickstart gui/$uid` picking up the new binary, OAuth + device
+# registration against live Control, notarized .pkg double-click Gatekeeper.
 #
-# Why not in ci.yml:
-#   * `paths:` filter below skips this workflow entirely on PRs that
-#     don't touch installer files — most PRs don't, so we don't burn
-#     macOS-runner minutes on unrelated code changes.
-#   * Failure semantics are different from unit tests. A shellcheck
-#     tightening breaking this workflow shouldn't gate a Python fix.
+# Runs on every PR to main (and push to main) — the point is to block a
+# regression before it merges, not to find it post-merge when the damage is done.
 
-name: Installers
+name: E2E
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "main"
-      - "dev"
-    paths:
-      - "bundling/**"
-      - ".github/workflows/installers.yml"
+    branches: ["main"]
   pull_request:
-    branches:
-      - "main"
-      - "dev"
-    paths:
-      - "bundling/**"
-      - ".github/workflows/installers.yml"
+    branches: ["main"]
 
 permissions:
   contents: read
 
-# One run per ref — a rapid re-push cancels the in-flight one.
 concurrency:
-  group: installers-${{ github.ref }}
+  group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  shellcheck:
-    name: Shellcheck
-    runs-on: ubuntu-latest
+  # Swap correctness — every PR to main. Real .app swap on a macOS runner,
+  # asserting the on-disk version changed (the one thing no mocked test proves).
+  macos-ota-e2e:
+    name: macOS OTA e2e
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Install shellcheck
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends shellcheck
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
-      - name: Lint scripts
-        run: |
-          shellcheck --severity=warning \
-            bundling/pkg/scripts/postinstall \
-            bundling/pkg/uninstall.sh \
-            bundling/linux/install.sh \
-            bundling/linux/uninstall.sh \
-            bundling/linux/pack.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-  macos-roundtrip:
+      - name: Install project
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+
+      - name: OTA e2e (real .app swap)
+        shell: bash
+        env:
+          DEVICE_MODE: "LOCAL"
+        run: uv run pytest tests/test_ota_e2e_macos.py -v -m ci
+
+  # Real install ownership + reinstall data-preservation.
+  macos-lifecycle:
+    name: macOS install → reinstall
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install project
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+
+      - name: Stage a v1.0.0 payload (what the .pkg lays down)
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGING="$RUNNER_TEMP/pkg-staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING/versions/1.0.0" "$STAGING/LaunchAgents"
+          printf '#!/bin/sh\nexit 0\n' > "$STAGING/locai-link"
+          chmod 755 "$STAGING/locai-link"
+          printf '#!/bin/sh\nexit 0\n' > "$STAGING/versions/1.0.0/locai-link-runtime"
+          chmod 755 "$STAGING/versions/1.0.0/locai-link-runtime"
+          uv run python bundling/_ota_lifecycle.py manifest "$STAGING/versions/1.0.0/manifest.json" 1.0.0 c-v1 s-v1
+          ln -s versions/1.0.0 "$STAGING/current"
+          uv run python bundling/_ota_lifecycle.py app "$STAGING/Locai Link.app" 1.0.0 "Locai Link" companion-v1
+          uv run python bundling/_ota_lifecycle.py app "$STAGING/Setup Assistant.app" 1.0.0 "Setup Assistant" sa-v1
+          echo '{"channel":"prod"}' > "$STAGING/boot.json"
+          cp bundling/pkg/uninstall.sh "$STAGING/uninstall.sh"
+          chmod 755 "$STAGING/uninstall.sh"
+          cp bundling/pkg/LaunchAgents/*.plist "$STAGING/LaunchAgents/"
+          echo "STAGING=$STAGING" >> "$GITHUB_ENV"
+
+      - name: Install — run the real postinstall as root
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /Library/Locai
+          sudo cp -R "$STAGING/." /Library/Locai/
+          # pkgbuild passes ($1 pkg, $2 dest, $3 volume, $4 root); SUDO_USER is
+          # how postinstall learns which user to hand writable state to.
+          sudo SUDO_USER="$USER" bash bundling/pkg/scripts/postinstall / / / /
+
+      - name: Assert ownership + swap-readiness (the ownership bug's only test)
+        shell: bash
+        run: |
+          set -euo pipefail
+          me="$USER"
+          owner() { stat -f '%Su' "$1"; }
+          [ -f /Library/Locai/locai-link ] || { echo "::error::launcher missing"; exit 1; }
+          [ "$(owner /Library/Locai)" = "$me" ] || { echo "::error::install root not user-owned"; exit 1; }
+          app="/Library/Locai/Locai Link.app"
+          [ "$(owner "$app")" = "$me" ] || { echo "::error::companion not user-owned — OTA can't swap it"; exit 1; }
+          # The precondition the swap needs: the user can actually write the bundle.
+          touch "$app/.ci-write-test" || { echo "::error::companion not user-writable"; exit 1; }
+          rm -f "$app/.ci-write-test"
+          [ -d "/Applications/Locai Link.app" ] || { echo "::error::/Applications copy missing"; exit 1; }
+          [ -e /usr/local/bin/locai ] || { echo "::error::CLI symlink missing"; exit 1; }
+          echo "install ownership + swap-readiness OK"
+
+      - name: Seed device data (models + session)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /Library/Locai/models /Library/Locai/configs
+          echo "gguf" > /Library/Locai/models/test-model.gguf
+          echo '{"device_id":"dev-123"}' > /Library/Locai/configs/session_test.json
+
+      - name: Reinstall over-the-top with v1.1.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGING="$RUNNER_TEMP/pkg-staging"
+          uv run python bundling/_ota_lifecycle.py app "$STAGING/Locai Link.app" 1.1.0 "Locai Link" companion-v2
+          uv run python bundling/_ota_lifecycle.py app "$STAGING/Setup Assistant.app" 1.1.0 "Setup Assistant" sa-v2
+          sudo cp -R "$STAGING/." /Library/Locai/
+          sudo SUDO_USER="$USER" bash bundling/pkg/scripts/postinstall / / / /
+
+      - name: Assert reinstall preserved data and refreshed the apps
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f /Library/Locai/models/test-model.gguf ] || { echo "::error::model wiped by reinstall"; exit 1; }
+          [ -f /Library/Locai/configs/session_test.json ] || { echo "::error::session wiped by reinstall"; exit 1; }
+          v=$(uv run python bundling/_ota_lifecycle.py appversion "/Library/Locai/Locai Link.app")
+          [ "$v" = "1.1.0" ] || { echo "::error::install-root companion not refreshed (got $v)"; exit 1; }
+          v2=$(uv run python bundling/_ota_lifecycle.py appversion "/Applications/Locai Link.app")
+          [ "$v2" = "1.1.0" ] || { echo "::error::/Applications companion not refreshed (got $v2)"; exit 1; }
+          echo "reinstall preserved data and refreshed both app copies"
+
+  # Uninstall cleans everything and refuses to run without root.
+  macos-uninstall:
     name: macOS uninstall roundtrip
     runs-on: macos-latest
     steps:
@@ -99,10 +186,6 @@ jobs:
       - name: Synthesise the install layout
         run: |
           set -euo pipefail
-          # Everything a real .pkg install would produce, minus the
-          # runnable binaries — those don't matter for uninstall
-          # coverage. Empty dirs get a marker file so `rm -rf` has
-          # something to remove.
           sudo mkdir -p /Library/Locai
           sudo touch /Library/Locai/locai-link
           sudo chmod 755 /Library/Locai/locai-link
@@ -120,8 +203,6 @@ jobs:
           mkdir -p "$HOME/Library/LaunchAgents"
           touch "$HOME/Library/LaunchAgents/uk.co.locai.link.agent.plist"
           touch "$HOME/Library/LaunchAgents/uk.co.locai.link.companion.plist"
-          # Per-user Tauri data: two bundle IDs (companion + setup)
-          # across every $HOME/Library subtree uninstall.sh cleans.
           for bid in uk.co.locai.link.companion uk.co.locai.link.setup; do
             mkdir -p "$HOME/Library/Caches/$bid"
             mkdir -p "$HOME/Library/WebKit/$bid"
@@ -139,10 +220,6 @@ jobs:
             echo "::error::uninstall.sh returned 0 as non-root — it must refuse to run"
             exit 1
           fi
-          # System paths must survive a non-root invocation. User-scope
-          # paths are skipped here: non-root CAN write those, so a naive
-          # cleanup could remove them even while /Library survives —
-          # what matters is the root-only paths are untouched.
           for p in \
             "/Library/Locai" \
             "/Library/Locai/uninstall.sh" \
@@ -200,21 +277,14 @@ jobs:
           set -euo pipefail
           STAGE="$RUNNER_TEMP/locai-bundle"
           mkdir -p "$STAGE/bundle" "$STAGE/systemd" "$STAGE/applications" "$STAGE/icons"
-
-          # "Real enough" launcher: chmod +x shell script that exits 0
-          # when invoked. install.sh only checks -f, but the SA hand-off
-          # at the end does `nohup … &` — so the file must be exec-able.
           cat > "$STAGE/bundle/locai-link" <<'EOF'
           #!/bin/bash
           exit 0
           EOF
           chmod 755 "$STAGE/bundle/locai-link"
-
-          # Minimal manifest so future readers don't trip on missing keys.
           cat > "$STAGE/bundle/manifest.json" <<'EOF'
           {"version":"0.0.0-smoke","asset_name":"smoke","plugins":[]}
           EOF
-
           for bin in setup-assistant companion; do
             cat > "$STAGE/$bin" <<'EOF'
           #!/bin/bash
@@ -222,14 +292,11 @@ jobs:
           EOF
             chmod 755 "$STAGE/$bin"
           done
-
           echo '{"channel":"prod"}' > "$STAGE/boot.json"
           cp bundling/linux/systemd/locai-link-agent.service     "$STAGE/systemd/"
           cp bundling/linux/systemd/locai-link-companion.service "$STAGE/systemd/"
           cp bundling/linux/applications/locai-link.desktop            "$STAGE/applications/"
           cp bundling/linux/applications/locai-setup-assistant.desktop "$STAGE/applications/"
-
-          # A single 1×1 PNG per size exercises the icon-copy branches.
           python3 - <<'PY' "$STAGE/icons"
           import base64, os, sys
           out = sys.argv[1]
@@ -240,18 +307,14 @@ jobs:
               with open(os.path.join(out, name), "wb") as f:
                   f.write(png)
           PY
-
           cp bundling/linux/install.sh   "$STAGE/install.sh"
           cp bundling/linux/uninstall.sh "$STAGE/uninstall.sh"
           chmod 755 "$STAGE/install.sh" "$STAGE/uninstall.sh"
-
           echo "STAGE=$STAGE" >> "$GITHUB_ENV"
 
       - name: Run install.sh
         run: |
           set -euo pipefail
-          # Scratch install root so the test doesn't care about the
-          # runner's real $HOME layout. install.sh reads $LOCAI_INSTALL_ROOT.
           export LOCAI_INSTALL_ROOT="$RUNNER_TEMP/locai-install"
           echo "LOCAI_INSTALL_ROOT=$LOCAI_INSTALL_ROOT" >> "$GITHUB_ENV"
           bash "$STAGE/install.sh"
@@ -277,15 +340,10 @@ jobs:
           check_present "$HOME/.local/share/applications/locai-setup-assistant.desktop"
           check_present "$HOME/.local/share/icons/hicolor/32x32/apps/locai-link.png"
           check_present "$HOME/.local/share/icons/hicolor/128x128/apps/locai-link.png"
-
-          # @HOME@ substitution guard: the shipped .desktop template uses
-          # the sentinel because %h is KDE-only. A regression would leave
-          # the literal @HOME@ in the installed file, breaking launchers.
           if grep -q "@HOME@" "$HOME/.local/share/applications/locai-link.desktop"; then
             echo "::error::@HOME@ sentinel survived into installed .desktop file"
             fail=1
           fi
-
           [[ $fail -eq 0 ]] || exit 1
           echo "install.sh laid out every expected artefact"
 
@@ -309,3 +367,25 @@ jobs:
           check_gone "$HOME/.local/share/icons/hicolor/128x128/apps/locai-link.png"
           [[ $fail -eq 0 ]] || exit 1
           echo "uninstall.sh cleaned every path install.sh created"
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Lint scripts
+        run: |
+          shellcheck --severity=warning \
+            bundling/pkg/scripts/postinstall \
+            bundling/pkg/uninstall.sh \
+            bundling/linux/install.sh \
+            bundling/linux/uninstall.sh \
+            bundling/linux/pack.sh

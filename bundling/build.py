@@ -154,16 +154,11 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
     """Reshape PyInstaller's flat output into the install_root + versions/<v>/ layout.
 
     PyInstaller writes everything to ``<dist>/locai-link/``. We move that into
-    ``<dist>/locai-link/versions/<version>/`` and add a ``current`` pointer at
-    ``<dist>/locai-link/current`` so the tarball extracts onto a target machine
-    as a valid Pattern-A first install (see ../OTA-BUNDLE.md §4.1).
-
-    If a prior build left stale ``versions/``, ``current``, or ``CURRENT``
-    artefacts inside ``bundle_dir``, those are removed before staging.
-    Otherwise a second run of this function would nest the old versioned
-    tree inside the new ``versions/<version>/``.
-
-    Returns the new versioned bundle directory.
+    ``versions/<version>/`` and add a ``current`` pointer so the tarball extracts
+    on a target machine as a valid Pattern-A first install (see ../OTA-BUNDLE.md
+    §4.1). Any stale ``versions``/``current``/``CURRENT`` from a prior build is
+    removed first, else a second run would nest the old tree inside the new
+    ``versions/<version>/``. Returns the new versioned bundle directory.
     """
     if not bundle_dir.is_dir():
         raise SystemExit(f"Expected PyInstaller output at {bundle_dir}, but it isn't a directory.")
@@ -172,10 +167,8 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
     dist_root = install_root.parent
     staging = dist_root / f"_staged_{version}"
 
-    # Clean stale versioning artefacts left by a prior build so they don't
-    # get carried into the new payload. PyInstaller re-writes everything
-    # else, but these entries live at the install-root layer we're about
-    # to synthesise ourselves.
+    # Clean stale versioning artefacts from a prior build — PyInstaller re-writes
+    # everything else, but these live at the install-root layer we synthesise here.
     for stale in ("versions", "current", "CURRENT"):
         stale_path = install_root / stale
         if stale_path.is_symlink() or stale_path.is_file():
@@ -200,9 +193,8 @@ def _write_current_pointer(install_root: Path, version: str) -> None:
     """Write the ``current`` pointer the launcher follows on start.
 
     POSIX: relative symlink ``current -> versions/<version>``. Windows hosts
-    without Developer Mode / admin can't create symlinks; fall back to a
-    plain text ``CURRENT`` file containing the version string. Phase 2's
-    launcher must accept both shapes.
+    without Developer Mode / admin can't symlink, so fall back to a plain text
+    ``CURRENT`` file holding the version. The launcher must accept both shapes.
     """
     rel_target = Path("versions") / version
     link = install_root / "current"

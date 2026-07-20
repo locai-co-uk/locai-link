@@ -4,17 +4,17 @@
 #
 # Locally assemble the Linux release tarball.
 #
-# Produces the same shape CI will produce on tag push, so you can
-# exercise the "extract + install.sh" path without cutting a release.
+# Produces the same shape CI produces on tag push, so you can exercise the
+# "extract + install.sh" path without cutting a release.
 #
 # Prereqs (run these first in the repo root):
 #     uv run python bundling/build.py --plugins <plugin-set>
 #     ( cd crates/setup_assistant && npm run tauri build -- --no-bundle )
 #     ( cd crates/companion       && npm run tauri build -- --no-bundle )
 #
-# Plugin selection is picked up from dist/locai-link/manifest.json
-# (written by build.py). Whatever plugins ended up in the bundle are
-# what the tarball is labelled for — no separate --plugins flag here.
+# Plugin selection is read from dist/locai-link/manifest.json (written by
+# build.py) — the tarball is labelled for whatever plugins the bundle has;
+# no separate --plugins flag here.
 #
 # Output layout (inside the tarball):
 #     locai-link-<code>-linux-x86_64-<version>/
@@ -45,8 +45,8 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --release)
-            # Strip the "-DEV" suffix from the asset name — used by CI so
-            # release-labelled artefacts don't carry the DEV tag.
+            # Drop the "-DEV" suffix from the asset name (used by CI so
+            # release-labelled artefacts don't carry the DEV tag).
             RELEASE=1
             shift
             ;;
@@ -79,11 +79,9 @@ MANIFEST="$BUNDLE_DIR/current/manifest.json"
 [[ -f "$BOOT_JSON" ]]                            || err "boot.json not at $BOOT_JSON."
 
 # --- Derive the asset name from manifest.json ------------------------
-# manifest.json is the single source of truth for what's in the bundle
-# — build.py wrote it based on the plugin set it just compiled. Reading
-# it here means the tarball label can't diverge from the bundle contents
-# (previous flag-based flow could mislabel if pack.sh's --plugins list
-# didn't match the one passed to build.py).
+# manifest.json is the single source of truth for bundle contents (build.py
+# wrote it from the compiled plugin set), so the tarball label can't diverge
+# from what's inside — a separate flag-based list could mislabel.
 
 read -r ASSET_STEM VERSION < <(python3 -c '
 import json, sys
@@ -121,15 +119,14 @@ cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
 install -m 0755 "$TAURI_DIR/locai-link-setup-assistant" "$ROOT/setup-assistant"
 install -m 0755 "$TAURI_DIR/locai-link-companion"       "$ROOT/companion"
 
-# 2b. App content hashes for whole-app OTA. Written into the
-# tarball's manifest so swap_bundle re-swaps the companion / setup-assistant
-# only when their source changed.
+# 2b. App content hashes for whole-app OTA — written to the tarball's
+# manifest so swap_bundle re-swaps a UI app only when its source changed.
 python3 "$REPO_ROOT/bundling/inject_app_hashes.py" \
     --manifest "$ROOT/bundle/current/manifest.json" --repo-root "$REPO_ROOT"
 
 # 3. boot.json + systemd + .desktop entries + icons + install/uninstall.
 # plugin_set is injected from manifest.json so the launcher's first-launch
-# fetch targets the asset this build actually is (not the static template).
+# fetch targets this build's asset, not the static template.
 python3 "$REPO_ROOT/bundling/gen_boot_json.py" \
     --manifest "$MANIFEST" --template "$BOOT_JSON" --output "$ROOT/boot.json"
 chmod 0644 "$ROOT/boot.json"

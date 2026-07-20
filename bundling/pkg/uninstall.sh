@@ -4,38 +4,23 @@
 #
 # Removes Locai Link from the machine.
 #
-# Invoked in two ways:
-#   1. From the Setup Assistant "Uninstall" splash action — the SA
-#      shells out to `osascript` which runs this script via
-#      `do shell script with administrator privileges` (so the script
-#      always executes as root).
-#   2. Directly from Terminal: `sudo /Library/Locai/uninstall.sh`.
+# Invoked two ways: (1) from the Setup Assistant "Uninstall" action, which
+# runs this via osascript `with administrator privileges` (always root); or
+# (2) directly: `sudo /Library/Locai/uninstall.sh`.
 #
-# The script refuses to run without root — see the `$EUID` check
-# below. Prior versions swallowed permission-denied errors and exited
-# 0, leaving the app installed while claiming success.
+# Refuses to run without root (see the $EUID check) — prior versions
+# swallowed permission-denied errors and exited 0, falsely claiming success.
 #
-# Because Approach 1 runs as root but the LaunchAgents and Tauri user
-# caches live in the console user's home, we resolve the actual user
-# via `stat -f "%Su" /dev/console` and drop back with `sudo -u` for
-# user-domain `launchctl` operations.
+# Approach 1 runs as root but LaunchAgents + Tauri caches live in the console
+# user's home, so we resolve that user via `stat -f "%Su" /dev/console` and
+# drop to `sudo -u` for user-domain launchctl ops.
 #
-# Coverage:
-#   • LaunchAgents (bootout + plist rm)
-#   • Live processes (pkill)
-#   • LaunchServices registration (lsregister -u) so Spotlight /
-#     `open -a` don't keep stale entries
-#   • /Library/Locai + /Applications/Locai Link.app + /Applications/
-#     Locai Setup Assistant.app + /usr/local/bin/locai symlink
-#   • Per-user Tauri data: caches, WebKit storage, HTTPStorages,
-#     Preferences plists, Saved Application State
-#   • Pinned Dock tiles (best-effort — PlistBuddy on com.apple.dock.plist)
-#   • pkgutil receipt
+# Coverage: LaunchAgents, live processes, LaunchServices entries, /Library/
+# Locai + /Applications copies + CLI symlink, per-user Tauri data (caches /
+# WebKit / HTTPStorages / prefs / saved state), pinned Dock tiles, pkg receipt.
 #
-# The device stays registered in Control after uninstall — operators
-# who want it fully gone should delete the device row in the Control
-# UI. No user Keychain items are touched (we don't stash anything
-# there today).
+# The device stays registered in Control after uninstall — delete the device
+# row in Control to fully remove it. No Keychain items are touched.
 set -uo pipefail
 
 INSTALL_ROOT="/Library/Locai"
@@ -54,12 +39,9 @@ log() {
     echo "[uninstall] $*"
 }
 
-# Refuse to run as a non-root user. Every step below writes into
-# /Library, /Applications, /usr/local/bin, or the console user's
-# Library — without root the rm's fail silently (permission denied
-# swallowed by `|| true`) and the script would exit 0 while leaving
-# the app in place. That's a footgun: the user thinks uninstall
-# succeeded and later finds Locai Link still runnable.
+# Refuse non-root. Every step writes into /Library, /Applications,
+# /usr/local/bin, or the console user's Library — without root the rm's fail
+# silently (`|| true`) and the script exits 0 while leaving the app installed.
 if [[ $EUID -ne 0 ]]; then
     cat >&2 <<EOF
 [uninstall] This script must run as root.
@@ -76,9 +58,8 @@ EOF
 fi
 
 # --- 1. Stop + unload LaunchAgents (user domain) ---------------------
-# LaunchAgents are per-user; `launchctl bootout gui/$UID/...` targets
-# the console user's aqua session. Best-effort — bootout on an already
-# stopped service returns non-zero, ignore.
+# Per-user; `launchctl bootout gui/$UID/...` targets the console user's aqua
+# session. Best-effort — bootout on a stopped service returns non-zero.
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     log "no console user detected; skipping user-domain launchctl steps"
@@ -99,12 +80,11 @@ else
 fi
 
 # --- 2. Kill any stragglers -----------------------------------------
-# Belt-and-braces: bootout SIGTERMs each service, but a runtime spawned
-# outside launchd (e.g. `locai run` from a terminal) wouldn't be
-# covered. Match against `/<name>.app/` (with leading + trailing slashes)
-# so we don't hit macOS's own /System/.../Setup Assistant.app.
-# SA is killed LAST because it's typically the process that invoked us
-# via osascript — killing it earlier cuts off our own error path.
+# bootout SIGTERMs each service, but a runtime spawned outside launchd (e.g.
+# `locai run` from a terminal) isn't covered. Match `/<name>.app/` (leading +
+# trailing slashes) so we don't hit macOS's own /System .../Setup Assistant.app.
+# SA is killed LAST — it typically invoked us via osascript, so killing it
+# earlier cuts off our own error path.
 pkill -f "$INSTALL_ROOT/locai-link"                 2>/dev/null || true
 pkill -f "/Locai Link.app/"                         2>/dev/null || true
 pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
@@ -113,11 +93,9 @@ pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
 pkill -f "$INSTALL_ROOT/Setup Assistant.app/"       2>/dev/null || true
 
 # --- 3. Unregister the .apps from LaunchServices --------------------
-# Even after removing the .app bundle, LaunchServices can keep an
-# indexed entry pointing at the deleted path — `open -a "Locai Link"`
-# from Terminal or Spotlight then briefly shows a stale hit. Explicit
-# `lsregister -u` drops those entries now instead of waiting for the
-# next background scan.
+# After removing a .app, LaunchServices can keep a stale entry pointing at the
+# deleted path (`open -a` / Spotlight briefly hit it). `lsregister -u` drops
+# those now instead of waiting for the next background scan.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [[ -x "$LSREGISTER" ]]; then
     "$LSREGISTER" -u "$COMPANION_APP_IN_APPLICATIONS" 2>/dev/null || true
@@ -133,11 +111,9 @@ rm -f  "$CLI_SYMLINK"
 log "removed $INSTALL_ROOT + /Applications copies + symlinks"
 
 # --- 5. Wipe per-user data (caches / prefs / WebKit / saved state) --
-# Tauri apps write to a handful of paths under the console user's
-# ~/Library that never touch $INSTALL_ROOT. Without cleaning these,
-# a "clean" reinstall would inherit stale window positions, cookies,
-# and WebKit databases — and the freshly-registered device would boot
-# with the previous device's cached state.
+# Tauri apps write under the console user's ~/Library, outside $INSTALL_ROOT.
+# Without cleaning these, a "clean" reinstall inherits stale window positions,
+# cookies, and WebKit state from the previous device.
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
     USER_HOME="/Users/$CONSOLE_USER"
     for bundle_id in "$COMPANION_BUNDLE_ID" "$SA_BUNDLE_ID"; do
@@ -156,11 +132,10 @@ if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
 fi
 
 # --- 6. Remove pinned Dock entries ----------------------------------
-# Users who dragged Locai Link / Setup Assistant to the Dock leave a
-# ghost tile after the .app is deleted. Iterate persistent-apps in
-# reverse order (deletions don't shift lower indices), then reload the
-# Dock. Best-effort — PlistBuddy edits directly bypass cfprefsd, so a
-# `killall cfprefsd` follows to drop the cached values.
+# A dragged-to-Dock tile ghosts after its .app is deleted. Iterate
+# persistent-apps in reverse (deletions don't shift lower indices), then
+# reload. PlistBuddy bypasses cfprefsd, so `killall cfprefsd` follows to drop
+# cached values.
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
     DOCK_PLIST="/Users/$CONSOLE_USER/Library/Preferences/com.apple.dock.plist"
     PB="/usr/libexec/PlistBuddy"

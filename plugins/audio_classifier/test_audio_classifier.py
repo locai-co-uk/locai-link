@@ -22,10 +22,8 @@ MODEL_PATH = TEMP_DIR / "yamnet.tflite"
 def _download_yamnet_with_retry(max_attempts: int = 4) -> bool:
     """Fetch the YAMNet TFLite model; tolerate transient CDN flakes.
 
-    huggingface.co rate-limits anonymous downloads (returns HTTP 429) when
-    parallel CI runs hit it in close succession. Retry with exponential
-    backoff, then bail with a skip-the-test signal so a transient outage
-    doesn't fail an unrelated PR.
+    huggingface.co returns HTTP 429 under parallel CI load. Retry with
+    exponential backoff, then return False so the caller can skip.
     """
     req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
     for attempt in range(max_attempts):
@@ -49,9 +47,8 @@ def setup_teardown():
     if not MODEL_PATH.exists():
         print(f"Downloading YAMNet to {MODEL_PATH}...")
         if not _download_yamnet_with_retry():
-            # Skip rather than fail — this is a network-dependent integration
-            # test whose model lives on an external CDN we don't control.
-            # A transient 429 / outage shouldn't block unrelated PR merges.
+            # Skip, don't fail — external CDN we don't control; a transient
+            # 429/outage shouldn't block unrelated PR merges.
             pytest.skip("YAMNet CDN unavailable; skipping audio_classifier integration test.")
     yield
     if TEMP_DIR.exists():

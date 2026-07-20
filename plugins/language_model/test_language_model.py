@@ -14,11 +14,8 @@ import pytest
 import requests
 from link_language_model.adapter import LanguageModel  # type: ignore
 
-# The LLM under test can return Unicode characters in completions (emojis are
-# common in SmolLM2 outputs). On Windows runners stdout defaults to cp1252,
-# which can't encode those characters; subsequent print() calls then crash
-# with UnicodeEncodeError even though the test logic itself passed. Force
-# UTF-8 with backslash-escape fallback so debug prints don't fail the test.
+# Windows stdout defaults to cp1252 and can't encode Unicode/emoji in model
+# output — print() would then crash with UnicodeEncodeError. Force UTF-8.
 if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 if isinstance(sys.stderr, io.TextIOWrapper):
@@ -34,10 +31,8 @@ TEST_PORT = 8099
 def _download_smollm2_with_retry(max_attempts: int = 4) -> bool:
     """Fetch the SmolLM2 GGUF model; tolerate transient CDN flakes.
 
-    huggingface.co rate-limits anonymous downloads (returns HTTP 429) when
-    parallel CI runs hit it in close succession. Retry with exponential
-    backoff, then return False so the caller can skip the test rather
-    than fail it.
+    huggingface.co returns HTTP 429 under parallel CI load. Retry with
+    exponential backoff, then return False so the caller can skip.
     """
     req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
     for attempt in range(max_attempts):
@@ -61,10 +56,8 @@ def setup_teardown():
     if not MODEL_PATH.exists():
         print(f"Downloading SmolLM2 to {MODEL_PATH}...")
         if not _download_smollm2_with_retry():
-            # Skip rather than fail — the model lives on an external CDN
-            # we don't control, and a transient 429/outage shouldn't block
-            # unrelated PR merges. Mirrors the behaviour of audio_classifier
-            # test_audio_classifier.py.
+            # Skip, don't fail — external CDN we don't control; a transient
+            # 429/outage shouldn't block unrelated PR merges.
             pytest.skip("SmolLM2 CDN unavailable; skipping language_model integration test.")
     yield
     if TEMP_DIR.exists():
