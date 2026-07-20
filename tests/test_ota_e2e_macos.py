@@ -159,8 +159,8 @@ def _serve_release(*, repo: str, asset: str, tar_bytes: bytes, version: str):
     routes: dict[str, tuple[bytes, str]] = {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *_a):  # quiet
-            pass
+        def log_message(self, *_a):  # pyright: ignore[reportIncompatibleMethodOverride, reportImplicitOverride]
+            pass  # quiet
 
         def do_GET(self):  # noqa: N802
             hit = routes.get(self.path)

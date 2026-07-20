@@ -28,6 +28,7 @@ dependencies = [
 dev = [
     # Linting/Formatting
     "ruff>=0.14.14",
+    "basedpyright>=1.39.9",
     # Testing
     "pytest>=9.0.0",
     "pytest-mock>=3.15.0",

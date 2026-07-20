@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import plistlib
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import inject_app_hashes
 
@@ -31,14 +32,14 @@ MACOS_INSTALL_ROOT = PurePosixPath("/Library/Locai")
 COMPANION_LABEL = "uk.co.locai.link.companion"
 
 
-def _load_plist(name: str) -> dict:
+def _load_plist(name: str) -> dict[str, Any]:
     return plistlib.loads((LAUNCH_AGENTS / name).read_bytes())
 
 
 def test_companion_launchagent_matches_updater_destination(monkeypatch):
     """The binary launchd starts must be inside the .app the OTA swaps."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
-    dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)
+    dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)  # pyright: ignore[reportArgumentType]
     assert dests == [MACOS_INSTALL_ROOT / "Locai Link.app"]
 
     # Tauri names the binary after the cargo package, not the productName, so the
@@ -49,7 +50,7 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
 
 def test_setup_assistant_destination_is_install_root(monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "darwin")
-    assert updater._ui_app_destinations("setup_assistant", MACOS_INSTALL_ROOT) == [
+    assert updater._ui_app_destinations("setup_assistant", MACOS_INSTALL_ROOT) == [  # pyright: ignore[reportArgumentType]
         MACOS_INSTALL_ROOT / "Setup Assistant.app"
     ]
 
@@ -133,7 +134,7 @@ def test_swap_skips_app_when_staged_signature_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "_locate_in_payload", lambda staging, name: tmp_path / "src.app")
     monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, root: [tmp_path / "dest.app"])
 
-    installed: list = []
+    installed: list[Path] = []
     monkeypatch.setattr(updater, "_install_app", lambda src, dest: installed.append(dest))
 
     def _boom(app):
