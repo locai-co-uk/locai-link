@@ -44,6 +44,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
 const CONTROL_URL: &str = "https://control.locai.co.uk";
 
+// TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
+const WORKSPACE_URL: &str = "https://workspace.locai.co.uk";
+
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
 const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
@@ -58,6 +61,10 @@ const EVENT_SHOW_DOWNLOADS: &str = "show-downloads";
 
 /// Suffix after this prefix is the pipeline id.
 const MENU_ID_MODEL_PREFIX: &str = "model:";
+
+/// Suffix after this prefix is the model id to open in Workspace.
+const MENU_ID_WORKSPACE_PREFIX: &str = "workspace:";
+const MENU_ID_WORKSPACE_PLACEHOLDER: &str = "workspace_placeholder";
 
 /// Release-channel suffix baked in from VITE_CHANNEL at compile time
 /// (defaults to "alpha" when unset — matches the SA side). "prod" or
@@ -324,6 +331,7 @@ fn build_tray_menu(
     let sep1 = PredefinedMenuItem::separator(app)?;
 
     let models_submenu = build_models_submenu(app, models, deployments)?;
+    let workspace_submenu = build_workspace_submenu(app, models)?;
 
     let sep2 = PredefinedMenuItem::separator(app)?;
     let control = MenuItem::with_id(
@@ -365,6 +373,7 @@ fn build_tray_menu(
         &status as &dyn IsMenuItem<Wry>,
         &sep1,
         &models_submenu,
+        &workspace_submenu,
         &sep2,
     ];
     if let Some(u) = &update_item {
@@ -442,6 +451,37 @@ fn build_models_submenu(
         .collect();
     refs.extend(items.iter().map(|i| i as &dyn IsMenuItem<Wry>));
     Submenu::with_id_and_items(app, "models", &submenu_label, true, &refs)
+}
+
+/// "Open in Workspace" submenu: one entry per served model (only served models
+/// are usable in Workspace). None served -> single disabled placeholder.
+fn build_workspace_submenu(app: &AppHandle, models: &[ModelInfo]) -> tauri::Result<Submenu<Wry>> {
+    let served: Vec<&ModelInfo> = models.iter().filter(|m| m.is_serving).collect();
+    if served.is_empty() {
+        let placeholder = MenuItem::with_id(
+            app,
+            MENU_ID_WORKSPACE_PLACEHOLDER,
+            "No model is being served",
+            false,
+            None::<&str>,
+        )?;
+        return Submenu::with_id_and_items(app, "workspace", "Open in Workspace", true, &[&placeholder]);
+    }
+
+    let items: Vec<MenuItem<Wry>> = served
+        .iter()
+        .map(|m| {
+            MenuItem::with_id(
+                app,
+                format!("{MENU_ID_WORKSPACE_PREFIX}{}", m.id),
+                model_label(m),
+                true,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|i| i as &dyn IsMenuItem<Wry>).collect();
+    Submenu::with_id_and_items(app, "workspace", "Open in Workspace", true, &refs)
 }
 
 /// Label for a model row; port suffix disambiguates mixed-port llama-swap
@@ -595,8 +635,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             let pipeline_id = id[MENU_ID_MODEL_PREFIX.len()..].to_string();
             handle_model_toggle(app, pipeline_id);
         }
+        _ if id.starts_with(MENU_ID_WORKSPACE_PREFIX) => {
+            let model_id = &id[MENU_ID_WORKSPACE_PREFIX.len()..];
+            let url = format!("{WORKSPACE_URL}/chat?model={model_id}");
+            if let Err(e) = app.opener().open_url(&url, None::<&str>) {
+                eprintln!("[companion] failed to open {url}: {e}");
+            }
+        }
         // Disabled items — shouldn't fire, ignore if they do.
-        MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER => {}
+        MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER | MENU_ID_WORKSPACE_PLACEHOLDER => {}
         other => eprintln!("[companion] unhandled menu id: {other}"),
     }
 }

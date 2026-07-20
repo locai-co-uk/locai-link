@@ -13,7 +13,9 @@ swap_changed_ui_apps actually fires (a stable hash would skip the swap).
 
 from __future__ import annotations
 
+import json
 import plistlib
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -223,3 +225,22 @@ def test_identical_source_keeps_stable_hash(tmp_path):
     _fake_companion_tree(a, version="1.1.1", svelte="<main>Link</main>")
     _fake_companion_tree(b, version="1.1.1", svelte="<main>Link</main>")
     assert _companion_hash(a) == _companion_hash(b)
+
+
+def test_uninstaller_bundle_ids_match_tauri_apps():
+    """The uninstaller cleans per-user caches/prefs by bundle id, so its ids must
+    match what the Tauri apps are actually built with — otherwise the cleanup
+    silently misses (the Setup Assistant used `.setup` vs the built `.setup-assistant`)."""
+    uninstall = (PKG / "uninstall.sh").read_text(encoding="utf-8")
+
+    def _sh_var(name: str) -> str:
+        m = re.search(rf'^{name}="([^"]+)"', uninstall, re.MULTILINE)
+        assert m, f"{name} not found in uninstall.sh"
+        return m.group(1)
+
+    def _tauri_id(crate: str) -> str:
+        conf = REPO_ROOT / "crates" / crate / "src-tauri" / "tauri.conf.json"
+        return str(json.loads(conf.read_text(encoding="utf-8"))["identifier"])
+
+    assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("companion")
+    assert _sh_var("SA_BUNDLE_ID") == _tauri_id("setup_assistant")

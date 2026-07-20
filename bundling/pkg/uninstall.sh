@@ -33,7 +33,7 @@ PKG_RECEIPT="uk.co.locai.link.runtime"
 # Bundle identifiers for the two Tauri apps — used to clean per-user
 # caches / prefs / WebKit storage that live outside $INSTALL_ROOT.
 COMPANION_BUNDLE_ID="uk.co.locai.link.companion"
-SA_BUNDLE_ID="uk.co.locai.link.setup"
+SA_BUNDLE_ID="uk.co.locai.link.setup-assistant"
 
 log() {
     echo "[uninstall] $*"

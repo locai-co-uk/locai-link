@@ -8,6 +8,23 @@ sections below the summary. -->
 
 ## [Unreleased]
 
+- Open in Workspace: the menu-bar companion gains an "Open in Workspace" submenu
+  that lists the models you are currently serving and opens the chosen one in
+  Workspace, ready to use.
+- The macOS installer now advertises Apple silicon only, matching what actually
+  ships, so an Intel Mac is no longer offered a build it could never update.
+- Uninstall now fully removes the Setup Assistant's per-user data; its bundle
+  identifier in the uninstaller was mismatched, leaving caches and preferences
+  behind.
+
+### Added: "Open in Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
+
+- The tray gains an "Open in Workspace" submenu listing each served model;
+  selecting one opens Workspace with that model preselected via a URL parameter.
+  When nothing is being served it shows "No model is being served". Serving
+  toggles are unchanged. Preselecting the exact model depends on the Workspace
+  side reading that parameter, tracked separately.
+
 ## [1.1.2]
 
 - macOS whole-app OTA now updates the menu-bar companion, not just the runtime.
