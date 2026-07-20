@@ -22,7 +22,9 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
-  # 0. Version bump check (PRs to main only)
+  # 0. Version bump check (PRs to main only). The check step is skipped for
+  # Dependabot (dependency bumps legitimately don't touch the app version); the
+  # job still succeeds so a required status check stays green.
   version-bump:
     name: Check Version Bump
     runs-on: ubuntu-latest
@@ -33,6 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check version was bumped
+        if: github.actor != 'dependabot[bot]'
         run: |
           PR_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
           MAIN_VERSION=$(git show origin/main:pyproject.toml | grep '^version' | head -1 | sed 's/.*= *"\(.*\)"/\1/')

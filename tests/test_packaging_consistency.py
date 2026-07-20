@@ -41,8 +41,10 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
     dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)
     assert dests == [MACOS_INSTALL_ROOT / "Locai Link.app"]
 
+    # Tauri names the binary after the cargo package, not the productName, so the
+    # plist must point at locai-link-companion (correcting this was the INFRA-374 fix).
     prog = _load_plist("uk.co.locai.link.companion.plist")["ProgramArguments"]
-    assert prog[0] == str(dests[0] / "Contents" / "MacOS" / "Locai Link")
+    assert prog[0] == str(dests[0] / "Contents" / "MacOS" / "locai-link-companion")
 
 
 def test_setup_assistant_destination_is_install_root(monkeypatch):
@@ -111,7 +113,12 @@ def test_restart_recovers_when_kickstart_misses(monkeypatch):
 
     assert any(c[:2] == ["launchctl", "bootout"] for c in calls)
     assert any(c[:2] == ["launchctl", "bootstrap"] for c in calls)
-    assert sum(1 for c in calls if c[:3] == ["launchctl", "kickstart", "-k"]) >= 2
+    # In-place `kickstart -k` first; after re-bootstrap, retry WITHOUT -k so the
+    # RunAtLoad spawn isn't raced into a second companion instance.
+    kicks = [c for c in calls if c[:2] == ["launchctl", "kickstart"]]
+    assert len(kicks) >= 2
+    assert kicks[0][:3] == ["launchctl", "kickstart", "-k"]
+    assert "-k" not in kicks[1]
     opens = [c for c in calls if c and c[0] == "open"]
     assert opens and opens[0][-1] == str(Path("/Library/Locai/Locai Link.app"))
 
