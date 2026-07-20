@@ -252,7 +252,7 @@ jobs:
 
       - name: Set up Node (for Tauri app builds)
         if: runner.os == 'macOS' || runner.os == 'Linux'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           # Cache both apps' node_modules — both build in this job.
