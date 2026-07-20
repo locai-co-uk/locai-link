@@ -1252,6 +1252,18 @@ def _restart_ui_app(key: str) -> None:
         logger.warning(f"Could not restart companion after update: {e}")
 
 
+def _home_for_uid(uid: str) -> Path:
+    """Home directory of ``uid`` (the console user) - where the companion
+    LaunchAgent plist lives. Path.home() would give the updater's own home (e.g.
+    /var/root when it runs as root), so resolve the target user's home instead."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(int(uid)).pw_dir)
+    except Exception:  # noqa: BLE001
+        return Path.home()
+
+
 def _restart_companion_macos() -> None:
     """Relaunch the companion, mirroring the Setup Assistant's proven sequence:
     kickstart in place; if the service isn't reachable in this domain (stale /
@@ -1260,7 +1272,7 @@ def _restart_companion_macos() -> None:
     kickstart can't stall the update."""
     uid = _macos_console_uid() or str(os.getuid())
     service = f"gui/{uid}/{_COMPANION_LABEL}"
-    plist = Path.home() / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
+    plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
 
     def _lc(*args: str) -> int:
         try:
@@ -1383,7 +1395,8 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
         return False
     import plistlib
 
-    plist = Path.home() / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
+    uid = _macos_console_uid() or str(os.getuid())
+    plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
     correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link-companion")
     try:
         if not plist.exists():
@@ -1453,24 +1466,23 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
 
 def _harden_swapped_app(dest: Path) -> None:
     """After a macOS .app swap: strip com.apple.quarantine (which silently blocks
-    a launchctl-driven relaunch, as the Setup Assistant install path documents)
-    and re-verify the code signature. Best-effort + logged — the drift check
-    catches a bundle that still won't launch."""
+    a launchctl-driven relaunch, as the Setup Assistant install path documents),
+    then re-verify the code signature. Quarantine stripping is best-effort, but a
+    failed signature check RAISES: the swapped bundle is corrupt or unverified, so
+    the caller must drop it rather than relaunch a bad bundle."""
     if sys.platform != "darwin":
         return
     try:
         subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest)], check=False, timeout=30)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - quarantine strip is best-effort
         logger.warning(f"whole-app OTA: could not de-quarantine {dest}: {e}")
-    try:
-        subprocess.run(
-            ["codesign", "--verify", "--deep", "--strict", str(dest)],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"whole-app OTA: swapped app failed codesign verify: {dest}: {e}")
+    # check=True: a bad signature must fail the swap, not just log.
+    subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(dest)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
 
 
 def swap_changed_ui_apps(

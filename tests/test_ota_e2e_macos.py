@@ -16,6 +16,8 @@ import http.server
 import json
 import plistlib
 import socketserver
+import subprocess
+import sys
 import tarfile
 import threading
 from contextlib import contextmanager
@@ -63,6 +65,14 @@ def _make_app(path: Path, *, version: str, executable: str, marker: str) -> None
     exe.chmod(0o755)
     # A frontend marker so we can tell old vs new even at equal versions.
     (resources / "build-marker.txt").write_text(marker, encoding="utf-8")
+    # Ad-hoc sign so the swap's codesign --verify passes: _harden_swapped_app now
+    # fails the swap on a bad signature, so a fixture must be validly signed.
+    if sys.platform == "darwin":
+        subprocess.run(
+            ["codesign", "--force", "--deep", "-s", "-", str(path)],
+            check=True,
+            capture_output=True,
+        )
 
 
 def _app_version(path: Path) -> str:

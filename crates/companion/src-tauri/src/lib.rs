@@ -162,8 +162,10 @@ pub fn run() {
         .setup(|app| {
             // Publish our running build version so the runtime's post-OTA drift
             // check can tell whether the companion actually relaunched onto the
-            // new build (a swapped .app whose relaunch silently failed leaves the
-            // runtime ahead of the live UI). Best-effort.
+            // new build. macOS-only: the drift check is Darwin-only, and
+            // install_root() is empty on Windows, which would otherwise write
+            // ./state/companion-running-version into the process working directory.
+            #[cfg(target_os = "macos")]
             {
                 let version = app.package_info().version.to_string();
                 let vpath = std::path::Path::new(&preferences::install_root())

@@ -104,9 +104,11 @@ def test_restart_recovers_when_kickstart_misses(monkeypatch):
     bootstrap) and retry, then fall back to opening the install-root copy."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
-    # exists() True so the fallback picks the first (install-root) copy; assert
-    # against the host's own rendering of that path so this holds on Windows too.
-    monkeypatch.setattr(updater.Path, "exists", lambda self: True)
+    # Only the install-root companion exists, so the fallback selects exactly it
+    # (path-specific, not blanket-True); assert against the host's own rendering
+    # so this holds on Windows too.
+    install_app = Path("/Library/Locai/Locai Link.app")
+    monkeypatch.setattr(updater.Path, "exists", lambda self: str(self) == str(install_app))
     calls = _mock_launchctl(monkeypatch, kickstart_rc=1)
 
     updater._restart_ui_app("companion")
@@ -121,6 +123,24 @@ def test_restart_recovers_when_kickstart_misses(monkeypatch):
     assert "-k" not in kicks[1]
     opens = [c for c in calls if c and c[0] == "open"]
     assert opens and opens[0][-1] == str(Path("/Library/Locai/Locai Link.app"))
+
+
+def test_swap_drops_app_when_signature_fails(monkeypatch, tmp_path):
+    """A failed codesign check (raised by _harden_swapped_app) must NOT mark the
+    swap successful, so the OTA never relaunches an unverified/corrupt bundle."""
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater, "_ui_app_payload_name", lambda key: "Locai Link.app")
+    monkeypatch.setattr(updater, "_locate_in_payload", lambda staging, name: tmp_path / "src.app")
+    monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, root: [tmp_path / "dest.app"])
+    monkeypatch.setattr(updater, "_install_app", lambda src, dest: None)  # pretend the copy landed
+
+    def _boom(dest):
+        raise RuntimeError("codesign verify failed")
+
+    monkeypatch.setattr(updater, "_harden_swapped_app", _boom)
+
+    swapped = updater.swap_changed_ui_apps(tmp_path, tmp_path, {"companion": "a"}, {"companion": "b"})
+    assert swapped == []
 
 
 def test_payload_names_match_release_workflow(monkeypatch):
