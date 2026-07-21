@@ -157,24 +157,25 @@ jobs:
       - name: Install Rust toolchain (for launcher)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build
+      - name: Cache cargo downloads
         uses: actions/cache@v4
         with:
+          # Dependency downloads only, not crates/target: a release builds its
+          # binaries clean, and a restored stale/partial target/ has caused bad
+          # builds. No restore-keys, so a key miss fetches clean, never stale.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            crates/target
           key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
 
       - name: Cache prefetched binaries
         uses: actions/cache@v4
         with:
+          # No restore-keys: the key hashes the pinned upstream tags
+          # (plugins/*/install.py), so a tag bump must force a fresh prefetch
+          # rather than restore stale binaries via a prefix match.
           path: bundling/_artifacts
           key: bundle-artifacts-${{ runner.os }}-${{ hashFiles('plugins/*/install.py') }}
-          restore-keys: |
-            bundle-artifacts-${{ runner.os }}-
 
       - name: Sync deps
         shell: bash
