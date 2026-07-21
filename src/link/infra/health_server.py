@@ -18,10 +18,12 @@ from typing import Any
 
 from typing_extensions import override
 
+from link import constants
+
 logger = logging.getLogger(__name__)
 
-HEALTH_HOST = "127.0.0.1"
-HEALTH_PORT = 20505
+HEALTH_HOST = constants.HEALTH_HOST
+HEALTH_PORT = constants.HEALTH_PORT
 
 # Queued deployment rows time out into `failed` after this many seconds
 # if the runtime never advances them (e.g. Control DEPLOY_MODEL was lost).

@@ -46,11 +46,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import tomllib
-import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
@@ -58,7 +56,9 @@ from typing import Any, Protocol
 import requests
 from packaging.version import Version
 
+from link import constants
 from link.config.models import AgentConfig
+from link.utils import archive as archive_util
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class _HttpGetter(Protocol):
 # Source-install OTA — git-based, used when running from a cloned repo.
 # ===========================================================================
 
-DEFAULT_BRANCH = "main"
+DEFAULT_BRANCH = constants.DEFAULT_BRANCH
 
 
 def _command_exists(name: str) -> bool:
@@ -297,16 +297,13 @@ BOOT_NAME = "boot.json"
 RUNTIME_BINARY = "locai-link-runtime.exe" if sys.platform == "win32" else "locai-link-runtime"
 UPDATE_PENDING_STAMP = ".update-pending"
 
-DEFAULT_RELEASES_REPO = "locai-co-uk/locai-link"
+DEFAULT_RELEASES_REPO = constants.REPO_SLUG
 DEFAULT_CHANNEL = "stable"
 
 # Download tuning. Generous: this runs once per OTA, not in a hot path.
 _CHUNK_SIZE = 1024 * 1024  # 1 MiB
 _DOWNLOAD_TIMEOUT = 60  # seconds for connect/read on a single chunk
 _GH_API_TIMEOUT = 15
-
-# Path-traversal guard during extract.
-_UNSAFE_PATH_RE = re.compile(r"(^[/\\])|(^|[/\\])\.\.([/\\]|$)")
 
 
 # ---------------------------------------------------------------------------
@@ -775,16 +772,13 @@ def extract(archive: Path, dest: Path) -> None:
 
 
 def _extract_archive(archive: Path, staging: Path) -> None:
-    """Extract ``archive`` (tar.gz/tgz or zip) into ``staging``, refusing
-    path-traversal entries. Caller owns ``staging`` and its cleanup."""
-    staging.mkdir(parents=True, exist_ok=True)
-    suffix = "".join(archive.suffixes[-2:]).lower()
-    if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
-        _extract_tar(archive, staging)
-    elif suffix.endswith(".zip"):
-        _extract_zip(archive, staging)
-    else:
-        raise ExtractRefused(f"Unknown archive type: {archive.name}")
+    """Extract ``archive`` (tar.gz/tgz or zip) into ``staging`` via the shared safe
+    extractor, surfacing unsafe/unknown entries as ExtractRefused (the OTA error
+    type). Caller owns ``staging`` and its cleanup."""
+    try:
+        archive_util.extract_archive(archive, staging)
+    except (archive_util.UnsafeArchiveEntry, archive_util.UnknownArchiveType) as e:
+        raise ExtractRefused(str(e)) from e
 
 
 def _locate_versioned_payload(staging: Path) -> Path:
@@ -815,33 +809,6 @@ def _locate_versioned_payload(staging: Path) -> Path:
     if len(top_dirs) == 1:
         return top_dirs[0]
     raise BundleUpdateError("archive layout unrecognised: no runtime binary or recognizable payload dir found")
-
-
-def _extract_tar(archive: Path, dest: Path) -> None:
-    with tarfile.open(archive, mode="r:*") as tf:
-        for member in tf.getmembers():
-            _refuse_unsafe(member.name)
-            if member.islnk() or member.issym():
-                target = member.linkname
-                _refuse_unsafe(target)
-        # data_filter (3.12+) handles a lot of this defensively. Fall back to
-        # the legacy untrusted-safe extract on older Pythons.
-        if hasattr(tarfile, "data_filter"):
-            tf.extractall(dest, filter="data")  # type: ignore[arg-type]
-        else:  # pragma: no cover — Python <3.12, not a target version
-            tf.extractall(dest)
-
-
-def _extract_zip(archive: Path, dest: Path) -> None:
-    with zipfile.ZipFile(archive) as zf:
-        for name in zf.namelist():
-            _refuse_unsafe(name)
-        zf.extractall(dest)
-
-
-def _refuse_unsafe(name: str) -> None:
-    if _UNSAFE_PATH_RE.search(name):
-        raise ExtractRefused(f"Refusing unsafe archive entry: {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -1231,7 +1198,7 @@ def _macos_console_uid() -> str | None:
         return None
 
 
-_COMPANION_LABEL = "uk.co.locai.link.companion"
+_COMPANION_LABEL = constants.COMPANION_LABEL
 
 
 def _restart_ui_app(key: str) -> None:

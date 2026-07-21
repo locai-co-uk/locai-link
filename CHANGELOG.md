@@ -15,6 +15,9 @@ sections below the summary. -->
 - Uninstall now fully removes the Setup Assistant's per-user data; its bundle
   identifier in the uninstaller was mismatched, leaving caches and preferences
   behind.
+- The router/plugin provisioner now extracts downloaded archives through the same
+  path-traversal-guarded extractor as the updater, so a malicious or corrupt
+  mirror can no longer write outside the target directory.
 
 ### Added: "Open a Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
 
