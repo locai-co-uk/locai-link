@@ -42,10 +42,10 @@ const TRAY_ICON_IS_TEMPLATE: bool = false;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
-const CONTROL_URL: &str = "https://control.locai.co.uk";
+const CONTROL_URL: &str = locai_link_shared::CONTROL_URL;
 
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
-const WORKSPACE_URL: &str = "https://workspace.locai.co.uk";
+const WORKSPACE_URL: &str = locai_link_shared::WORKSPACE_URL;
 
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
@@ -242,7 +242,7 @@ fn kickstart_runtime_if_installed() {
 /// Companion IPC port, adjacent to the health server's 20505. Both live
 /// below the ephemeral range floor (32768 on Linux / 49152 on macOS) so the
 /// OS can't grab them for an outgoing connection before we bind.
-const IPC_PORT: u16 = 20506;
+const IPC_PORT: u16 = locai_link_shared::IPC_PORT;
 
 /// Loopback listener so other processes can ask the companion to open
 /// Preferences. One endpoint: `POST /preferences/show` → 204; anything else → 404.

@@ -94,19 +94,7 @@ pub struct CheckInstallResult {
 }
 
 fn resolve_install_root() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "/Library/Locai".to_string()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/.local/share/locai")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        String::new()
-    }
+    locai_link_shared::install_root()
 }
 
 /// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
@@ -749,7 +737,7 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
         pipeline_id: &pipeline_id,
         model_name: model_name.as_deref(),
     };
-    let url = "http://127.0.0.1:20505/deployments/pending";
+    let url = locai_link_shared::DEFAULT_PENDING_URL;
     let payload = serde_json::to_value(&body).unwrap();
 
     // `install_launchagents` returns as soon as fork() succeeds, but the
@@ -781,7 +769,7 @@ async fn wait_for_agent_ready() -> Result<(), String> {
     // 15 s of polling on the main thread froze the SA window; hop onto the
     // blocking pool so the WebView stays responsive during the wait.
     tauri::async_runtime::spawn_blocking(|| {
-        let url = "http://127.0.0.1:20505/healthz";
+        let url = locai_link_shared::DEFAULT_HEALTH_URL;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         #[allow(unused_assignments)]
         let mut last_err = String::from("agent never came up");
@@ -1266,7 +1254,10 @@ fn open_companion_preferences() -> Result<(), String> {
 
 fn try_show_preferences_now() -> Result<(), String> {
     match http_agent()
-        .post("http://127.0.0.1:20506/preferences/show")
+        .post(&format!(
+            "http://127.0.0.1:{}/preferences/show",
+            locai_link_shared::IPC_PORT
+        ))
         .send_bytes(&[])
     {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),

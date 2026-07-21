@@ -19,29 +19,16 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
-/// Install root. Mirrored in the Setup Assistant's `get_install_root` —
-/// a change here has to travel to both.
+/// Install root — single source in the shared crate.
 pub(crate) fn install_root() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "/Library/Locai".to_string()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/.local/share/locai")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        String::new()
-    }
+    locai_link_shared::install_root()
 }
 
 fn runtime_log_file() -> String {
     format!("{}/logs/agent.stdout.log", install_root())
 }
 
-const CONTROL_BASE_URL: &str = "https://control.locai.co.uk";
+const CONTROL_BASE_URL: &str = locai_link_shared::CONTROL_URL;
 
 /// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/`.
 #[cfg(target_os = "macos")]
