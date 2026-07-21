@@ -133,6 +133,13 @@ type SharedHandles = Arc<Mutex<MenuHandles>>;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin registered. A second launch (Dock/Launchpad,
+        // or a stale /Applications copy) reaches the running instance here and
+        // then exits, so no duplicate tray icon; surface Preferences so the
+        // relaunch isn't a silent no-op.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_preferences_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

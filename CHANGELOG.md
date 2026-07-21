@@ -18,11 +18,22 @@ sections below the summary. -->
 - The router/plugin provisioner now extracts downloaded archives through the same
   path-traversal-guarded extractor as the updater, so a malicious or corrupt
   mirror can no longer write outside the target directory.
+- Launching the companion a second time (from the Dock, Launchpad, or the copy
+  in /Applications) no longer starts a duplicate menu-bar icon; it focuses the
+  running app instead.
 
 ### Added: "Open a Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
 
 - The tray gains an "Open a Workspace" item that opens Workspace
   (workspace.locai.co.uk) in the default browser.
+
+### Fixed: duplicate companion instance on second launch (`crates/companion/src-tauri/src/lib.rs`)
+
+- The companion had no single-instance guard, so launching it again (Dock,
+  Launchpad, or the pkg-managed /Applications copy that OTA leaves at the prior
+  version) started a second process and a duplicate tray icon. It now registers
+  tauri-plugin-single-instance as its first plugin; a second launch focuses the
+  running app's Preferences window and exits without adding a tray icon.
 
 ## [1.1.2]
 
