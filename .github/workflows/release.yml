@@ -70,21 +70,23 @@ jobs:
           fi
 
       - name: Extract release notes from CHANGELOG
-        # The bullet summary at the top of the version's CHANGELOG.md entry
-        # becomes the release body (generate_release_notes appends the auto PR
-        # list below it). Warn — don't fail — if the entry is missing, so a
-        # release is never blocked on the changelog.
+        # Build the full release body: a "What's Changed" heading, the curated
+        # bullet summary from the version's CHANGELOG.md entry, and a Full
+        # Changelog link to CHANGELOG.md. generate_release_notes is off (below), so
+        # GitHub does not append its own PR-title list. Warn, don't fail, if the
+        # entry is missing, so a release is never blocked on the changelog.
         id: notes
         if: inputs.tag == '' && !inputs.dry_run
         env:
           TAG: ${{ steps.tag.outputs.name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
           OUT="$RUNNER_TEMP/release-notes.md"
-          python3 - "$VERSION" "$OUT" <<'PY'
+          python3 - "$VERSION" "$OUT" "$TAG" "$REPO" <<'PY'
           import pathlib, re, sys
-          version, out = sys.argv[1], sys.argv[2]
+          version, out, tag, repo = sys.argv[1:5]
           lines = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
           hdr = re.compile(r"^##\s*\[" + re.escape(version) + r"\]")
           start = next((i + 1 for i, ln in enumerate(lines) if hdr.match(ln)), None)
@@ -96,8 +98,12 @@ jobs:
                   summary.append(ln)
           body = "\n".join(summary).strip()
           if not body:
-              print(f"::warning::No CHANGELOG.md summary for {version}; using auto-generated notes only")
-          pathlib.Path(out).write_text(body + ("\n" if body else ""), encoding="utf-8")
+              print(f"::warning::No CHANGELOG.md summary for {version}; release notes will have no bullets")
+          parts = ["## What's Changed"]
+          if body:
+              parts.append(body)
+          parts.append(f"**Full Changelog**: https://github.com/{repo}/blob/{tag}/CHANGELOG.md")
+          pathlib.Path(out).write_text("\n\n".join(parts) + "\n", encoding="utf-8")
           PY
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
@@ -111,7 +117,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Release ${{ steps.tag.outputs.name }}
           body_path: ${{ steps.notes.outputs.path }}
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           make_latest: true
 
