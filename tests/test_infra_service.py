@@ -78,11 +78,11 @@ def test_mac_plist_generation(mock_mac_env, tmp_path):
 
     manager.install(start_now=True)
 
-    expected_plist = tmp_path / "Users/test/Library/LaunchAgents/io.locai.agent.plist"
+    expected_plist = tmp_path / "Users/test/Library/LaunchAgents/uk.co.locai.link.agent.plist"
     assert expected_plist.exists()
 
     content = expected_plist.read_text()
-    assert "<string>io.locai.agent</string>" in content
+    assert "<string>uk.co.locai.link.agent</string>" in content
     assert "<string>/opt/venv/bin/python</string>" in content
     assert "<key>ENV</key><string>prod</string>" in content
     assert "<key>RunAtLoad</key> <true/>" in content
@@ -176,7 +176,7 @@ def test_mac_user_scope_writes_to_home(mock_mac_env, tmp_path):
     )
     assert isinstance(manager, MacOSBackend)
     manager.install(start_now=False)
-    assert manager.plist_path == tmp_path / "Users/test/Library/LaunchAgents/io.locai.agent.plist"
+    assert manager.plist_path == tmp_path / "Users/test/Library/LaunchAgents/uk.co.locai.link.agent.plist"
     assert manager.plist_path.exists()
 
 
@@ -190,7 +190,7 @@ def test_mac_system_scope_writes_to_library(mock_mac_env):
     )
     assert isinstance(manager, MacOSBackend)
     # Don't actually write — write would need /Library/ root.
-    assert manager.plist_path == Path("/Library/LaunchAgents/io.locai.agent.plist")
+    assert manager.plist_path == Path("/Library/LaunchAgents/uk.co.locai.link.agent.plist")
 
 
 def test_mac_label_prefix_threads_into_plist(mock_mac_env, tmp_path):

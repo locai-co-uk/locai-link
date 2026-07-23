@@ -21,6 +21,12 @@ sections below the summary. -->
 - Launching the companion a second time (from the Dock, Launchpad, or the copy
   in /Applications) no longer starts a duplicate menu-bar icon; it focuses the
   running app instead.
+- The companion Preferences window now shows the installed version on every
+  install layout (it previously showed nothing when the active version was
+  tracked by a text pointer rather than a symlink).
+- Hardening: the service manager no longer runs commands through a shell, and
+  the source-install service label now uses the same reverse-DNS namespace as
+  the packaged app.
 
 ### Added: "Open a Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
 

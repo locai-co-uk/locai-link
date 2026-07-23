@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use locai_link_shared::{
-    agent_health, cancel_deployment as shared_cancel_deployment,
+    agent_health, cancel_deployment as shared_cancel_deployment, installed_version,
     list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
     read_identity, request_deploy as shared_request_deploy,
     supported_model_types as shared_supported_model_types, toggle_serving as shared_toggle_serving,
@@ -427,16 +427,14 @@ fn read_session_config_device() -> Option<DeviceInfo> {
     })
 }
 
-/// Resolve `<install_root>/current` and return the final path component
-/// (the version dir name), or `None` when the symlink is absent or unusable.
+/// Resolve `<install_root>/current` to the active version dir name, or `None`
+/// when it can't be resolved. Delegates to the shared resolver so it honours
+/// BOTH the `current` symlink and the `CURRENT` text pointer — a bare
+/// `read_link` here silently returned `None` on text-pointer installs, so the
+/// companion showed no version where the runtime/SA (which use the shared
+/// resolver) showed it.
 fn resolve_current_version() -> Option<String> {
-    let current = PathBuf::from(install_root()).join("current");
-    let target = std::fs::read_link(&current).ok()?;
-    let last = target.file_name()?.to_string_lossy().into_owned();
-    if last.is_empty() {
-        return None;
-    }
-    Some(last)
+    installed_version(&PathBuf::from(install_root())).map(|v| v.version)
 }
 
 /// Check the runtime LaunchAgent's `RunAtLoad` via PlistBuddy. False on any

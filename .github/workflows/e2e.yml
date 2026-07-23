@@ -203,7 +203,7 @@ jobs:
           mkdir -p "$HOME/Library/LaunchAgents"
           touch "$HOME/Library/LaunchAgents/uk.co.locai.link.agent.plist"
           touch "$HOME/Library/LaunchAgents/uk.co.locai.link.companion.plist"
-          for bid in uk.co.locai.link.companion uk.co.locai.link.setup; do
+          for bid in uk.co.locai.link.companion uk.co.locai.link.setup-assistant; do
             mkdir -p "$HOME/Library/Caches/$bid"
             mkdir -p "$HOME/Library/WebKit/$bid"
             mkdir -p "$HOME/Library/HTTPStorages/$bid"
@@ -252,7 +252,7 @@ jobs:
           check_gone "/usr/local/bin/locai"
           check_gone "$HOME/Library/LaunchAgents/uk.co.locai.link.agent.plist"
           check_gone "$HOME/Library/LaunchAgents/uk.co.locai.link.companion.plist"
-          for bid in uk.co.locai.link.companion uk.co.locai.link.setup; do
+          for bid in uk.co.locai.link.companion uk.co.locai.link.setup-assistant; do
             check_gone "$HOME/Library/Caches/$bid"
             check_gone "$HOME/Library/WebKit/$bid"
             check_gone "$HOME/Library/HTTPStorages/$bid"

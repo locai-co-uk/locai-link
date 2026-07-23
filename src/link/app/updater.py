@@ -113,12 +113,13 @@ def get_local_version(repo_dir: Path) -> str | None:
     toml_path = repo_dir / "pyproject.toml"
     if not toml_path.exists():
         return None
-    for line in toml_path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("version"):
-            parts = line.split("=", 1)
-            if len(parts) == 2:
-                return parts[1].strip().strip('"').strip("'")
-    return None
+    try:
+        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = data.get("project")
+    version = project.get("version") if isinstance(project, dict) else None
+    return version if isinstance(version, str) else None
 
 
 def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
