@@ -163,9 +163,8 @@ pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String
 }
 
 /// Ask the agent to remove `pipeline_id` locally (delete config + on-disk
-/// artifact). The runtime refuses if the model is currently serving — stop it
-/// first. On success the runtime also reports the removal to Control so the
-/// dashboard drops the model.
+/// artifact). Stops the model first if it's serving. On success the runtime also
+/// reports the removal to Control so the dashboard drops the model.
 pub fn uninstall_model(base_url: &str, pipeline_id: &str) -> Result<(), String> {
     post_action(base_url, pipeline_id, "uninstall")
 }

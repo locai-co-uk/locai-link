@@ -13,8 +13,13 @@ use locai_link_shared::{
     supported_model_types as shared_supported_model_types, BootConfig,
 };
 
-// TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
-const CONTROL_API_URL: &str = "https://api.locai.co.uk/api/v1";
+// Overridable at build time via `LOCAI_CONTROL_API_URL` (dev builds); unset
+// defaults to prod. Registration writes this into the session config, so every
+// device-authenticated call (deregister, uninstall-report) follows the same env.
+const CONTROL_API_URL: &str = match option_env!("LOCAI_CONTROL_API_URL") {
+    Some(url) => url,
+    None => "https://api.locai.co.uk/api/v1",
+};
 
 /// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/*.plist`.
 #[cfg(target_os = "macos")]

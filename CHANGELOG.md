@@ -29,7 +29,7 @@ sections below the summary. -->
   the packaged app.
 - Remove models from within the companion: each deployed model gains a "Remove"
   action that deletes it locally and updates the dashboard so it no longer shows
-  a model the device no longer has.
+  a model the device no longer has. Removing a serving model stops it first.
 - Uninstalling now deregisters the device from Control, so the dashboard no
   longer keeps a stale offline row after uninstall.
 

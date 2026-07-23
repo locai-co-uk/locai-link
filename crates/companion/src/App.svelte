@@ -414,12 +414,15 @@
     });
   }
 
-  // Remove the model locally; the runtime deletes it and reports to Control.
-  // Re-downloadable afterwards from "Available to download", so no confirm.
+  // Remove the model locally; the runtime stops it first if serving, deletes it,
+  // and reports to Control. Re-downloadable afterwards, so no confirm.
   async function uninstallModel(row: { pipeline_id: string }) {
     await withPending(`uninstall:${row.pipeline_id}`, async () => {
       try {
         await invoke<void>("uninstall_model", { pipelineId: row.pipeline_id });
+        // Refresh both lists: the deployed row disappears, the model returns to
+        // "Available to download".
+        await refreshStatus();
         await loadAvailableModels();
       } catch (e) {
         availableError = e instanceof Error ? e.message : String(e);
@@ -798,6 +801,14 @@
                     disabled={pending.has(`serve:${row.pipeline_id}`)}
                   >
                     Stop
+                  </button>
+                  <button
+                    class="btn btn--ghost btn--sm"
+                    onclick={() => uninstallModel(row)}
+                    disabled={pending.has(`uninstall:${row.pipeline_id}`)}
+                    aria-label={`Remove ${row.alias}`}
+                  >
+                    Remove
                   </button>
                 {:else}
                   <span class="pill pill--idle">✓ Deployed</span>

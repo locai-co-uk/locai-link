@@ -175,9 +175,8 @@ pub fn cancel_model_deploy(pipeline_id: String) -> Result<(), String> {
 }
 
 /// Remove `pipeline_id` from this node — deletes the local config and on-disk
-/// artifact. The runtime refuses if the model is currently serving (stop it
-/// first), and on success reports the removal to Control so the dashboard drops
-/// it.
+/// artifact, stopping the model first if it's serving. On success reports the
+/// removal to Control so the dashboard drops it.
 #[tauri::command]
 pub fn uninstall_model(pipeline_id: String) -> Result<(), String> {
     shared_uninstall_model(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)

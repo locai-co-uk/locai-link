@@ -5,8 +5,12 @@
 //! <-> Setup Assistant IPC port, and the platform install root. Centralised so
 //! the two Tauri apps don't each hardcode (and drift on) their own copies.
 
-/// Control plane (dashboard) URL.
-pub const CONTROL_URL: &str = "https://control.locai.co.uk";
+/// Control plane (dashboard) URL. Overridable at build time via
+/// `LOCAI_CONTROL_URL` (dev builds); unset defaults to production.
+pub const CONTROL_URL: &str = match option_env!("LOCAI_CONTROL_URL") {
+    Some(url) => url,
+    None => "https://control.locai.co.uk",
+};
 
 /// Workspace (chat) URL.
 pub const WORKSPACE_URL: &str = "https://workspace.locai.co.uk";
