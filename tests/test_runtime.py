@@ -110,6 +110,42 @@ def test_uninstall_model_deletes_artifact_and_completes(mocker, mock_zenoh_sessi
     assert status_logger.report_command.call_args.args[1] == "completed"
 
 
+def _config_with_https_identity(pipeline_id, model_path):
+    """Config with a full HTTPS device identity so the Control uninstall report fires."""
+    cfg = _config_with_artifact("dev-1", pipeline_id, model_path)
+    cfg["identity"] = {"device_id": "dev-1", "api_key": "key-1", "api_url": "https://api.example/api/v1"}
+    return cfg
+
+
+def test_uninstall_loopback_reports_to_control(mocker, mock_zenoh_session, mock_state_manager, tmp_path):
+    """A Link-initiated (loopback command id) uninstall reports the removal to Control."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    post = mocker.patch("link.app.runtime.requests.post")
+    post.return_value.status_code = 200
+
+    agent.handle_command({"id": "loopback-abc123", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
+
+    post.assert_called_once()
+    assert post.call_args.args[0] == "https://api.example/api/v1/agent/dev-1/models/m1/uninstalled"
+    assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer key-1"
+
+
+def test_uninstall_control_command_does_not_report(mocker, mock_zenoh_session, mock_state_manager, tmp_path):
+    """A Control-initiated uninstall (non-loopback id) is already tracked by Control, so not re-reported."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    post = mocker.patch("link.app.runtime.requests.post")
+
+    agent.handle_command({"id": "cmd-server-1", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
+
+    post.assert_not_called()
+
+
 def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker, capfd):
     """A running pipeline is NOT removed when force_stop is absent/false."""
     empty_agent.handle_command(

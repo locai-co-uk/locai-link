@@ -162,6 +162,14 @@ pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String
     post_action(base_url, pipeline_id, "cancel-deploy")
 }
 
+/// Ask the agent to remove `pipeline_id` locally (delete config + on-disk
+/// artifact). The runtime refuses if the model is currently serving — stop it
+/// first. On success the runtime also reports the removal to Control so the
+/// dashboard drops the model.
+pub fn uninstall_model(base_url: &str, pipeline_id: &str) -> Result<(), String> {
+    post_action(base_url, pipeline_id, "uninstall")
+}
+
 /// Ask the agent to update itself to the latest published bundle.
 /// Dispatches UPDATE_AGENT; the agent restarts onto the new version.
 pub fn trigger_update(url: &str) -> Result<(), String> {

@@ -168,6 +168,29 @@ pub fn request_deploy(id: &DeviceIdentity, model_id: &str) -> Result<DeployOutco
         .map_err(|e| format!("request_deploy response malformed: {e}"))
 }
 
+/// Deregister (delete) the calling device from Control during uninstall.
+///
+/// `DELETE {api_url}/agent/{device_id}` with the device's own API key.
+/// Idempotent by contract: once the device is deleted its key stops validating,
+/// so an uninstall retry gets a 401 (or a 404 if the row is already gone). Both
+/// mean "already deregistered", which we treat as success. Any other error is
+/// returned so the caller can log it — uninstall must never block on this.
+pub fn deregister_device(id: &DeviceIdentity) -> Result<(), String> {
+    let base = secure_api_base(&id.api_url)?;
+    let url = format!("{base}/agent/{}", encode_segment(&id.device_id));
+    match HTTP_AGENT
+        .delete(&url)
+        .set("Authorization", &format!("Bearer {}", id.api_key))
+        .call()
+    {
+        Ok(_) => Ok(()),
+        // Already deregistered: the device key no longer validates (401) or the
+        // row is absent (404). Either way the goal is met.
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(404, _)) => Ok(()),
+        Err(e) => Err(describe_err("deregister_device", e)),
+    }
+}
+
 /// Turn a ureq error into a display string, preserving the server's `detail`
 /// body on non-2xx (ureq's default `Display` drops it).
 fn describe_err(op: &str, err: ureq::Error) -> String {

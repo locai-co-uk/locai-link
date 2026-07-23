@@ -414,6 +414,20 @@
     });
   }
 
+  // Remove the model locally; the runtime deletes it and reports to Control.
+  // Re-downloadable afterwards from "Available to download", so no confirm.
+  async function uninstallModel(row: { pipeline_id: string }) {
+    await withPending(`uninstall:${row.pipeline_id}`, async () => {
+      try {
+        await invoke<void>("uninstall_model", { pipelineId: row.pipeline_id });
+        await loadAvailableModels();
+      } catch (e) {
+        availableError = e instanceof Error ? e.message : String(e);
+        console.warn("uninstall_model failed:", e);
+      }
+    });
+  }
+
   async function withPending<T>(key: string, fn: () => Promise<T>): Promise<void> {
     pending.add(key);
     pending = new Set(pending);
@@ -793,6 +807,14 @@
                     disabled={pending.has(`serve:${row.pipeline_id}`)}
                   >
                     Serve
+                  </button>
+                  <button
+                    class="btn btn--ghost btn--sm"
+                    onclick={() => uninstallModel(row)}
+                    disabled={pending.has(`uninstall:${row.pipeline_id}`)}
+                    aria-label={`Remove ${row.alias}`}
+                  >
+                    Remove
                   </button>
                 {/if}
               </div>

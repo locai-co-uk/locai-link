@@ -11,9 +11,10 @@ use locai_link_shared::{
     list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
     read_identity, request_deploy as shared_request_deploy,
     supported_model_types as shared_supported_model_types, toggle_serving as shared_toggle_serving,
-    trigger_update, AvailableModel, DeployOutcome, DeploymentProgress, HealthStatus, ModelInfo,
-    ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
-    DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL, DEFAULT_UPDATE_URL,
+    trigger_update, uninstall_model as shared_uninstall_model, AvailableModel, DeployOutcome,
+    DeploymentProgress, HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth,
+    DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL,
+    DEFAULT_UPDATE_URL,
 };
 use serde::Serialize;
 use tauri::AppHandle;
@@ -171,6 +172,15 @@ pub fn toggle_model_serving(pipeline_id: String, action: String) -> Result<(), S
 #[tauri::command]
 pub fn cancel_model_deploy(pipeline_id: String) -> Result<(), String> {
     shared_cancel_deployment(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)
+}
+
+/// Remove `pipeline_id` from this node — deletes the local config and on-disk
+/// artifact. The runtime refuses if the model is currently serving (stop it
+/// first), and on success reports the removal to Control so the dashboard drops
+/// it.
+#[tauri::command]
+pub fn uninstall_model(pipeline_id: String) -> Result<(), String> {
+    shared_uninstall_model(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)
 }
 
 /// List the models this device may install, from Control's device-authenticated

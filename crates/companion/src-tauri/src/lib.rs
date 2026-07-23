@@ -147,6 +147,7 @@ pub fn run() {
             preferences::poll_status,
             preferences::toggle_model_serving,
             preferences::cancel_model_deploy,
+            preferences::uninstall_model,
             preferences::list_available_models,
             preferences::request_model_deploy,
             preferences::supported_model_types,
@@ -346,8 +347,13 @@ fn build_tray_menu(
         true,
         None::<&str>,
     )?;
-    let workspace =
-        MenuItem::with_id(app, MENU_ID_WORKSPACE, "Open a Workspace", true, None::<&str>)?;
+    let workspace = MenuItem::with_id(
+        app,
+        MENU_ID_WORKSPACE,
+        "Open a Workspace",
+        true,
+        None::<&str>,
+    )?;
     let download = MenuItem::with_id(
         app,
         MENU_ID_DOWNLOAD,

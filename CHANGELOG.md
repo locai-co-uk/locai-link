@@ -27,6 +27,11 @@ sections below the summary. -->
 - Hardening: the service manager no longer runs commands through a shell, and
   the source-install service label now uses the same reverse-DNS namespace as
   the packaged app.
+- Remove models from within the companion: each deployed model gains a "Remove"
+  action that deletes it locally and updates the dashboard so it no longer shows
+  a model the device no longer has.
+- Uninstalling now deregisters the device from Control, so the dashboard no
+  longer keeps a stale offline row after uninstall.
 
 ### Added: "Open a Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
 

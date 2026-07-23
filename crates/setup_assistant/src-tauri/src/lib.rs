@@ -9,8 +9,8 @@ use serde::Serialize;
 use tauri::State;
 
 use locai_link_shared::{
-    installed_version, read_boot_json, supported_model_types as shared_supported_model_types,
-    BootConfig,
+    deregister_device, installed_version, read_boot_json, read_identity,
+    supported_model_types as shared_supported_model_types, BootConfig,
 };
 
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
@@ -1302,6 +1302,24 @@ fn start_companion_service() -> Result<(), String> {
     Err("start_companion_service: unsupported platform".to_string())
 }
 
+/// Best-effort device self-deregister before uninstall.
+///
+/// Reads the device identity from the session and asks Control to delete this
+/// device, so its dashboard row is removed instead of lingering as offline.
+/// Never fails the uninstall: any error (offline, or already gone → 401/404,
+/// which the client treats as success) is logged and swallowed. The
+/// uninstaller's local wipe is the source of truth.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn best_effort_deregister() {
+    match read_identity(&PathBuf::from(resolve_install_root())) {
+        Some(id) => match deregister_device(&id) {
+            Ok(()) => eprintln!("[setup-assistant] device deregistered from Control"),
+            Err(e) => eprintln!("[setup-assistant] deregister failed (continuing uninstall): {e}"),
+        },
+        None => eprintln!("[setup-assistant] no device identity found; skipping deregister"),
+    }
+}
+
 /// Fire the uninstaller from the SA splash. `systemd-run --user --collect` on
 /// Linux so the script survives the runtime + companion being killed mid-run.
 #[tauri::command]
@@ -1311,6 +1329,8 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
+    // Deregister from Control before the script wipes local state.
+    best_effort_deregister();
     let out = std::process::Command::new("systemd-run")
         .args([
             "--user",
@@ -1341,6 +1361,8 @@ fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
+    // Deregister from Control before the script wipes local state.
+    best_effort_deregister();
     // AppleScript's `quoted form of` safely escapes the shell argument; `&`
     // concatenation keeps the path inside AppleScript's own string escaping.
     let escaped_path = script.replace('\\', "\\\\").replace('"', "\\\"");

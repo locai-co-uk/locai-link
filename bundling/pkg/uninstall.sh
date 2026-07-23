@@ -19,8 +19,10 @@
 # Locai + /Applications copies + CLI symlink, per-user Tauri data (caches /
 # WebKit / HTTPStorages / prefs / saved state), pinned Dock tiles, pkg receipt.
 #
-# The device stays registered in Control after uninstall — delete the device
-# row in Control to fully remove it. No Keychain items are touched.
+# The Setup Assistant deregisters the device from Control before it runs this
+# script, so the normal uninstall flow removes the dashboard row.
+# Running this script standalone does NOT deregister — delete the device row in
+# Control manually in that case. No Keychain items are touched.
 set -uo pipefail
 
 INSTALL_ROOT="/Library/Locai"
