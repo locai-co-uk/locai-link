@@ -29,6 +29,14 @@ def _make_zip(path: Path, entries: dict[str, bytes]) -> None:
             zf.writestr(name, data)
 
 
+def _make_tar_link(path: Path, name: str, linkname: str, *, hard: bool) -> None:
+    with tarfile.open(path, "w:gz") as tf:
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.LNKTYPE if hard else tarfile.SYMTYPE
+        info.linkname = linkname
+        tf.addfile(info)
+
+
 def test_extract_tar_clean(tmp_path):
     archive = tmp_path / "ok.tar.gz"
     _make_tar(archive, {"a/b.txt": b"hi"})
@@ -60,6 +68,34 @@ def test_extract_tar_refuses_absolute(tmp_path):
 def test_extract_zip_refuses_traversal(tmp_path):
     archive = tmp_path / "evil.zip"
     _make_zip(archive, {"../escape.txt": b"oops"})
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
+def test_extract_tar_refuses_windows_traversal(tmp_path):
+    archive = tmp_path / "win.tar.gz"
+    _make_tar(archive, {r"..\escape.txt": b"oops"})
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
+def test_extract_zip_refuses_windows_traversal(tmp_path):
+    archive = tmp_path / "win.zip"
+    _make_zip(archive, {r"..\escape.txt": b"oops"})
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
+def test_extract_tar_refuses_symlink_escape(tmp_path):
+    archive = tmp_path / "symlink.tar.gz"
+    _make_tar_link(archive, "link", "../escape", hard=False)
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
+def test_extract_tar_refuses_hardlink_escape(tmp_path):
+    archive = tmp_path / "hardlink.tar.gz"
+    _make_tar_link(archive, "link", "/etc/passwd", hard=True)
     with pytest.raises(UnsafeArchiveEntry):
         extract_archive(archive, tmp_path / "out")
 

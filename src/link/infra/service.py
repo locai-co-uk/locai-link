@@ -341,7 +341,7 @@ class WindowsBackend(ServiceBackend):
             logger.info(f"Service {self.service_name} uninstalled.")
 
 
-def _run_cmd(cmd: str | list[str], ignore_errors: bool = False):
+def _run_cmd(cmd: str | list[str], ignore_errors: bool = False) -> None:
     """Executes a command without a shell.
 
     A string is tokenised with ``shlex.split`` (a list is passed through), so

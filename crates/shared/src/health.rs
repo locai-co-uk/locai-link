@@ -389,6 +389,29 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_model_hits_uninstall_path_and_reports_ok() {
+        let (port, handle, captured) =
+            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        let res = uninstall_model(&format!("http://127.0.0.1:{port}/models"), "llm_server");
+        handle.join().unwrap();
+        assert!(res.is_ok(), "got {res:?}");
+        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(
+            request_line.starts_with("POST /models/llm_server/uninstall HTTP/1.1"),
+            "got: {request_line:?}"
+        );
+    }
+
+    #[test]
+    fn uninstall_model_returns_err_on_non_2xx() {
+        let (port, handle, _) =
+            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        let res = uninstall_model(&format!("http://127.0.0.1:{port}/models"), "ghost");
+        handle.join().unwrap();
+        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
+    }
+
+    #[test]
     fn mark_deployment_pending_posts_body_and_reports_ok() {
         let (port, handle, captured) =
             serve_once_reading_body("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");

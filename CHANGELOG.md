@@ -6,7 +6,7 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
-## [Unreleased]
+## [1.2.0]
 
 - Open a Workspace: the menu-bar companion gains an "Open a Workspace" menu item
   that opens Workspace (workspace.locai.co.uk) in the browser.
