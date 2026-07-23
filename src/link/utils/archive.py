@@ -24,7 +24,9 @@ class UnknownArchiveType(Exception):
     """Archive is neither a recognised tar (.tar.gz/.tgz) nor a zip."""
 
 
-_UNSAFE_PATH_RE = re.compile(r"(^[/\\])|(^|[/\\])\.\.([/\\]|$)")
+# Rejects: root-absolute (/ or \), Windows drive-letter roots (C:\, C:/), and
+# any parent-traversal (..) segment, in both slash styles.
+_UNSAFE_PATH_RE = re.compile(r"(^[/\\])|(^[A-Za-z]:)|((^|[/\\])\.\.([/\\]|$))")
 
 
 def _refuse_unsafe(name: str) -> None:

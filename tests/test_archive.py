@@ -100,6 +100,29 @@ def test_extract_tar_refuses_hardlink_escape(tmp_path):
         extract_archive(archive, tmp_path / "out")
 
 
+@pytest.mark.parametrize("name", [r"C:\escape.txt", "C:/escape.txt"])
+def test_extract_tar_refuses_drive_letter(tmp_path, name):
+    archive = tmp_path / "drive.tar.gz"
+    _make_tar(archive, {name: b"oops"})
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
+@pytest.mark.parametrize("name", [r"C:\escape.txt", "C:/escape.txt"])
+def test_extract_zip_refuses_drive_letter(tmp_path, name):
+    archive = tmp_path / "drive.zip"
+    _make_zip(archive, {name: b"oops"})
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
+def test_extract_tar_refuses_drive_letter_link(tmp_path):
+    archive = tmp_path / "drivelink.tar.gz"
+    _make_tar_link(archive, "link", r"C:\escape", hard=False)
+    with pytest.raises(UnsafeArchiveEntry):
+        extract_archive(archive, tmp_path / "out")
+
+
 def test_extract_unknown_type_refused(tmp_path):
     archive = tmp_path / "mystery.rar"
     archive.write_bytes(b"not an archive")
