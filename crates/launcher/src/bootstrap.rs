@@ -157,7 +157,7 @@ fn resolve_asset(config: &BootConfig) -> Result<AssetTarget, BootstrapError> {
     let checksums_url = release
         .assets
         .iter()
-        .find(|a| a.name == "checksums.txt")
+        .find(|a| a.name.eq_ignore_ascii_case("checksums.txt"))
         .map(|a| a.browser_download_url.clone());
     let sha_name = format!("{want}.sha256");
     let sha256_url = release

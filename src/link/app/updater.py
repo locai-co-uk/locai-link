@@ -565,7 +565,7 @@ def latest_release_for(
     asset_match, sha_match = _pick_assets(assets, asset_stem, version, ptag)
     if asset_match is None:
         raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}-v{version}.(tar.gz|zip)' on release {tag}")
-    checksums = next((a for a in assets if (a.get("name") or "") == "checksums.txt"), None)
+    checksums = next((a for a in assets if (a.get("name") or "").lower() == "checksums.txt"), None)
     return ReleaseInfo(
         version=version,
         tag=tag,

@@ -521,6 +521,15 @@ def test_latest_release_for_picks_checksums_when_present():
     assert info.sha256_url is not None and info.sha256_url.endswith(".sha256")
 
 
+def test_latest_release_for_matches_checksums_case_insensitively():
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.2.0", platform_tag="linux-x86_64")
+    payload["assets"].append({"name": "Checksums.txt", "browser_download_url": "https://example/Checksums.txt"})
+    session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
+    info = updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
+    assert info.checksums_url == "https://example/Checksums.txt"
+
+
 def test_latest_release_for_without_checksums_has_none():
     stem = "locai-link-llm-stt"
     payload = _fake_release_payload(stem, "1.0.16", platform_tag="linux-x86_64")
