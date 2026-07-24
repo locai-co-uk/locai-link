@@ -51,3 +51,49 @@ def test_router_generated_config(tmp_path):
     content = generated_file.read_text()
     assert "tcp/1.2.3.4:7447" in content
     assert "my_db" in content
+
+
+def test_wait_for_router_returns_once_connected(mocker):
+    """The readiness wait resolves as soon as a router ZID appears."""
+    from link.adapters.zenoh_client import ZenohClient
+
+    client = ZenohClient.__new__(ZenohClient)  # skip config build
+    session = mocker.MagicMock()
+    # First poll: no routers yet; second poll: one connected.
+    session.info().routers_zid.side_effect = [[], ["router-zid-1"]]
+    sleep = mocker.patch("link.adapters.zenoh_client.time.sleep")
+
+    client._wait_for_router(session)
+
+    sleep.assert_called_once()  # waited exactly one poll interval
+
+
+def test_wait_for_router_is_fail_open_on_probe_error(mocker):
+    """A probe that raises must not block boot."""
+    from link.adapters.zenoh_client import ZenohClient
+
+    client = ZenohClient.__new__(ZenohClient)
+    session = mocker.MagicMock()
+    session.info.side_effect = RuntimeError("info unavailable")
+    sleep = mocker.patch("link.adapters.zenoh_client.time.sleep")
+
+    client._wait_for_router(session)  # returns without raising
+
+    sleep.assert_not_called()
+
+
+def test_wait_for_router_bounded_when_never_connects(mocker):
+    """No router ever appears: return after the bound, do not hang."""
+    from link.adapters.zenoh_client import ZenohClient
+
+    client = ZenohClient.__new__(ZenohClient)
+    session = mocker.MagicMock()
+    session.info().routers_zid.return_value = []
+    mocker.patch("link.adapters.zenoh_client.time.sleep")
+    # Monotonic clock jumps past the deadline on the second read.
+    mocker.patch(
+        "link.adapters.zenoh_client.time.monotonic",
+        side_effect=[0.0, 0.0, 999.0],
+    )
+
+    client._wait_for_router(session)  # returns, no hang

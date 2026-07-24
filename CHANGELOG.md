@@ -35,6 +35,21 @@ sections below the summary. -->
 - Releases now publish a single checksums.txt covering every asset; the updater
   and launcher prefer it for download verification, with the per-asset .sha256
   sidecars still published and honored so older installs keep updating.
+- A device no longer registers as offline when the network is slow to connect
+  (seen on macOS): the agent now waits for the Zenoh router connection before
+  reporting status, so its first "online" is not silently dropped.
+
+### Fixed: device stuck offline on register over a slow link (`src/link/adapters/zenoh_client.py`)
+
+- `zenoh.open()` returns before the client has connected to the router.
+  Publishing into a not-yet-connected client-mode session is silently dropped
+  (no route, no error). The startup "online" lifecycle report fired
+  immediately after open, so on slower connects (observed on macOS) it was
+  lost while later telemetry still landed, and the device showed offline with
+  live metrics until an agent restart happened to win the race.
+- `get_session` now waits (bounded, ~5s, fail-open) for a connected router
+  before returning, so the first status report lands on every platform. No
+  periodic re-reporting and no Control change required.
 
 ### Added: release-wide checksums.txt (`.github/workflows/release.yml`, `src/link/app/updater.py`, `crates/launcher/src/bootstrap.rs`)
 

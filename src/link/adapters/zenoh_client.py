@@ -5,6 +5,7 @@
 
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -72,6 +73,16 @@ class ZenohClient:
 
         return z_conf
 
+    # zenoh.open() returns before the client has actually connected to the
+    # router. Publishing (e.g. the startup "online" lifecycle report) into a
+    # not-yet-connected client-mode session is silently dropped — no route,
+    # no error. On fast links the connection is up in time; on slower ones
+    # (observed on macOS) the first report is lost and the device shows
+    # offline while later telemetry still lands. Wait for a connected router
+    # before returning, bounded so a genuinely offline start still proceeds.
+    _ROUTER_WAIT_SECONDS = 5.0
+    _ROUTER_POLL_SECONDS = 0.1
+
     def get_session(self) -> "zenoh.Session":
         """Returns the active session, opening it if necessary."""
         import zenoh  # lazy — see module docstring
@@ -81,10 +92,28 @@ class ZenohClient:
 
         try:
             self._session = zenoh.open(self._zenoh_config)
-            return self._session
         except Exception as e:
             # Propagate error so retry logic can handle it
             raise e
+
+        self._wait_for_router(self._session)
+        return self._session
+
+    def _wait_for_router(self, session: "zenoh.Session") -> None:
+        """Blocks until the session reports a connected router, or the bound
+        elapses. Fail-open: any probe error just proceeds (never block boot)."""
+        deadline = time.monotonic() + self._ROUTER_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                if list(session.info().routers_zid()):
+                    return
+            except Exception as e:
+                logger.debug(f"Zenoh router-readiness probe failed, proceeding: {e}")
+                return
+            time.sleep(self._ROUTER_POLL_SECONDS)
+        logger.warning(
+            f"Zenoh session opened but no router connected within {self._ROUTER_WAIT_SECONDS}s; proceeding anyway."
+        )
 
     def close(self):
         """Closes the current Zenoh session if it exists."""
