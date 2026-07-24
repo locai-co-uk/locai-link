@@ -73,7 +73,10 @@ struct AssetTarget {
     version: String,
     asset_name: String,
     download_url: String,
-    sha256_url: String,
+    /// Release-wide checksums.txt; preferred when present.
+    checksums_url: Option<String>,
+    /// Per-asset .sha256 sidecar; fallback during the transition.
+    sha256_url: Option<String>,
     expected_size: Option<u64>,
 }
 
@@ -107,7 +110,7 @@ pub fn bootstrap_from_boot(install_root: &Path) -> Result<String, BootstrapError
     let staging = ensure_staging(install_root).map_err(BootstrapError::Operation)?;
     let archive = staging.join(&asset.asset_name);
     download(&asset.download_url, &archive, asset.expected_size)?;
-    let expected_sha = download_sha_sidecar(&asset.sha256_url)?;
+    let expected_sha = resolve_expected_sha(&asset)?;
     verify_sha256(&archive, &expected_sha).map_err(BootstrapError::Operation)?;
     emit(&Status::BootstrapVerified {
         stage: "verify",
@@ -151,29 +154,37 @@ fn resolve_asset(config: &BootConfig) -> Result<AssetTarget, BootstrapError> {
                 release.tag_name
             ))
         })?;
+    let checksums_url = release
+        .assets
+        .iter()
+        .find(|a| a.name == "checksums.txt")
+        .map(|a| a.browser_download_url.clone());
     let sha_name = format!("{want}.sha256");
-    let sha_asset = release
+    let sha256_url = release
         .assets
         .iter()
         .find(|a| a.name == sha_name)
-        .ok_or_else(|| {
-            BootstrapError::Operation(format!(
-                "release {} is missing sidecar {sha_name}",
-                release.tag_name
-            ))
-        })?;
+        .map(|a| a.browser_download_url.clone());
+    if checksums_url.is_none() && sha256_url.is_none() {
+        return Err(BootstrapError::Operation(format!(
+            "release {} has neither checksums.txt nor sidecar {sha_name}",
+            release.tag_name
+        )));
+    }
     Ok(AssetTarget {
         version,
         asset_name: asset.name.clone(),
         download_url: asset.browser_download_url.clone(),
-        sha256_url: sha_asset.browser_download_url.clone(),
+        checksums_url,
+        sha256_url,
         expected_size: asset.size,
     })
 }
 
 /// Pattern B for mirrors / air-gapped: `boot.json.asset_url` points at a
 /// concrete tarball. The version is read out of the filename
-/// (`...-v1.0.16.tar.gz`) and the sha sidecar lives at `<url>.sha256`.
+/// (`...-v1.0.16.tar.gz`); checksums.txt sits beside the asset, with the
+/// `<url>.sha256` sidecar as the fallback.
 fn resolve_direct(url: &str) -> Result<AssetTarget, BootstrapError> {
     let asset_name = url
         .rsplit('/')
@@ -185,11 +196,15 @@ fn resolve_direct(url: &str) -> Result<AssetTarget, BootstrapError> {
             "could not parse -v<version>- out of asset filename: {asset_name}"
         ))
     })?;
+    let checksums_url = url
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/checksums.txt"));
     Ok(AssetTarget {
         version,
         asset_name,
         download_url: url.to_string(),
-        sha256_url: format!("{url}.sha256"),
+        checksums_url,
+        sha256_url: Some(format!("{url}.sha256")),
         expected_size: None,
     })
 }
@@ -262,6 +277,50 @@ fn download(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<(), Bo
         bytes_total: total,
     });
     Ok(())
+}
+
+/// checksums.txt first; the .sha256 sidecar covers releases (and mirrors)
+/// from before the transition. Offline errors propagate immediately so the
+/// exit-code contract stays truthful.
+fn resolve_expected_sha(asset: &AssetTarget) -> Result<String, BootstrapError> {
+    if let Some(url) = &asset.checksums_url {
+        match download_checksums_entry(url, &asset.asset_name) {
+            Ok(sha) => return Ok(sha),
+            Err(e @ BootstrapError::NoInternet(_)) => return Err(e),
+            Err(BootstrapError::Operation(msg)) => {
+                if asset.sha256_url.is_none() {
+                    return Err(BootstrapError::Operation(msg));
+                }
+            }
+        }
+    }
+    match &asset.sha256_url {
+        Some(url) => download_sha_sidecar(url),
+        None => Err(BootstrapError::Operation(
+            "no checksum source resolved for the asset".into(),
+        )),
+    }
+}
+
+fn download_checksums_entry(url: &str, asset_name: &str) -> Result<String, BootstrapError> {
+    let body = http_get_string(url)?;
+    find_checksum_entry(&body, asset_name).ok_or_else(|| {
+        BootstrapError::Operation(format!("no valid sha256 entry for {asset_name} in {url}"))
+    })
+}
+
+/// sha256sum format: `<hex>  <filename>` per line (`*` marks binary mode).
+fn find_checksum_entry(text: &str, asset_name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut tokens = line.split_whitespace();
+        let hex = tokens.next()?;
+        let name = tokens
+            .next_back()?
+            .trim_start_matches('*')
+            .trim_start_matches("./");
+        (name == asset_name && hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| hex.to_ascii_lowercase())
+    })
 }
 
 fn download_sha_sidecar(url: &str) -> Result<String, BootstrapError> {
@@ -543,6 +602,38 @@ mod tests {
     #[test]
     fn rejects_name_with_no_known_extension() {
         assert!(parse_version_from_asset_name("locai-link-llm-v1.0.0.zip").is_none());
+    }
+
+    #[test]
+    fn checksum_entry_lookup() {
+        let sums = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  locai-link-llm-stt-linux-x86_64-v1.2.0.tar.gz\n\
+                    FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF *./other.pkg\n\
+                    short  bad.tar.gz\n";
+        assert_eq!(
+            find_checksum_entry(sums, "locai-link-llm-stt-linux-x86_64-v1.2.0.tar.gz").as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            find_checksum_entry(sums, "other.pkg").as_deref(),
+            Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+        );
+        assert!(find_checksum_entry(sums, "bad.tar.gz").is_none());
+        assert!(find_checksum_entry(sums, "missing.tar.gz").is_none());
+    }
+
+    #[test]
+    fn resolve_direct_derives_both_checksum_sources() {
+        let t =
+            resolve_direct("https://mirror.example/rel/locai-link-llm-linux-x86_64-v1.2.0.tar.gz")
+                .unwrap();
+        assert_eq!(
+            t.checksums_url.as_deref(),
+            Some("https://mirror.example/rel/checksums.txt")
+        );
+        assert_eq!(
+            t.sha256_url.as_deref(),
+            Some("https://mirror.example/rel/locai-link-llm-linux-x86_64-v1.2.0.tar.gz.sha256")
+        );
     }
 
     #[test]

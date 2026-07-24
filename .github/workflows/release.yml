@@ -741,6 +741,20 @@ jobs:
         shell: bash
         run: ls -lah release-assets/ 2>/dev/null || echo "(no assets collected — all bundle legs failed)"
 
+      - name: Generate checksums.txt
+        # One release-wide checksum file (sha256sum format) over every real
+        # asset. The updater and launcher prefer it; the per-asset .sha256
+        # sidecars stay published until the fleet is past the transition
+        # release, then their generation can be dropped.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pkg' \) -printf '%f\n' \
+            | LC_ALL=C sort \
+            | xargs -r sha256sum > checksums.txt
+          cat checksums.txt
+
       - name: Attach bundles to release
         uses: softprops/action-gh-release@v2
         with:
@@ -750,6 +764,7 @@ jobs:
             release-assets/*.zip
             release-assets/*.pkg
             release-assets/*.sha256
+            release-assets/checksums.txt
           # Don't abort the whole release when one platform's leg
           # failed to produce its artifact; the other platforms are
           # still worth publishing.

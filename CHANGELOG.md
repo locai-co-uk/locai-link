@@ -32,6 +32,21 @@ sections below the summary. -->
 - Hardening: the service manager no longer runs commands through a shell, and
   the source-install service label now uses the same reverse-DNS namespace as
   the packaged app.
+- Releases now publish a single checksums.txt covering every asset; the updater
+  and launcher prefer it for download verification, with the per-asset .sha256
+  sidecars still published and honored so older installs keep updating.
+
+### Added: release-wide checksums.txt (`.github/workflows/release.yml`, `src/link/app/updater.py`, `crates/launcher/src/bootstrap.rs`)
+
+- The release workflow generates one `checksums.txt` (sha256sum format) over
+  all attached assets, alongside the existing per-asset `.sha256` sidecars.
+- `swap_bundle` resolves the expected digest from `checksums.txt` when the
+  release carries one, falling back to the sidecar; verification remains
+  mandatory either way.
+- The launcher's first-launch bootstrap does the same in both of its
+  resolution modes (release listing and pinned `boot.json` URL).
+- Sidecar generation can be dropped from the workflow once Control telemetry
+  shows no agent below this release; already-published releases keep theirs.
 
 ### Added: "Open a Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
 
