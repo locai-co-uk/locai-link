@@ -70,21 +70,23 @@ jobs:
           fi
 
       - name: Extract release notes from CHANGELOG
-        # The bullet summary at the top of the version's CHANGELOG.md entry
-        # becomes the release body (generate_release_notes appends the auto PR
-        # list below it). Warn — don't fail — if the entry is missing, so a
-        # release is never blocked on the changelog.
+        # Build the full release body: a "What's Changed" heading, the curated
+        # bullet summary from the version's CHANGELOG.md entry, and a Full
+        # Changelog link to CHANGELOG.md. generate_release_notes is off (below), so
+        # GitHub does not append its own PR-title list. Warn, don't fail, if the
+        # entry is missing, so a release is never blocked on the changelog.
         id: notes
         if: inputs.tag == '' && !inputs.dry_run
         env:
           TAG: ${{ steps.tag.outputs.name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
           OUT="$RUNNER_TEMP/release-notes.md"
-          python3 - "$VERSION" "$OUT" <<'PY'
+          python3 - "$VERSION" "$OUT" "$TAG" "$REPO" <<'PY'
           import pathlib, re, sys
-          version, out = sys.argv[1], sys.argv[2]
+          version, out, tag, repo = sys.argv[1:5]
           lines = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
           hdr = re.compile(r"^##\s*\[" + re.escape(version) + r"\]")
           start = next((i + 1 for i, ln in enumerate(lines) if hdr.match(ln)), None)
@@ -96,8 +98,12 @@ jobs:
                   summary.append(ln)
           body = "\n".join(summary).strip()
           if not body:
-              print(f"::warning::No CHANGELOG.md summary for {version}; using auto-generated notes only")
-          pathlib.Path(out).write_text(body + ("\n" if body else ""), encoding="utf-8")
+              print(f"::warning::No CHANGELOG.md summary for {version}; release notes will have no bullets")
+          parts = ["## What's Changed"]
+          if body:
+              parts.append(body)
+          parts.append(f"**Full Changelog**: https://github.com/{repo}/blob/{tag}/CHANGELOG.md")
+          pathlib.Path(out).write_text("\n\n".join(parts) + "\n", encoding="utf-8")
           PY
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
@@ -111,7 +117,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Release ${{ steps.tag.outputs.name }}
           body_path: ${{ steps.notes.outputs.path }}
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           make_latest: true
 
@@ -157,24 +163,25 @@ jobs:
       - name: Install Rust toolchain (for launcher)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build
+      - name: Cache cargo downloads
         uses: actions/cache@v4
         with:
+          # Dependency downloads only, not crates/target: a release builds its
+          # binaries clean, and a restored stale/partial target/ has caused bad
+          # builds. No restore-keys, so a key miss fetches clean, never stale.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            crates/target
           key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
 
       - name: Cache prefetched binaries
         uses: actions/cache@v4
         with:
+          # No restore-keys: the key hashes the pinned upstream tags
+          # (plugins/*/install.py), so a tag bump must force a fresh prefetch
+          # rather than restore stale binaries via a prefix match.
           path: bundling/_artifacts
           key: bundle-artifacts-${{ runner.os }}-${{ hashFiles('plugins/*/install.py') }}
-          restore-keys: |
-            bundle-artifacts-${{ runner.os }}-
 
       - name: Sync deps
         shell: bash
@@ -734,6 +741,20 @@ jobs:
         shell: bash
         run: ls -lah release-assets/ 2>/dev/null || echo "(no assets collected — all bundle legs failed)"
 
+      - name: Generate checksums.txt
+        # One release-wide checksum file (sha256sum format) over every real
+        # asset. The updater and launcher prefer it; the per-asset .sha256
+        # sidecars stay published until the fleet is past the transition
+        # release, then their generation can be dropped.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pkg' \) -printf '%f\n' \
+            | LC_ALL=C sort \
+            | xargs -r sha256sum > checksums.txt
+          cat checksums.txt
+
       - name: Attach bundles to release
         uses: softprops/action-gh-release@v2
         with:
@@ -743,6 +764,7 @@ jobs:
             release-assets/*.zip
             release-assets/*.pkg
             release-assets/*.sha256
+            release-assets/checksums.txt
           # Don't abort the whole release when one platform's leg
           # failed to produce its artifact; the other platforms are
           # still worth publishing.

@@ -37,7 +37,6 @@ PLUGIN_SPEC = {
             "link_language_model.adapter",
             "link_language_model.server",
             "link_language_model.swap_manager",
-            "link_language_model.cors_shim",
             "link_language_model.install",
         ],
         "native_dir": "bin-llama",

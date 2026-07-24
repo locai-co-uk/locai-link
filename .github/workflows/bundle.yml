@@ -66,13 +66,13 @@ jobs:
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
+          # No restore-keys: restore only on an exact key match, never a prefix
+          # fallback that reused a stale crates/target from an unrelated run.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             crates/target
           key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
 
       - name: Test launcher
         shell: bash
@@ -87,8 +87,6 @@ jobs:
         with:
           path: bundling/_artifacts
           key: bundle-artifacts-${{ runner.os }}-${{ hashFiles('plugins/*/install.py') }}
-          restore-keys: |
-            bundle-artifacts-${{ runner.os }}-
 
       - name: Sync project + dev deps
         shell: bash

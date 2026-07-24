@@ -18,10 +18,12 @@ from typing import Any
 
 from typing_extensions import override
 
+from link import constants
+
 logger = logging.getLogger(__name__)
 
-HEALTH_HOST = "127.0.0.1"
-HEALTH_PORT = 20505
+HEALTH_HOST = constants.HEALTH_HOST
+HEALTH_PORT = constants.HEALTH_PORT
 
 # Queued deployment rows time out into `failed` after this many seconds
 # if the runtime never advances them (e.g. Control DEPLOY_MODEL was lost).
@@ -311,13 +313,14 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                         "pipeline_id": pipeline_id,
                     }
                 else:  # uninstall
-                    # force_stop omitted -> schema default False: refuses if the
-                    # pipeline is running, matching the backend default. Stop it
-                    # first, then uninstall.
+                    # force_stop: this action only ever comes from the companion's
+                    # Remove button, which removes whether or not the model is
+                    # serving — so stop it first rather than refuse.
                     command = {
                         "id": f"loopback-{uuid.uuid4().hex[:8]}",
                         "type": "UNINSTALL_MODEL",
                         "pipeline_id": pipeline_id,
+                        "force_stop": True,
                     }
 
             try:

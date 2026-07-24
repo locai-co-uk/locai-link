@@ -402,9 +402,8 @@ def test_post_uninstall_dispatches_uninstall_command():
     cmd = received[0]
     assert cmd["type"] == "UNINSTALL_MODEL"
     assert cmd["pipeline_id"] == "llm_server"
-    # force_stop omitted -> schema default (False); no extras that would trip
-    # pydantic's extra=forbid.
-    assert "force_stop" not in cmd
+    # Companion Remove stops-then-removes, so the loopback command force-stops.
+    assert cmd["force_stop"] is True
     assert cmd["id"].startswith("loopback-")
 
 

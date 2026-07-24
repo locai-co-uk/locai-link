@@ -7,41 +7,29 @@
 use std::path::PathBuf;
 
 use locai_link_shared::{
-    agent_health, cancel_deployment as shared_cancel_deployment,
+    agent_health, cancel_deployment as shared_cancel_deployment, installed_version,
     list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
     read_identity, request_deploy as shared_request_deploy,
     supported_model_types as shared_supported_model_types, toggle_serving as shared_toggle_serving,
-    trigger_update, AvailableModel, DeployOutcome, DeploymentProgress, HealthStatus, ModelInfo,
-    ModelsStatus, ServingAction, TransportHealth, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
-    DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL, DEFAULT_UPDATE_URL,
+    trigger_update, uninstall_model as shared_uninstall_model, AvailableModel, DeployOutcome,
+    DeploymentProgress, HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth,
+    DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL, DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL,
+    DEFAULT_UPDATE_URL,
 };
 use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
-/// Install root. Mirrored in the Setup Assistant's `get_install_root` —
-/// a change here has to travel to both.
+/// Install root — single source in the shared crate.
 pub(crate) fn install_root() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "/Library/Locai".to_string()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/.local/share/locai")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        String::new()
-    }
+    locai_link_shared::install_root()
 }
 
 fn runtime_log_file() -> String {
     format!("{}/logs/agent.stdout.log", install_root())
 }
 
-const CONTROL_BASE_URL: &str = "https://control.locai.co.uk";
+const CONTROL_BASE_URL: &str = locai_link_shared::CONTROL_URL;
 
 /// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/`.
 #[cfg(target_os = "macos")]
@@ -184,6 +172,14 @@ pub fn toggle_model_serving(pipeline_id: String, action: String) -> Result<(), S
 #[tauri::command]
 pub fn cancel_model_deploy(pipeline_id: String) -> Result<(), String> {
     shared_cancel_deployment(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)
+}
+
+/// Remove `pipeline_id` from this node — deletes the local config and on-disk
+/// artifact, stopping the model first if it's serving. On success reports the
+/// removal to Control so the dashboard drops it.
+#[tauri::command]
+pub fn uninstall_model(pipeline_id: String) -> Result<(), String> {
+    shared_uninstall_model(DEFAULT_MODEL_ACTION_BASE, &pipeline_id)
 }
 
 /// List the models this device may install, from Control's device-authenticated
@@ -440,16 +436,14 @@ fn read_session_config_device() -> Option<DeviceInfo> {
     })
 }
 
-/// Resolve `<install_root>/current` and return the final path component
-/// (the version dir name), or `None` when the symlink is absent or unusable.
+/// Resolve `<install_root>/current` to the active version dir name, or `None`
+/// when it can't be resolved. Delegates to the shared resolver so it honours
+/// BOTH the `current` symlink and the `CURRENT` text pointer — a bare
+/// `read_link` here silently returned `None` on text-pointer installs, so the
+/// companion showed no version where the runtime/SA (which use the shared
+/// resolver) showed it.
 fn resolve_current_version() -> Option<String> {
-    let current = PathBuf::from(install_root()).join("current");
-    let target = std::fs::read_link(&current).ok()?;
-    let last = target.file_name()?.to_string_lossy().into_owned();
-    if last.is_empty() {
-        return None;
-    }
-    Some(last)
+    installed_version(&PathBuf::from(install_root())).map(|v| v.version)
 }
 
 /// Check the runtime LaunchAgent's `RunAtLoad` via PlistBuddy. False on any

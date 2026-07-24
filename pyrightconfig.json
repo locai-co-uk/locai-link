@@ -1,6 +1,9 @@
 {
   "$schema": "https://raw.githubusercontent.com/DetachHead/basedpyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
 
+  "venvPath": ".",
+  "venv": ".venv",
+
   "extraPaths": ["src", "bundling"],
   "include": ["src", "bundling", "tests", "plugins"],
   "pythonPlatform": "All",

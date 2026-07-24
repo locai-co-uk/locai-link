@@ -6,7 +6,75 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
-## [Unreleased]
+## [1.2.0]
+
+- Open a Workspace: the menu-bar companion gains an "Open a Workspace" menu item
+  that opens Workspace (workspace.locai.co.uk) in the browser.
+- Remove models from within the companion: each deployed model gains a "Remove"
+  action that deletes it locally and updates the dashboard so it no longer shows
+  a model the device no longer has. Removing a serving model stops it first.
+- Uninstalling now deregisters the device from Control, so the dashboard no
+  longer keeps a stale offline row after uninstall.
+- The companion Preferences window now shows the installed version on every
+  install layout (it previously showed nothing when the active version was
+  tracked by a text pointer rather than a symlink).
+- Launching the companion a second time (from the Dock, Launchpad, or the copy
+  in /Applications) no longer starts a duplicate menu-bar icon; it focuses the
+  running app instead.
+- Uninstall now fully removes the Setup Assistant's per-user data; its bundle
+  identifier in the uninstaller was mismatched, leaving caches and preferences
+  behind.
+- The macOS installer now advertises Apple silicon only, matching what actually
+  ships, so an Intel Mac is no longer offered a build it could never update.
+- The router/plugin provisioner now extracts downloaded archives through the same
+  path-traversal-guarded extractor as the updater, so a malicious or corrupt
+  mirror can no longer write outside the target directory.
+- Hardening: the service manager no longer runs commands through a shell, and
+  the source-install service label now uses the same reverse-DNS namespace as
+  the packaged app.
+- Releases now publish a single checksums.txt covering every asset; the updater
+  and launcher prefer it for download verification, with the per-asset .sha256
+  sidecars still published and honored so older installs keep updating.
+- A device no longer registers as offline when the network is slow to connect
+  (seen on macOS): the agent now waits for the Zenoh router connection before
+  reporting status, so its first "online" is not silently dropped.
+
+### Fixed: device stuck offline on register over a slow link (`src/link/adapters/zenoh_client.py`)
+
+- `zenoh.open()` returns before the client has connected to the router.
+  Publishing into a not-yet-connected client-mode session is silently dropped
+  (no route, no error). The startup "online" lifecycle report fired
+  immediately after open, so on slower connects (observed on macOS) it was
+  lost while later telemetry still landed, and the device showed offline with
+  live metrics until an agent restart happened to win the race.
+- `get_session` now waits (bounded, ~5s, fail-open) for a connected router
+  before returning, so the first status report lands on every platform. No
+  periodic re-reporting and no Control change required.
+
+### Added: release-wide checksums.txt (`.github/workflows/release.yml`, `src/link/app/updater.py`, `crates/launcher/src/bootstrap.rs`)
+
+- The release workflow generates one `checksums.txt` (sha256sum format) over
+  all attached assets, alongside the existing per-asset `.sha256` sidecars.
+- `swap_bundle` resolves the expected digest from `checksums.txt` when the
+  release carries one, falling back to the sidecar; verification remains
+  mandatory either way.
+- The launcher's first-launch bootstrap does the same in both of its
+  resolution modes (release listing and pinned `boot.json` URL).
+- Sidecar generation can be dropped from the workflow once Control telemetry
+  shows no agent below this release; already-published releases keep theirs.
+
+### Added: "Open a Workspace" companion action (`crates/companion/src-tauri/src/lib.rs`)
+
+- The tray gains an "Open a Workspace" item that opens Workspace
+  (workspace.locai.co.uk) in the default browser.
+
+### Fixed: duplicate companion instance on second launch (`crates/companion/src-tauri/src/lib.rs`)
+
+- The companion had no single-instance guard, so launching it again (Dock,
+  Launchpad, or the pkg-managed /Applications copy that OTA leaves at the prior
+  version) started a second process and a duplicate tray icon. It now registers
+  tauri-plugin-single-instance as its first plugin; a second launch focuses the
+  running app's Preferences window and exits without adding a tray icon.
 
 ## [1.1.2]
 

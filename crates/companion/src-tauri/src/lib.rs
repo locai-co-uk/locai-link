@@ -41,8 +41,10 @@ const TRAY_ICON_IS_TEMPLATE: bool = false;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+const CONTROL_URL: &str = locai_link_shared::CONTROL_URL;
+
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
-const CONTROL_URL: &str = "https://control.locai.co.uk";
+const WORKSPACE_URL: &str = locai_link_shared::WORKSPACE_URL;
 
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
@@ -58,6 +60,9 @@ const EVENT_SHOW_DOWNLOADS: &str = "show-downloads";
 
 /// Suffix after this prefix is the pipeline id.
 const MENU_ID_MODEL_PREFIX: &str = "model:";
+
+/// Menu id for the "Open a Workspace" action.
+const MENU_ID_WORKSPACE: &str = "workspace";
 
 /// Release-channel suffix baked in from VITE_CHANNEL at compile time
 /// (defaults to "alpha" when unset — matches the SA side). "prod" or
@@ -127,6 +132,13 @@ type SharedHandles = Arc<Mutex<MenuHandles>>;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin registered. A second launch (Dock/Launchpad,
+        // or a stale /Applications copy) reaches the running instance here and
+        // then exits, so no duplicate tray icon; surface Preferences so the
+        // relaunch isn't a silent no-op.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_preferences_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -134,6 +146,7 @@ pub fn run() {
             preferences::poll_status,
             preferences::toggle_model_serving,
             preferences::cancel_model_deploy,
+            preferences::uninstall_model,
             preferences::list_available_models,
             preferences::request_model_deploy,
             preferences::supported_model_types,
@@ -236,7 +249,7 @@ fn kickstart_runtime_if_installed() {
 /// Companion IPC port, adjacent to the health server's 20505. Both live
 /// below the ephemeral range floor (32768 on Linux / 49152 on macOS) so the
 /// OS can't grab them for an outgoing connection before we bind.
-const IPC_PORT: u16 = 20506;
+const IPC_PORT: u16 = locai_link_shared::IPC_PORT;
 
 /// Loopback listener so other processes can ask the companion to open
 /// Preferences. One endpoint: `POST /preferences/show` → 204; anything else → 404.
@@ -333,6 +346,13 @@ fn build_tray_menu(
         true,
         None::<&str>,
     )?;
+    let workspace = MenuItem::with_id(
+        app,
+        MENU_ID_WORKSPACE,
+        "Open a Workspace",
+        true,
+        None::<&str>,
+    )?;
     let download = MenuItem::with_id(
         app,
         MENU_ID_DOWNLOAD,
@@ -371,6 +391,7 @@ fn build_tray_menu(
         items.push(u);
     }
     items.push(&control);
+    items.push(&workspace);
     items.push(&download);
     items.push(&preferences);
     items.push(&quit);
@@ -594,6 +615,11 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         _ if id.starts_with(MENU_ID_MODEL_PREFIX) => {
             let pipeline_id = id[MENU_ID_MODEL_PREFIX.len()..].to_string();
             handle_model_toggle(app, pipeline_id);
+        }
+        MENU_ID_WORKSPACE => {
+            if let Err(e) = app.opener().open_url(WORKSPACE_URL, None::<&str>) {
+                eprintln!("[companion] failed to open {WORKSPACE_URL}: {e}");
+            }
         }
         // Disabled items — shouldn't fire, ignore if they do.
         MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER => {}

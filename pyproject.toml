@@ -7,7 +7,7 @@ build-backend = "uv_build"
 
 [project]
 name = "locai-link"
-version = "1.1.2"
+version = "1.2.0"
 description = "Self-hosted edge AI runtime for on-prem and private cloud."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,7 @@ dependencies = [
 dev = [
     # Linting/Formatting
     "ruff>=0.14.14",
+    "basedpyright>=1.39.9",
     # Testing
     "pytest>=9.0.0",
     "pytest-mock>=3.15.0",

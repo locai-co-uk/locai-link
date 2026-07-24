@@ -10,6 +10,7 @@ import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
 
+from link import constants
 from link.app.onboarding import FLEET_MARKER_PATH, activate_device, enroll_device, register_device
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
@@ -30,8 +31,8 @@ from link.utils.logger import setup_logging
 logger = setup_logging()
 
 DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
-DEFAULT_REPO_URL = "https://github.com/locai-co-uk/locai-link.git"
-DEFAULT_BRANCH = "main"
+DEFAULT_REPO_URL = constants.REPO_URL
+DEFAULT_BRANCH = constants.DEFAULT_BRANCH
 
 
 def setup(args: argparse.Namespace):

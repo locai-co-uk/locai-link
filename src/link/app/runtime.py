@@ -8,6 +8,7 @@ import signal
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import quote
 
 import requests
 from pydantic import ValidationError
@@ -949,6 +950,40 @@ class AgentRuntime:
         )
         suffix = f" (file deleted: {artifact_path.name})" if deleted and artifact_path else ""
         self.status_logger.report_command(command_id, "completed", f"Pipeline '{pipeline_id}' removed{suffix}")
+
+        # Link-initiated removals (loopback command id) are invisible to Control,
+        # so report them so the dashboard drops the model. Control-initiated
+        # UNINSTALL_MODEL commands are already tracked by Control, not re-reported.
+        if command_id.startswith("loopback-"):
+            self._report_model_uninstalled_to_control(pipeline_id)
+
+    def _report_model_uninstalled_to_control(self, model_id: str) -> None:
+        """Best-effort: tell Control a local model removal happened so the
+        dashboard stops showing it.
+
+        Device-authenticated with the session api_key. Local removal is the
+        source of truth, so any failure (offline, already absent → 404) is
+        logged and swallowed. HTTPS is required before the bearer is sent.
+        """
+        ident = self.agent_config.identity if self.agent_config else None
+        if not ident or not ident.api_url or not ident.api_key or not ident.device_id:
+            return
+        base = ident.api_url.rstrip("/")
+        if not base.startswith("https://"):
+            logger.warning("Skipping Control uninstall report: api_url is not HTTPS")
+            return
+        url = f"{base}/agent/{quote(ident.device_id, safe='')}/models/{quote(model_id, safe='')}/uninstalled"
+        try:
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {ident.api_key}"},
+                timeout=(5.0, 10.0),
+            )
+            # 404 = device/model already absent on Control; both are fine.
+            if resp.status_code not in (200, 404):
+                logger.warning(f"Control uninstall report for '{model_id}' returned HTTP {resp.status_code}")
+        except requests.RequestException as e:
+            logger.warning(f"Control uninstall report for '{model_id}' failed (ignored): {e}")
 
     def _log_status(self) -> None:
         """Logs the current status of the agent, including running and configured pipelines."""

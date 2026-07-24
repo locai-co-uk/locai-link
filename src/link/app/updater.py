@@ -46,11 +46,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import tomllib
-import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
@@ -58,7 +56,9 @@ from typing import Any, Protocol
 import requests
 from packaging.version import Version
 
+from link import constants
 from link.config.models import AgentConfig
+from link.utils import archive as archive_util
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class _HttpGetter(Protocol):
 # Source-install OTA — git-based, used when running from a cloned repo.
 # ===========================================================================
 
-DEFAULT_BRANCH = "main"
+DEFAULT_BRANCH = constants.DEFAULT_BRANCH
 
 
 def _command_exists(name: str) -> bool:
@@ -113,12 +113,13 @@ def get_local_version(repo_dir: Path) -> str | None:
     toml_path = repo_dir / "pyproject.toml"
     if not toml_path.exists():
         return None
-    for line in toml_path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("version"):
-            parts = line.split("=", 1)
-            if len(parts) == 2:
-                return parts[1].strip().strip('"').strip("'")
-    return None
+    try:
+        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    project = data.get("project")
+    version = project.get("version") if isinstance(project, dict) else None
+    return version if isinstance(version, str) else None
 
 
 def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
@@ -297,16 +298,13 @@ BOOT_NAME = "boot.json"
 RUNTIME_BINARY = "locai-link-runtime.exe" if sys.platform == "win32" else "locai-link-runtime"
 UPDATE_PENDING_STAMP = ".update-pending"
 
-DEFAULT_RELEASES_REPO = "locai-co-uk/locai-link"
+DEFAULT_RELEASES_REPO = constants.REPO_SLUG
 DEFAULT_CHANNEL = "stable"
 
 # Download tuning. Generous: this runs once per OTA, not in a hot path.
 _CHUNK_SIZE = 1024 * 1024  # 1 MiB
 _DOWNLOAD_TIMEOUT = 60  # seconds for connect/read on a single chunk
 _GH_API_TIMEOUT = 15
-
-# Path-traversal guard during extract.
-_UNSAFE_PATH_RE = re.compile(r"(^[/\\])|(^|[/\\])\.\.([/\\]|$)")
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +374,7 @@ class ReleaseInfo:
     asset_name: str  # full filename including the version suffix and extension
     download_url: str
     sha256_url: str | None  # sibling .sha256 — None if release didn't ship one
+    checksums_url: str | None = None  # release-wide checksums.txt; preferred over the sidecar
 
 
 @dataclasses.dataclass(frozen=True)
@@ -566,12 +565,14 @@ def latest_release_for(
     asset_match, sha_match = _pick_assets(assets, asset_stem, version, ptag)
     if asset_match is None:
         raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}-v{version}.(tar.gz|zip)' on release {tag}")
+    checksums = next((a for a in assets if (a.get("name") or "").lower() == "checksums.txt"), None)
     return ReleaseInfo(
         version=version,
         tag=tag,
         asset_name=str(asset_match["name"]),
         download_url=str(asset_match["browser_download_url"]),
         sha256_url=str(sha_match["browser_download_url"]) if sha_match else None,
+        checksums_url=str(checksums["browser_download_url"]) if checksums else None,
     )
 
 
@@ -732,6 +733,25 @@ def _fetch_sha256(url: str, *, session: _HttpGetter | None = None) -> str:
     return first_token
 
 
+def _sha256_from_checksums(url: str, asset_name: str, *, session: _HttpGetter | None = None) -> str:
+    """Digest for ``asset_name`` from a release-wide ``checksums.txt``
+    (sha256sum format: one ``<hex>  <filename>`` line per asset)."""
+    http = session or requests
+    try:
+        resp = http.get(url, timeout=_GH_API_TIMEOUT)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise VerifyFailed(f"Could not fetch checksums from {url}: {exc}") from exc
+    for line in resp.text.splitlines():
+        tokens = line.split()
+        if len(tokens) < 2:
+            continue
+        name = tokens[-1].lstrip("*").removeprefix("./")
+        if name == asset_name and re.fullmatch(r"[0-9a-fA-F]{64}", tokens[0]):
+            return tokens[0]
+    raise VerifyFailed(f"No valid sha256 entry for {asset_name} in {url}")
+
+
 def _hash_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -775,16 +795,13 @@ def extract(archive: Path, dest: Path) -> None:
 
 
 def _extract_archive(archive: Path, staging: Path) -> None:
-    """Extract ``archive`` (tar.gz/tgz or zip) into ``staging``, refusing
-    path-traversal entries. Caller owns ``staging`` and its cleanup."""
-    staging.mkdir(parents=True, exist_ok=True)
-    suffix = "".join(archive.suffixes[-2:]).lower()
-    if archive.name.endswith(".tar.gz") or archive.name.endswith(".tgz"):
-        _extract_tar(archive, staging)
-    elif suffix.endswith(".zip"):
-        _extract_zip(archive, staging)
-    else:
-        raise ExtractRefused(f"Unknown archive type: {archive.name}")
+    """Extract ``archive`` (tar.gz/tgz or zip) into ``staging`` via the shared safe
+    extractor, surfacing unsafe/unknown entries as ExtractRefused (the OTA error
+    type). Caller owns ``staging`` and its cleanup."""
+    try:
+        archive_util.extract_archive(archive, staging)
+    except (archive_util.UnsafeArchiveEntry, archive_util.UnknownArchiveType) as e:
+        raise ExtractRefused(str(e)) from e
 
 
 def _locate_versioned_payload(staging: Path) -> Path:
@@ -815,33 +832,6 @@ def _locate_versioned_payload(staging: Path) -> Path:
     if len(top_dirs) == 1:
         return top_dirs[0]
     raise BundleUpdateError("archive layout unrecognised: no runtime binary or recognizable payload dir found")
-
-
-def _extract_tar(archive: Path, dest: Path) -> None:
-    with tarfile.open(archive, mode="r:*") as tf:
-        for member in tf.getmembers():
-            _refuse_unsafe(member.name)
-            if member.islnk() or member.issym():
-                target = member.linkname
-                _refuse_unsafe(target)
-        # data_filter (3.12+) handles a lot of this defensively. Fall back to
-        # the legacy untrusted-safe extract on older Pythons.
-        if hasattr(tarfile, "data_filter"):
-            tf.extractall(dest, filter="data")  # type: ignore[arg-type]
-        else:  # pragma: no cover — Python <3.12, not a target version
-            tf.extractall(dest)
-
-
-def _extract_zip(archive: Path, dest: Path) -> None:
-    with zipfile.ZipFile(archive) as zf:
-        for name in zf.namelist():
-            _refuse_unsafe(name)
-        zf.extractall(dest)
-
-
-def _refuse_unsafe(name: str) -> None:
-    if _UNSAFE_PATH_RE.search(name):
-        raise ExtractRefused(f"Refusing unsafe archive entry: {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -1231,7 +1221,7 @@ def _macos_console_uid() -> str | None:
         return None
 
 
-_COMPANION_LABEL = "uk.co.locai.link.companion"
+_COMPANION_LABEL = constants.COMPANION_LABEL
 
 
 def _restart_ui_app(key: str) -> None:
@@ -1555,7 +1545,8 @@ def swap_bundle(install_root: Path | None = None) -> bool:
     Discovers ``install_root`` if not given, identifies the live version from
     its manifest, asks GitHub for the latest matching release. Returns
     ``False`` without I/O when already at latest. Otherwise: download,
-    SHA256 verify against the sibling sidecar, extract, codesign on macOS,
+    SHA256 verify (against the release-wide ``checksums.txt`` when present,
+    else the per-asset ``.sha256`` sidecar), extract, codesign on macOS,
     health-check the new runtime, atomic flip, GC.
 
     Failures along the way raise the matching ``BundleUpdateError`` subclass
@@ -1574,7 +1565,18 @@ def swap_bundle(install_root: Path | None = None) -> bool:
     logger.info(f"swap_bundle: {manifest.version} -> {release.version}")
     staging = staging_path(install_root)
     archive = download(release.download_url, staging / release.asset_name)
-    verify(archive, expected_sha256_url=release.sha256_url, platform=sys.platform)
+    # checksums.txt is the current release format; the per-asset .sha256
+    # sidecar stays as the fallback until the fleet is past the transition.
+    expected_sha256: str | None = None
+    if release.checksums_url:
+        try:
+            expected_sha256 = _sha256_from_checksums(release.checksums_url, release.asset_name)
+        except VerifyFailed as exc:
+            logger.warning(f"swap_bundle: {exc}; falling back to .sha256 sidecar")
+    if expected_sha256:
+        verify(archive, expected_sha256=expected_sha256, platform=sys.platform)
+    else:
+        verify(archive, expected_sha256_url=release.sha256_url, platform=sys.platform)
 
     # Extract once into a work dir we keep, so both the runtime payload and the
     # UI apps can be pulled from it before cleanup.

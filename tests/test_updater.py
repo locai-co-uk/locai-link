@@ -412,25 +412,27 @@ def test_read_boot_config_absent(tmp_path):
 # --- latest_release_for ---
 
 
-def _fake_release_payload(stem: str, version: str, platform_tag: str = "linux-x86_64") -> dict[str, Any]:
+def _fake_release_payload(
+    stem: str, version: str, platform_tag: str = "linux-x86_64", with_checksums: bool = False
+) -> dict[str, Any]:
     full = f"{stem}-{platform_tag}-v{version}"
-    return {
-        "tag_name": f"v{version}",
-        "assets": [
-            {
-                "name": f"{full}.tar.gz",
-                "browser_download_url": f"https://example/{full}.tar.gz",
-            },
-            {
-                "name": f"{full}.tar.gz.sha256",
-                "browser_download_url": f"https://example/{full}.tar.gz.sha256",
-            },
-            {
-                "name": f"locai-link-other-{platform_tag}-v{version}.tar.gz",
-                "browser_download_url": "https://example/other.tar.gz",
-            },
-        ],
-    }
+    assets = [
+        {
+            "name": f"{full}.tar.gz",
+            "browser_download_url": f"https://example/{full}.tar.gz",
+        },
+        {
+            "name": f"{full}.tar.gz.sha256",
+            "browser_download_url": f"https://example/{full}.tar.gz.sha256",
+        },
+        {
+            "name": f"locai-link-other-{platform_tag}-v{version}.tar.gz",
+            "browser_download_url": "https://example/other.tar.gz",
+        },
+    ]
+    if with_checksums:
+        assets.append({"name": "checksums.txt", "browser_download_url": "https://example/checksums.txt"})
+    return {"tag_name": f"v{version}", "assets": assets}
 
 
 class _StubSession:
@@ -507,6 +509,55 @@ def test_latest_release_for_no_matching_asset():
     session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
     with pytest.raises(ReleaseNotFound):
         updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
+
+
+def test_latest_release_for_picks_checksums_when_present():
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.2.0", platform_tag="linux-x86_64", with_checksums=True)
+    session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
+    info = updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
+    assert info.checksums_url == "https://example/checksums.txt"
+    # Sidecar still resolved as the fallback.
+    assert info.sha256_url is not None and info.sha256_url.endswith(".sha256")
+
+
+def test_latest_release_for_matches_checksums_case_insensitively():
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.2.0", platform_tag="linux-x86_64")
+    payload["assets"].append({"name": "Checksums.txt", "browser_download_url": "https://example/Checksums.txt"})
+    session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
+    info = updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
+    assert info.checksums_url == "https://example/Checksums.txt"
+
+
+def test_latest_release_for_without_checksums_has_none():
+    stem = "locai-link-llm-stt"
+    payload = _fake_release_payload(stem, "1.0.16", platform_tag="linux-x86_64")
+    session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
+    info = updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x86_64")
+    assert info.checksums_url is None
+
+
+def test_sha256_from_checksums_matches_asset_line():
+    asset = "locai-link-llm-stt-linux-x86_64-v1.2.0.tar.gz"
+    body = (f"{'ab' * 32}  {asset}\n{'cd' * 32} *other.pkg\nmalformed line\n").encode()
+    session = _StubSession({"https://example/checksums.txt": (200, body)})
+    got = updater._sha256_from_checksums("https://example/checksums.txt", asset, session=session)
+    assert got == "ab" * 32
+
+
+def test_sha256_from_checksums_missing_entry_raises():
+    body = f"{'ab' * 32}  something-else.tar.gz\n".encode()
+    session = _StubSession({"https://example/checksums.txt": (200, body)})
+    with pytest.raises(updater.VerifyFailed):
+        updater._sha256_from_checksums("https://example/checksums.txt", "wanted.tar.gz", session=session)
+
+
+def test_sha256_from_checksums_rejects_bad_hex():
+    body = b"nothex  wanted.tar.gz\n"
+    session = _StubSession({"https://example/checksums.txt": (200, body)})
+    with pytest.raises(updater.VerifyFailed):
+        updater._sha256_from_checksums("https://example/checksums.txt", "wanted.tar.gz", session=session)
 
 
 # --- download ---

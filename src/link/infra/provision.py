@@ -7,10 +7,10 @@ import logging
 import os
 import platform
 import stat
-import tarfile
 import urllib.request
-import zipfile
 from pathlib import Path
+
+from link.utils.archive import extract_archive
 
 from .utils import get_platform_arch
 
@@ -104,12 +104,7 @@ class ZenohProvisioner:
                 out_file.write(response.read())
 
             logger.info(f"Extracting {filename}...")
-            if filename.endswith(".zip"):
-                with zipfile.ZipFile(file_path, "r") as zip_ref:
-                    zip_ref.extractall(target_dir)
-            elif filename.endswith("gz") or filename.endswith("tgz"):
-                with tarfile.open(file_path, "r:gz") as tar_ref:
-                    tar_ref.extractall(target_dir)
+            extract_archive(file_path, target_dir)
 
             os.remove(file_path)
         except Exception as e:

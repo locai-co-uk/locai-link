@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from link.config.models import AgentConfig, PipelineConfig
+from link.config.models import SCHEMA_VERSION, AgentConfig, PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +69,14 @@ class StateManager:
             self._tighten_permissions(target_path)
 
             # Basic schema check: Version Compatibility
-            # We strictly require version 2.1, but pipelines are optional.
-            if data.get("version") == 2.1:
+            # We strictly require the current schema version, but pipelines are optional.
+            if data.get("version") == SCHEMA_VERSION:
                 self._cache = data
                 self.current_session_path = target_path
                 return data
             else:
                 # Malformed or incompatible version
-                logger.debug(f"Skipping file {target_path}: Version mismatch (Expected 2.1)")
+                logger.debug(f"Skipping file {target_path}: Version mismatch (Expected {SCHEMA_VERSION})")
                 return None
 
         except Exception as e:

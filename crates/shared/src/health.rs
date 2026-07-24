@@ -162,6 +162,13 @@ pub fn cancel_deployment(base_url: &str, pipeline_id: &str) -> Result<(), String
     post_action(base_url, pipeline_id, "cancel-deploy")
 }
 
+/// Ask the agent to remove `pipeline_id` locally (delete config + on-disk
+/// artifact). Stops the model first if it's serving. On success the runtime also
+/// reports the removal to Control so the dashboard drops the model.
+pub fn uninstall_model(base_url: &str, pipeline_id: &str) -> Result<(), String> {
+    post_action(base_url, pipeline_id, "uninstall")
+}
+
 /// Ask the agent to update itself to the latest published bundle.
 /// Dispatches UPDATE_AGENT; the agent restarts onto the new version.
 pub fn trigger_update(url: &str) -> Result<(), String> {
@@ -379,6 +386,29 @@ mod tests {
     fn cancel_deployment_returns_err_on_connection_refused() {
         let res = cancel_deployment("http://127.0.0.1:1/models", "anything");
         assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
+    }
+
+    #[test]
+    fn uninstall_model_hits_uninstall_path_and_reports_ok() {
+        let (port, handle, captured) =
+            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+        let res = uninstall_model(&format!("http://127.0.0.1:{port}/models"), "llm_server");
+        handle.join().unwrap();
+        assert!(res.is_ok(), "got {res:?}");
+        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(
+            request_line.starts_with("POST /models/llm_server/uninstall HTTP/1.1"),
+            "got: {request_line:?}"
+        );
+    }
+
+    #[test]
+    fn uninstall_model_returns_err_on_non_2xx() {
+        let (port, handle, _) =
+            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        let res = uninstall_model(&format!("http://127.0.0.1:{port}/models"), "ghost");
+        handle.join().unwrap();
+        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
     }
 
     #[test]

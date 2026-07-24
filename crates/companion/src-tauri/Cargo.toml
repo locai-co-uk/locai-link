@@ -34,4 +34,8 @@ locai-link-shared = { path = "../../shared" }
 # the correct (main) thread and event loop — rfd's sync GTK dialog doesn't
 # display reliably from inside a Tauri app on Linux.
 tauri-plugin-dialog = "2"
+# Single-instance guard: a second launch (Dock/Launchpad, or a stale
+# /Applications copy) focuses the running instance instead of spawning a
+# duplicate tray icon.
+tauri-plugin-single-instance = "2"
 

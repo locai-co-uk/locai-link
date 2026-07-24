@@ -682,7 +682,7 @@ def _bootstrap_config(device_id: str, device_name: str, api_key: str, api_url: s
     logger.info(f"Onboarding successful. Assigned ID: {device_id}")
 
     return AgentConfig(
-        version=2.1,
+        version=SCHEMA_VERSION,
         identity=IdentityConfig(device_id=device_id, device_name=device_name, api_key=api_key, api_url=api_url),
         # 1. Transport
         transport=TransportConfig(type="http"),

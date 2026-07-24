@@ -15,7 +15,7 @@
 
     <!-- System-wide install to /Library/Locai. Users can't relocate. -->
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
-    <options rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
+    <options rootVolumeOnly="true" hostArchitectures="arm64"/>
 
     <!-- macOS 14 (Sonoma) minimum — matches the SMAppService floor we
          picked in INSTALLER_PLAN.md. -->

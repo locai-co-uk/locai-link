@@ -13,8 +13,11 @@ swap_changed_ui_apps actually fires (a stable hash would skip the swap).
 
 from __future__ import annotations
 
+import json
 import plistlib
+import re
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import inject_app_hashes
 
@@ -31,14 +34,14 @@ MACOS_INSTALL_ROOT = PurePosixPath("/Library/Locai")
 COMPANION_LABEL = "uk.co.locai.link.companion"
 
 
-def _load_plist(name: str) -> dict:
+def _load_plist(name: str) -> dict[str, Any]:
     return plistlib.loads((LAUNCH_AGENTS / name).read_bytes())
 
 
 def test_companion_launchagent_matches_updater_destination(monkeypatch):
     """The binary launchd starts must be inside the .app the OTA swaps."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
-    dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)
+    dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)  # pyright: ignore[reportArgumentType]
     assert dests == [MACOS_INSTALL_ROOT / "Locai Link.app"]
 
     # Tauri names the binary after the cargo package, not the productName, so the
@@ -49,7 +52,7 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
 
 def test_setup_assistant_destination_is_install_root(monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "darwin")
-    assert updater._ui_app_destinations("setup_assistant", MACOS_INSTALL_ROOT) == [
+    assert updater._ui_app_destinations("setup_assistant", MACOS_INSTALL_ROOT) == [  # pyright: ignore[reportArgumentType]
         MACOS_INSTALL_ROOT / "Setup Assistant.app"
     ]
 
@@ -133,7 +136,7 @@ def test_swap_skips_app_when_staged_signature_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(updater, "_locate_in_payload", lambda staging, name: tmp_path / "src.app")
     monkeypatch.setattr(updater, "_ui_app_destinations", lambda key, root: [tmp_path / "dest.app"])
 
-    installed: list = []
+    installed: list[Path] = []
     monkeypatch.setattr(updater, "_install_app", lambda src, dest: installed.append(dest))
 
     def _boom(app):
@@ -222,3 +225,22 @@ def test_identical_source_keeps_stable_hash(tmp_path):
     _fake_companion_tree(a, version="1.1.1", svelte="<main>Link</main>")
     _fake_companion_tree(b, version="1.1.1", svelte="<main>Link</main>")
     assert _companion_hash(a) == _companion_hash(b)
+
+
+def test_uninstaller_bundle_ids_match_tauri_apps():
+    """The uninstaller cleans per-user caches/prefs by bundle id, so its ids must
+    match what the Tauri apps are actually built with — otherwise the cleanup
+    silently misses (the Setup Assistant used `.setup` vs the built `.setup-assistant`)."""
+    uninstall = (PKG / "uninstall.sh").read_text(encoding="utf-8")
+
+    def _sh_var(name: str) -> str:
+        m = re.search(rf'^{name}="([^"]+)"', uninstall, re.MULTILINE)
+        assert m, f"{name} not found in uninstall.sh"
+        return m.group(1)
+
+    def _tauri_id(crate: str) -> str:
+        conf = REPO_ROOT / "crates" / crate / "src-tauri" / "tauri.conf.json"
+        return str(json.loads(conf.read_text(encoding="utf-8"))["identifier"])
+
+    assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("companion")
+    assert _sh_var("SA_BUNDLE_ID") == _tauri_id("setup_assistant")

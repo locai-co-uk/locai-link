@@ -9,12 +9,17 @@ use serde::Serialize;
 use tauri::State;
 
 use locai_link_shared::{
-    installed_version, read_boot_json, supported_model_types as shared_supported_model_types,
-    BootConfig,
+    deregister_device, installed_version, read_boot_json, read_identity,
+    supported_model_types as shared_supported_model_types, BootConfig,
 };
 
-// TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
-const CONTROL_API_URL: &str = "https://api.locai.co.uk/api/v1";
+// Overridable at build time via `LOCAI_CONTROL_API_URL` (dev builds); unset
+// defaults to prod. Registration writes this into the session config, so every
+// device-authenticated call (deregister, uninstall-report) follows the same env.
+const CONTROL_API_URL: &str = match option_env!("LOCAI_CONTROL_API_URL") {
+    Some(url) => url,
+    None => "https://api.locai.co.uk/api/v1",
+};
 
 /// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/*.plist`.
 #[cfg(target_os = "macos")]
@@ -94,19 +99,7 @@ pub struct CheckInstallResult {
 }
 
 fn resolve_install_root() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "/Library/Locai".to_string()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/.local/share/locai")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        String::new()
-    }
+    locai_link_shared::install_root()
 }
 
 /// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
@@ -749,7 +742,7 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
         pipeline_id: &pipeline_id,
         model_name: model_name.as_deref(),
     };
-    let url = "http://127.0.0.1:20505/deployments/pending";
+    let url = locai_link_shared::DEFAULT_PENDING_URL;
     let payload = serde_json::to_value(&body).unwrap();
 
     // `install_launchagents` returns as soon as fork() succeeds, but the
@@ -781,7 +774,7 @@ async fn wait_for_agent_ready() -> Result<(), String> {
     // 15 s of polling on the main thread froze the SA window; hop onto the
     // blocking pool so the WebView stays responsive during the wait.
     tauri::async_runtime::spawn_blocking(|| {
-        let url = "http://127.0.0.1:20505/healthz";
+        let url = locai_link_shared::DEFAULT_HEALTH_URL;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         #[allow(unused_assignments)]
         let mut last_err = String::from("agent never came up");
@@ -1266,7 +1259,10 @@ fn open_companion_preferences() -> Result<(), String> {
 
 fn try_show_preferences_now() -> Result<(), String> {
     match http_agent()
-        .post("http://127.0.0.1:20506/preferences/show")
+        .post(&format!(
+            "http://127.0.0.1:{}/preferences/show",
+            locai_link_shared::IPC_PORT
+        ))
         .send_bytes(&[])
     {
         Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
@@ -1311,6 +1307,24 @@ fn start_companion_service() -> Result<(), String> {
     Err("start_companion_service: unsupported platform".to_string())
 }
 
+/// Best-effort device self-deregister before uninstall.
+///
+/// Reads the device identity from the session and asks Control to delete this
+/// device, so its dashboard row is removed instead of lingering as offline.
+/// Never fails the uninstall: a 404 (already gone) is treated as success; any
+/// error (offline, or a rejected key → 401) is logged and swallowed. The
+/// uninstaller's local wipe is the source of truth.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn best_effort_deregister() {
+    match read_identity(&PathBuf::from(resolve_install_root())) {
+        Some(id) => match deregister_device(&id) {
+            Ok(()) => eprintln!("[setup-assistant] device deregistered from Control"),
+            Err(e) => eprintln!("[setup-assistant] deregister failed (continuing uninstall): {e}"),
+        },
+        None => eprintln!("[setup-assistant] no device identity found; skipping deregister"),
+    }
+}
+
 /// Fire the uninstaller from the SA splash. `systemd-run --user --collect` on
 /// Linux so the script survives the runtime + companion being killed mid-run.
 #[tauri::command]
@@ -1320,6 +1334,10 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
+    // Deregister first: it needs the session api_key the uninstaller wipes. If
+    // the spawn below fails, the device is deregistered but still installed
+    // (recoverable on retry).
+    best_effort_deregister();
     let out = std::process::Command::new("systemd-run")
         .args([
             "--user",
@@ -1350,6 +1368,10 @@ fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
+    // Deregister first: it needs the session api_key the uninstaller wipes. If
+    // the spawn below fails, the device is deregistered but still installed
+    // (recoverable on retry).
+    best_effort_deregister();
     // AppleScript's `quoted form of` safely escapes the shell argument; `&`
     // concatenation keeps the path inside AppleScript's own string escaping.
     let escaped_path = script.replace('\\', "\\\\").replace('"', "\\\"");

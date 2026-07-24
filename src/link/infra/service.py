@@ -6,6 +6,7 @@
 import getpass
 import logging
 import platform
+import shlex
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -13,12 +14,15 @@ from typing import Literal
 
 from typing_extensions import override
 
+from link import constants
+
 logger = logging.getLogger(__name__)
 
-# Default reverse-DNS prefix used for service labels. The new
-# installer flow overrides this to "uk.co.locai.link" to match the
-# bundle identifier on the .pkg / .app artefacts.
-DEFAULT_LABEL_PREFIX = "io.locai"
+# Default reverse-DNS prefix for service labels. Single-sourced from
+# constants.REVERSE_DNS so the source-install (`--prod`) service and the
+# packaged install share one org namespace instead of a separate hardcoded
+# one; the packaged installer passes the same value explicitly.
+DEFAULT_LABEL_PREFIX = constants.REVERSE_DNS
 
 # Service scope. "user" lands the unit file under the user's home
 # directory (the historical default); "system" lands it under the
@@ -337,16 +341,23 @@ class WindowsBackend(ServiceBackend):
             logger.info(f"Service {self.service_name} uninstalled.")
 
 
-def _run_cmd(cmd: str | list[str], ignore_errors: bool = False):
-    """Executes a shell command.
+def _run_cmd(cmd: str | list[str], ignore_errors: bool = False) -> None:
+    """Executes a command without a shell.
+
+    A string is tokenised with ``shlex.split`` (a list is passed through), so
+    no shell is involved and no value is interpolated into a shell line. A
+    missing executable (``FileNotFoundError``) is treated like a non-zero exit,
+    matching the previous shell behaviour where a missing binary surfaced as a
+    ``CalledProcessError`` rather than crashing the caller.
 
     Args:
         cmd (str | list[str]): The command to run.
-        ignore_errors (bool): If True, suppresses CalledProcessError.
+        ignore_errors (bool): If True, suppresses the failure warning.
     """
+    argv = shlex.split(cmd) if isinstance(cmd, str) else cmd
     try:
-        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
+        subprocess.run(argv, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
         if not ignore_errors:
             logger.warning(f"Command failed: {cmd}")
 
@@ -403,11 +414,11 @@ def ServiceManager(
         scope: "user" (default, per-user) or "system" (.pkg "install for
             all users" path — system-wide unit file). Only honoured by
             MacOSBackend today.
-        label_prefix: Reverse-DNS prefix for the service label. The new
-            installer flow passes "uk.co.locai.link" to align with the
-            bundle identifier on .pkg / .app artefacts. Default is
-            "io.locai" to preserve historical behaviour for the
-            developer one-liner flow.
+        label_prefix: Reverse-DNS prefix for the service label. Defaults to
+            constants.REVERSE_DNS ("uk.co.locai.link"), aligning the
+            source-install service label with the bundle identifier on the
+            .pkg / .app artefacts. The packaged installer passes the same
+            value explicitly.
 
     Returns:
         ServiceBackend: An instance of LinuxBackend, MacOSBackend, or WindowsBackend.
