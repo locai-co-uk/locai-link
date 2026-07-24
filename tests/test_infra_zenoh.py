@@ -68,18 +68,34 @@ def test_wait_for_router_returns_once_connected(mocker):
     sleep.assert_called_once()  # waited exactly one poll interval
 
 
-def test_wait_for_router_is_fail_open_on_probe_error(mocker):
-    """A probe that raises must not block boot."""
+def test_wait_for_router_proceeds_immediately_on_unsupported_probe(mocker):
+    """An absent/incompatible probe API (AttributeError/TypeError) proceeds at
+    once rather than spinning the whole bound."""
     from link.adapters.zenoh_client import ZenohClient
 
     client = ZenohClient.__new__(ZenohClient)
     session = mocker.MagicMock()
-    session.info.side_effect = RuntimeError("info unavailable")
+    session.info.side_effect = AttributeError("no routers_zid")
     sleep = mocker.patch("link.adapters.zenoh_client.time.sleep")
 
     client._wait_for_router(session)  # returns without raising
 
     sleep.assert_not_called()
+
+
+def test_wait_for_router_retries_transient_error_then_succeeds(mocker):
+    """A transient probe error is retried until a router appears, not abandoned."""
+    from link.adapters.zenoh_client import ZenohClient
+
+    client = ZenohClient.__new__(ZenohClient)
+    session = mocker.MagicMock()
+    # 1st poll: transient error; 2nd poll: connected.
+    session.info().routers_zid.side_effect = [RuntimeError("blip"), ["router-zid-1"]]
+    sleep = mocker.patch("link.adapters.zenoh_client.time.sleep")
+
+    client._wait_for_router(session)
+
+    sleep.assert_called_once()  # one retry interval before success
 
 
 def test_wait_for_router_bounded_when_never_connects(mocker):
@@ -97,3 +113,28 @@ def test_wait_for_router_bounded_when_never_connects(mocker):
     )
 
     client._wait_for_router(session)  # returns, no hang
+
+
+def test_get_session_waits_for_router_after_open(mocker):
+    """get_session opens the session, then blocks on the readiness wait before
+    returning it — the startup contract that keeps the first report from being
+    dropped."""
+    import sys
+
+    from link.adapters.zenoh_client import ZenohClient
+
+    fake_session = mocker.MagicMock(name="session")
+    fake_zenoh = mocker.MagicMock(name="zenoh")
+    fake_zenoh.open.return_value = fake_session
+    mocker.patch.dict(sys.modules, {"zenoh": fake_zenoh})
+
+    client = ZenohClient.__new__(ZenohClient)
+    client._session = None
+    client._zenoh_config = object()
+    wait = mocker.patch.object(client, "_wait_for_router")
+
+    result = client.get_session()
+
+    assert result is fake_session
+    fake_zenoh.open.assert_called_once_with(client._zenoh_config)
+    wait.assert_called_once_with(fake_session)

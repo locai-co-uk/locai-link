@@ -101,15 +101,23 @@ class ZenohClient:
 
     def _wait_for_router(self, session: "zenoh.Session") -> None:
         """Blocks until the session reports a connected router, or the bound
-        elapses. Fail-open: any probe error just proceeds (never block boot)."""
+        elapses. Fail-open by design: a probe the zenoh version does not
+        support (AttributeError/TypeError) proceeds at once; a transient probe
+        error is logged and retried until the deadline, then proceeds."""
         deadline = time.monotonic() + self._ROUTER_WAIT_SECONDS
         while time.monotonic() < deadline:
             try:
                 if list(session.info().routers_zid()):
                     return
-            except Exception as e:
-                logger.debug(f"Zenoh router-readiness probe failed, proceeding: {e}")
+            except (AttributeError, TypeError) as e:
+                # The probe API is absent/incompatible: never resolvable, so
+                # don't spin the full bound — proceed immediately.
+                logger.debug(f"Zenoh readiness probe unsupported, proceeding: {e}")
                 return
+            except Exception as e:
+                # Transient: keep trying until the deadline rather than
+                # abandoning the wait on a single hiccup.
+                logger.debug(f"Zenoh readiness probe errored, retrying: {e}")
             time.sleep(self._ROUTER_POLL_SECONDS)
         logger.warning(
             f"Zenoh session opened but no router connected within {self._ROUTER_WAIT_SECONDS}s; proceeding anyway."

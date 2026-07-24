@@ -1545,7 +1545,8 @@ def swap_bundle(install_root: Path | None = None) -> bool:
     Discovers ``install_root`` if not given, identifies the live version from
     its manifest, asks GitHub for the latest matching release. Returns
     ``False`` without I/O when already at latest. Otherwise: download,
-    SHA256 verify against the sibling sidecar, extract, codesign on macOS,
+    SHA256 verify (against the release-wide ``checksums.txt`` when present,
+    else the per-asset ``.sha256`` sidecar), extract, codesign on macOS,
     health-check the new runtime, atomic flip, GC.
 
     Failures along the way raise the matching ``BundleUpdateError`` subclass

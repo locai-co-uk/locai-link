@@ -283,30 +283,42 @@ fn download(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<(), Bo
 /// from before the transition. Offline errors propagate immediately so the
 /// exit-code contract stays truthful.
 fn resolve_expected_sha(asset: &AssetTarget) -> Result<String, BootstrapError> {
+    resolve_expected_sha_with(asset, http_get_string)
+}
+
+/// The checksum-source decision, with the body fetcher injected so the
+/// branches are testable without a network. checksums.txt first; the .sha256
+/// sidecar covers pre-transition releases and mirrors. A NoInternet fetch
+/// propagates immediately (keeps the offline exit code truthful); any other
+/// checksums failure (unreachable file, or our asset absent from it) falls
+/// back to the sidecar when one exists.
+fn resolve_expected_sha_with(
+    asset: &AssetTarget,
+    fetch: impl Fn(&str) -> Result<String, BootstrapError>,
+) -> Result<String, BootstrapError> {
     if let Some(url) = &asset.checksums_url {
-        match download_checksums_entry(url, &asset.asset_name) {
-            Ok(sha) => return Ok(sha),
-            Err(e @ BootstrapError::NoInternet(_)) => return Err(e),
-            Err(BootstrapError::Operation(msg)) => {
-                if asset.sha256_url.is_none() {
-                    return Err(BootstrapError::Operation(msg));
+        match fetch(url) {
+            Ok(body) => match find_checksum_entry(&body, &asset.asset_name) {
+                Some(sha) => return Ok(sha),
+                None if asset.sha256_url.is_none() => {
+                    return Err(BootstrapError::Operation(format!(
+                        "no valid sha256 entry for {} in {url}",
+                        asset.asset_name
+                    )))
                 }
-            }
+                None => {} // present but no matching line — try the sidecar
+            },
+            Err(e @ BootstrapError::NoInternet(_)) => return Err(e),
+            Err(e @ BootstrapError::Operation(_)) if asset.sha256_url.is_none() => return Err(e),
+            Err(BootstrapError::Operation(_)) => {} // unreachable — try the sidecar
         }
     }
     match &asset.sha256_url {
-        Some(url) => download_sha_sidecar(url),
+        Some(url) => parse_sidecar(&fetch(url)?),
         None => Err(BootstrapError::Operation(
             "no checksum source resolved for the asset".into(),
         )),
     }
-}
-
-fn download_checksums_entry(url: &str, asset_name: &str) -> Result<String, BootstrapError> {
-    let body = http_get_string(url)?;
-    find_checksum_entry(&body, asset_name).ok_or_else(|| {
-        BootstrapError::Operation(format!("no valid sha256 entry for {asset_name} in {url}"))
-    })
 }
 
 /// sha256sum format: `<hex>  <filename>` per line (`*` marks binary mode).
@@ -323,9 +335,8 @@ fn find_checksum_entry(text: &str, asset_name: &str) -> Option<String> {
     })
 }
 
-fn download_sha_sidecar(url: &str) -> Result<String, BootstrapError> {
-    let body = http_get_string(url)?;
-    // Sidecars are either `<sha>` or `<sha>  <filename>` (shasum/sha256sum output).
+/// Sidecars are either `<sha>` or `<sha>  <filename>` (shasum/sha256sum output).
+fn parse_sidecar(body: &str) -> Result<String, BootstrapError> {
     let first = body
         .split_whitespace()
         .next()
@@ -619,6 +630,112 @@ mod tests {
         );
         assert!(find_checksum_entry(sums, "bad.tar.gz").is_none());
         assert!(find_checksum_entry(sums, "missing.tar.gz").is_none());
+    }
+
+    // --- checksum-source resolution (fetcher injected) ---
+
+    fn asset_with(checksums: Option<&str>, sidecar: Option<&str>) -> AssetTarget {
+        AssetTarget {
+            version: "1.2.0".into(),
+            asset_name: "locai-link-llm-stt-linux-x86_64-v1.2.0.tar.gz".into(),
+            download_url: "https://x/asset.tar.gz".into(),
+            checksums_url: checksums.map(str::to_string),
+            sha256_url: sidecar.map(str::to_string),
+            expected_size: None,
+        }
+    }
+
+    const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn resolve_prefers_checksums_and_skips_sidecar() {
+        let asset = asset_with(
+            Some("https://x/checksums.txt"),
+            Some("https://x/asset.tar.gz.sha256"),
+        );
+        let sha = resolve_expected_sha_with(&asset, |url| {
+            assert!(
+                url.ends_with("checksums.txt"),
+                "sidecar must not be fetched"
+            );
+            Ok(format!("{HEX_A}  {}", asset.asset_name))
+        })
+        .unwrap();
+        assert_eq!(sha, HEX_A);
+    }
+
+    #[test]
+    fn resolve_falls_back_when_asset_absent_from_checksums() {
+        let asset = asset_with(
+            Some("https://x/checksums.txt"),
+            Some("https://x/asset.tar.gz.sha256"),
+        );
+        let sha = resolve_expected_sha_with(&asset, |url| {
+            if url.ends_with("checksums.txt") {
+                Ok(format!("{HEX_A}  some-other-asset.tar.gz"))
+            } else {
+                Ok(HEX_B.to_string())
+            }
+        })
+        .unwrap();
+        assert_eq!(sha, HEX_B);
+    }
+
+    #[test]
+    fn resolve_falls_back_when_checksums_unreachable() {
+        let asset = asset_with(
+            Some("https://x/checksums.txt"),
+            Some("https://x/asset.tar.gz.sha256"),
+        );
+        let sha = resolve_expected_sha_with(&asset, |url| {
+            if url.ends_with("checksums.txt") {
+                Err(BootstrapError::Operation("HTTP 404".into()))
+            } else {
+                Ok(HEX_B.to_string())
+            }
+        })
+        .unwrap();
+        assert_eq!(sha, HEX_B);
+    }
+
+    #[test]
+    fn resolve_propagates_offline_without_falling_back() {
+        let asset = asset_with(
+            Some("https://x/checksums.txt"),
+            Some("https://x/asset.tar.gz.sha256"),
+        );
+        let err = resolve_expected_sha_with(&asset, |url| {
+            if url.ends_with("checksums.txt") {
+                Err(BootstrapError::NoInternet("dns".into()))
+            } else {
+                panic!("must not reach the sidecar when offline");
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(err, BootstrapError::NoInternet(_)));
+    }
+
+    #[test]
+    fn resolve_sidecar_only() {
+        let asset = asset_with(None, Some("https://x/asset.tar.gz.sha256"));
+        let sha = resolve_expected_sha_with(&asset, |_| Ok(HEX_B.to_string())).unwrap();
+        assert_eq!(sha, HEX_B);
+    }
+
+    #[test]
+    fn resolve_no_source_fails() {
+        let asset = asset_with(None, None);
+        let err = resolve_expected_sha_with(&asset, |_| Ok(HEX_A.to_string())).unwrap_err();
+        assert!(matches!(err, BootstrapError::Operation(_)));
+    }
+
+    #[test]
+    fn resolve_checksums_missing_entry_no_sidecar_fails() {
+        let asset = asset_with(Some("https://x/checksums.txt"), None);
+        let err = resolve_expected_sha_with(&asset, |_| Ok(format!("{HEX_A}  other.tar.gz")))
+            .unwrap_err();
+        assert!(matches!(err, BootstrapError::Operation(_)));
     }
 
     #[test]
