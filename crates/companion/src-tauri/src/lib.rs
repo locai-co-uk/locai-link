@@ -41,7 +41,6 @@ const TRAY_ICON_IS_TEMPLATE: bool = false;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-// TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
 const CONTROL_URL: &str = locai_link_shared::CONTROL_URL;
 
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.

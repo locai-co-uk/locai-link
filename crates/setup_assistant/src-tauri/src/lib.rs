@@ -1311,8 +1311,8 @@ fn start_companion_service() -> Result<(), String> {
 ///
 /// Reads the device identity from the session and asks Control to delete this
 /// device, so its dashboard row is removed instead of lingering as offline.
-/// Never fails the uninstall: any error (offline, or already gone → 401/404,
-/// which the client treats as success) is logged and swallowed. The
+/// Never fails the uninstall: a 404 (already gone) is treated as success; any
+/// error (offline, or a rejected key → 401) is logged and swallowed. The
 /// uninstaller's local wipe is the source of truth.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn best_effort_deregister() {
@@ -1334,7 +1334,9 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
-    // Deregister from Control before the script wipes local state.
+    // Deregister first: it needs the session api_key the uninstaller wipes. If
+    // the spawn below fails, the device is deregistered but still installed
+    // (recoverable on retry).
     best_effort_deregister();
     let out = std::process::Command::new("systemd-run")
         .args([
@@ -1366,7 +1368,9 @@ fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
-    // Deregister from Control before the script wipes local state.
+    // Deregister first: it needs the session api_key the uninstaller wipes. If
+    // the spawn below fails, the device is deregistered but still installed
+    // (recoverable on retry).
     best_effort_deregister();
     // AppleScript's `quoted form of` safely escapes the shell argument; `&`
     // concatenation keeps the path inside AppleScript's own string escaping.
