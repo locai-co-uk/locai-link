@@ -53,6 +53,45 @@ def test_companion_label_matches_plist_and_bundle_id():
     assert constants.COMPANION_LABEL == plist_label == bundle_id
 
 
+def test_install_root_matches_rust_and_pkg_scripts():
+    """The macOS install root is declared in Python, the Rust shared crate, the
+    uninstaller, and the LaunchAgent plists. A drifted copy strands the updater,
+    the tray, or the uninstaller on a directory nothing else uses."""
+    root = constants.MACOS_INSTALL_ROOT
+
+    endpoints = (CRATES / "shared" / "src" / "endpoints.rs").read_text(encoding="utf-8")
+    m = re.search(r'"(/[^"]+)"\.to_string\(\)', endpoints)
+    assert m, "macOS install root not found in endpoints.rs"
+    assert m.group(1) == root
+
+    uninstall = (REPO_ROOT / "bundling" / "pkg" / "uninstall.sh").read_text(encoding="utf-8")
+    m = re.search(r'^INSTALL_ROOT="([^"]+)"', uninstall, re.MULTILINE)
+    assert m, "INSTALL_ROOT not found in uninstall.sh"
+    assert m.group(1) == root
+
+    for plist in LAUNCH_AGENTS.glob("*.plist"):
+        text = plist.read_text(encoding="utf-8")
+        assert root in text, f"{plist.name} does not reference {root}"
+
+
+def test_companion_running_version_marker_matches_rust():
+    """The companion (Rust) writes its running version to <root>/state/<marker>;
+    the updater's post-OTA drift check reads the same path. If the components
+    drift, the check silently reports every companion as stale/pre-fix."""
+    lib = (CRATES / "companion" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    joins = re.findall(r'\.join\("([^"]+)"\)', lib)
+    assert constants.STATE_SUBDIR in joins, "state subdir join not found in companion lib.rs"
+    assert constants.COMPANION_RUNNING_VERSION_MARKER in joins, "version marker join not found in companion lib.rs"
+
+
+def test_default_api_url_is_single_sourced_in_python():
+    """main.py and updater.py both need the Control API base; each held its own
+    copy before. Neither may re-hardcode it now that constants owns the fact."""
+    for rel in ("main.py", "app/updater.py"):
+        text = (SRC / rel).read_text(encoding="utf-8")
+        assert constants.DEFAULT_API_URL not in text, f"{rel} re-hardcodes DEFAULT_API_URL"
+
+
 def test_distribution_archs_are_all_built_for_macos():
     """The installer must only advertise macOS architectures the release actually
     builds; otherwise that Mac installs but can never find an OTA asset."""

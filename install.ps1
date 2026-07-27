@@ -8,6 +8,7 @@ param(
     [string]$Password,
     [string]$Token,
     [string]$RegistrationKey,
+    [string]$FleetKey,
     [string]$DeviceType,
     [string]$ApiUrl,
     [string]$RepoUrl,
@@ -31,6 +32,7 @@ if ($Email)           { $InstallArgs += @("--email",            $Email) }
 if ($Password)        { $InstallArgs += @("--password",         $Password) }
 if ($Token)           { $InstallArgs += @("--token",            $Token) }
 if ($RegistrationKey) { $InstallArgs += @("--registration-key", $RegistrationKey) }
+if ($FleetKey)        { $InstallArgs += @("--fleet-key",        $FleetKey) }
 if ($DeviceType)      { $InstallArgs += @("--device-type",      $DeviceType) }
 if ($ApiUrl)          { $InstallArgs += @("--api-url",          $ApiUrl) }
 if ($StartRunning)    { $InstallArgs += "--start-running" }

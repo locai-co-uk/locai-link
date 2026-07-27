@@ -52,9 +52,6 @@ jobs:
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
 
       - uses: actions/setup-python@v5
         with:
@@ -82,9 +79,6 @@ jobs:
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
 
       - uses: actions/setup-python@v5
         with:

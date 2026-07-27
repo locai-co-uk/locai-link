@@ -51,9 +51,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -63,30 +60,9 @@ jobs:
       - name: Install Rust toolchain (for launcher)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          # No restore-keys: restore only on an exact key match, never a prefix
-          # fallback that reused a stale crates/target from an unrelated run.
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            crates/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
-
       - name: Test launcher
         shell: bash
         run: cargo test --manifest-path crates/launcher/Cargo.toml --release
-
-      # Cache the prefetched native binaries + cmake build outputs.
-      # Key on every plugin's install.py because the pinned upstream tags
-      # (LLAMA_CPP_RELEASE, WHISPER_CPP_RELEASE) live there; bumping a tag
-      # invalidates the cache and triggers a fresh prefetch/build.
-      - name: Cache prefetched binaries
-        uses: actions/cache@v4
-        with:
-          path: bundling/_artifacts
-          key: bundle-artifacts-${{ runner.os }}-${{ hashFiles('plugins/*/install.py') }}
 
       - name: Sync project + dev deps
         shell: bash

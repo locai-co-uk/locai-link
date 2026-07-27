@@ -76,6 +76,15 @@ curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-l
 
 The installer prompts interactively for anything you omit, including your platform password.
 
+Enrolling with an org-scoped fleet key instead? Pass it as the only argument — no device name, email, or registration key needed:
+
+```
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
+  --fleet-key "YOUR_FLEET_KEY"
+```
+
+`--fleet-key` accepts the key itself or `file:<path>` to read it from a file. On Windows use `-FleetKey` (PowerShell) or `--fleet-key` (CMD).
+
 ### Plugin build prerequisites (source builds only)
 
 Source builds compile native plugin binaries from upstream on first use (notably `audio_transcriber`, which builds `whisper-server` from whisper.cpp — upstream does not publish prebuilts for Linux/macOS). The pre-built bundles ship these binaries pre-compiled, so this section only applies to the source-install path above.

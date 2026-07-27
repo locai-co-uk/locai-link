@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import json
 import threading
 from typing import Any
 
 import pytest
+import requests
 
 from link.app.runtime import AgentRuntime
 from link.config.models import AgentConfig
@@ -144,6 +146,62 @@ def test_uninstall_control_command_does_not_report(mocker, mock_zenoh_session, m
     agent.handle_command({"id": "cmd-server-1", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
 
     post.assert_not_called()
+
+
+@pytest.fixture
+def pending_reports_path(tmp_path, mocker):
+    """Redirect the pending uninstall-reports file into tmp."""
+    path = tmp_path / ".pending_uninstall_reports.json"
+    mocker.patch("link.app.runtime.PENDING_UNINSTALL_REPORTS_PATH", path)
+    return path
+
+
+def test_uninstall_offline_queues_report(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """A failed uninstall report is queued (once) instead of being dropped."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    mocker.patch("link.app.runtime.requests.post", side_effect=requests.ConnectionError("offline"))
+
+    agent.handle_command({"id": "loopback-abc123", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
+    agent._report_model_uninstalled_to_control("m1")
+
+    assert json.loads(pending_reports_path.read_text()) == ["m1"]
+
+
+def test_flush_pending_resends_and_clears(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """Queued reports are re-sent on flush; the queue empties on delivery."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    pending_reports_path.write_text(json.dumps(["m1", "m2"]))
+    post = mocker.patch("link.app.runtime.requests.post")
+    post.return_value.status_code = 200
+
+    agent._flush_pending_uninstall_reports()
+
+    assert post.call_count == 2
+    assert not pending_reports_path.exists()
+
+
+def test_flush_keeps_undelivered_reports(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """Reports that still fail stay queued for the next flush."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    pending_reports_path.write_text(json.dumps(["m1"]))
+    mocker.patch("link.app.runtime.requests.post", side_effect=requests.ConnectionError("still offline"))
+
+    agent._flush_pending_uninstall_reports()
+
+    assert json.loads(pending_reports_path.read_text()) == ["m1"]
 
 
 def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker, capfd):

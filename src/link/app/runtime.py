@@ -3,9 +3,11 @@
 
 """Agent runtime — owns the pipeline lifecycle, command dispatch, and shutdown flow."""
 
+import json
 import logging
 import signal
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
@@ -41,6 +43,10 @@ if TYPE_CHECKING:
 
 # Standard logger for debug/info text
 logger = logging.getLogger(__name__)
+
+# Uninstall reports that failed to reach Control, kept until delivered.
+PENDING_UNINSTALL_REPORTS_PATH = StateManager.STATE_DIR / ".pending_uninstall_reports.json"
+_PENDING_REPORT_RETRY_SECONDS = 60.0
 
 
 class _AgentWorker:
@@ -92,6 +98,8 @@ class AgentRuntime:
         self._pipeline_ops_lock = threading.RLock()
         self.running = True
         self.shutdown_event = threading.Event()
+        # Guards read-modify-write of the pending uninstall-reports file.
+        self._pending_reports_lock = threading.Lock()
         self.update_requested = False
         self.config_restart_requested = False
 
@@ -378,10 +386,18 @@ class AgentRuntime:
         if not recovered_any:
             logger.info("No active pipelines found. Idling...")
 
+        # Reports that failed while offline get another chance now and then
+        # periodically below.
+        self._flush_pending_uninstall_reports()
+
         try:
+            last_flush = time.monotonic()
             while self.running:
                 if self.shutdown_event.wait(timeout=1.0):
                     break
+                if time.monotonic() - last_flush >= _PENDING_REPORT_RETRY_SECONDS:
+                    last_flush = time.monotonic()
+                    self._flush_pending_uninstall_reports()
         finally:
             self._shutdown()
             self.status_logger.report_lifecycle("offline")
@@ -958,20 +974,28 @@ class AgentRuntime:
             self._report_model_uninstalled_to_control(pipeline_id)
 
     def _report_model_uninstalled_to_control(self, model_id: str) -> None:
-        """Best-effort: tell Control a local model removal happened so the
-        dashboard stops showing it.
+        """Tell Control a local model removal happened so the dashboard stops
+        showing it. A delivery failure (offline, 5xx) queues the report; the
+        main loop retries until Control acknowledges it.
+        """
+        if not self._post_uninstall_report(model_id):
+            self._queue_pending_uninstall(model_id)
+
+    def _post_uninstall_report(self, model_id: str) -> bool:
+        """Single delivery attempt. Returns False only on retryable failures.
 
         Device-authenticated with the session api_key. Local removal is the
-        source of truth, so any failure (offline, already absent → 404) is
-        logged and swallowed. HTTPS is required before the bearer is sent.
+        source of truth: no identity or a non-HTTPS api_url means the report
+        can never be sent, so those return True (drop, don't retry). 404 =
+        device/model already absent on Control, which is fine.
         """
         ident = self.agent_config.identity if self.agent_config else None
         if not ident or not ident.api_url or not ident.api_key or not ident.device_id:
-            return
+            return True
         base = ident.api_url.rstrip("/")
         if not base.startswith("https://"):
             logger.warning("Skipping Control uninstall report: api_url is not HTTPS")
-            return
+            return True
         url = f"{base}/agent/{quote(ident.device_id, safe='')}/models/{quote(model_id, safe='')}/uninstalled"
         try:
             resp = requests.post(
@@ -979,11 +1003,54 @@ class AgentRuntime:
                 headers={"Authorization": f"Bearer {ident.api_key}"},
                 timeout=(5.0, 10.0),
             )
-            # 404 = device/model already absent on Control; both are fine.
-            if resp.status_code not in (200, 404):
-                logger.warning(f"Control uninstall report for '{model_id}' returned HTTP {resp.status_code}")
+            if resp.status_code in (200, 404):
+                return True
+            logger.warning(f"Control uninstall report for '{model_id}' returned HTTP {resp.status_code}")
+            return False
         except requests.RequestException as e:
-            logger.warning(f"Control uninstall report for '{model_id}' failed (ignored): {e}")
+            logger.warning(f"Control uninstall report for '{model_id}' failed (will retry): {e}")
+            return False
+
+    def _load_pending_uninstalls(self) -> list[str]:
+        try:
+            ids = json.loads(PENDING_UNINSTALL_REPORTS_PATH.read_text())
+            return [m for m in ids if isinstance(m, str)] if isinstance(ids, list) else []
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read pending uninstall reports (dropping): {e}")
+            return []
+
+    def _save_pending_uninstalls(self, ids: list[str]) -> None:
+        try:
+            if not ids:
+                PENDING_UNINSTALL_REPORTS_PATH.unlink(missing_ok=True)
+                return
+            PENDING_UNINSTALL_REPORTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = PENDING_UNINSTALL_REPORTS_PATH.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(ids))
+            tmp.replace(PENDING_UNINSTALL_REPORTS_PATH)
+        except OSError as e:
+            logger.warning(f"Could not persist pending uninstall reports: {e}")
+
+    def _queue_pending_uninstall(self, model_id: str) -> None:
+        with self._pending_reports_lock:
+            ids = self._load_pending_uninstalls()
+            if model_id not in ids:
+                ids.append(model_id)
+                self._save_pending_uninstalls(ids)
+        logger.info(f"Queued Control uninstall report for '{model_id}'.")
+
+    def _flush_pending_uninstall_reports(self) -> None:
+        """Re-sends queued uninstall reports; delivered ones leave the queue."""
+        with self._pending_reports_lock:
+            ids = self._load_pending_uninstalls()
+            if not ids:
+                return
+            remaining = [m for m in ids if not self._post_uninstall_report(m)]
+            if remaining != ids:
+                self._save_pending_uninstalls(remaining)
+                logger.info(f"Delivered {len(ids) - len(remaining)} queued uninstall report(s) to Control.")
 
     def _log_status(self) -> None:
         """Logs the current status of the agent, including running and configured pipelines."""

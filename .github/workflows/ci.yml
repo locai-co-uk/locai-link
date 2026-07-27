@@ -80,9 +80,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -114,8 +111,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
 
       - uses: actions/setup-python@v5
         with:
@@ -197,9 +192,6 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5

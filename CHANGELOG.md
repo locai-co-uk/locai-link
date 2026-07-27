@@ -6,6 +6,15 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [Unreleased]
+
+- The one-line installer now accepts `--fleet-key`, so a device can enroll into
+  a fleet with a single argument instead of the interactive device-name /
+  email / registration-key flow (PowerShell: `-FleetKey`).
+- Removing a model while offline no longer leaves a stale row on the Control
+  dashboard: the removal report is queued and re-sent automatically once the
+  device can reach Control again.
+
 ## [1.2.0]
 
 - Open a Workspace: the menu-bar companion gains an "Open a Workspace" menu item
