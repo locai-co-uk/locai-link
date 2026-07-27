@@ -204,6 +204,19 @@ def test_flush_keeps_undelivered_reports(
     assert json.loads(pending_reports_path.read_text()) == ["m1"]
 
 
+def test_flush_swallows_unexpected_errors(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """A non-network failure during flush (e.g. a corrupt queue file) is logged
+    and swallowed, never propagated into the runtime loop."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "_load_pending_uninstalls", side_effect=ValueError("corrupt queue"))
+
+    agent._flush_pending_uninstall_reports()  # must not raise
+
+
 def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker, capfd):
     """A running pipeline is NOT removed when force_stop is absent/false."""
     empty_agent.handle_command(

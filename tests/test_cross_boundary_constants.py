@@ -79,9 +79,13 @@ def test_companion_running_version_marker_matches_rust():
     the updater's post-OTA drift check reads the same path. If the components
     drift, the check silently reports every companion as stale/pre-fix."""
     lib = (CRATES / "companion" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
-    joins = re.findall(r'\.join\("([^"]+)"\)', lib)
-    assert constants.STATE_SUBDIR in joins, "state subdir join not found in companion lib.rs"
-    assert constants.COMPANION_RUNNING_VERSION_MARKER in joins, "version marker join not found in companion lib.rs"
+    # Assert the sequential state/<marker> join, not the two literals independently,
+    # so unrelated paths containing either literal cannot satisfy the test.
+    marker_path = re.compile(
+        rf'\.join\("{re.escape(constants.STATE_SUBDIR)}"\)\s*'
+        rf'\.join\("{re.escape(constants.COMPANION_RUNNING_VERSION_MARKER)}"\)'
+    )
+    assert marker_path.search(lib), "companion running-version marker path not found in lib.rs"
 
 
 def test_default_api_url_is_single_sourced_in_python():

@@ -1042,15 +1042,22 @@ class AgentRuntime:
         logger.info(f"Queued Control uninstall report for '{model_id}'.")
 
     def _flush_pending_uninstall_reports(self) -> None:
-        """Re-sends queued uninstall reports; delivered ones leave the queue."""
-        with self._pending_reports_lock:
-            ids = self._load_pending_uninstalls()
-            if not ids:
-                return
-            remaining = [m for m in ids if not self._post_uninstall_report(m)]
-            if remaining != ids:
-                self._save_pending_uninstalls(remaining)
-                logger.info(f"Delivered {len(ids) - len(remaining)} queued uninstall report(s) to Control.")
+        """Re-sends queued uninstall reports; delivered ones leave the queue.
+
+        A flush failure (corrupt queue file, disk error) must never crash the
+        runtime loop, so any error is logged and swallowed.
+        """
+        try:
+            with self._pending_reports_lock:
+                ids = self._load_pending_uninstalls()
+                if not ids:
+                    return
+                remaining = [m for m in ids if not self._post_uninstall_report(m)]
+                if remaining != ids:
+                    self._save_pending_uninstalls(remaining)
+                    logger.info(f"Delivered {len(ids) - len(remaining)} queued uninstall report(s) to Control.")
+        except Exception as e:  # noqa: BLE001 - a flush failure must never crash the runtime loop
+            logger.warning(f"Pending uninstall report flush failed: {e}")
 
     def _log_status(self) -> None:
         """Logs the current status of the agent, including running and configured pipelines."""

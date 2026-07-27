@@ -78,7 +78,7 @@ The installer prompts interactively for anything you omit, including your platfo
 
 Enrolling with an org-scoped fleet key instead? Pass it as the only argument — no device name, email, or registration key needed:
 
-```
+```bash
 curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
   --fleet-key "YOUR_FLEET_KEY"
 ```
