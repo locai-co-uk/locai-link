@@ -6,7 +6,7 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
-## [Unreleased]
+## [1.2.1]
 
 - The one-line installer now accepts `--fleet-key`, so a device can enroll into
   a fleet with a single argument instead of the interactive device-name /

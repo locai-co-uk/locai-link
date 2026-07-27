@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import plistlib
 import re
+import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -38,16 +39,25 @@ def _load_plist(name: str) -> dict[str, Any]:
     return plistlib.loads((LAUNCH_AGENTS / name).read_bytes())
 
 
+def _cargo_package_name(crate: str) -> str:
+    """The Tauri app binary is named after the crate's cargo package (not the
+    productName), so this is the source of truth for what the plist must launch."""
+    cargo = REPO_ROOT / "crates" / crate / "src-tauri" / "Cargo.toml"
+    return tomllib.loads(cargo.read_text())["package"]["name"]
+
+
 def test_companion_launchagent_matches_updater_destination(monkeypatch):
     """The binary launchd starts must be inside the .app the OTA swaps."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)  # pyright: ignore[reportArgumentType]
     assert dests == [MACOS_INSTALL_ROOT / "Locai Link.app"]
 
-    # Tauri names the binary after the cargo package, not the productName, so the
-    # plist must point at locai-link-companion (correcting this was the INFRA-374 fix).
+    # The binary name comes from the cargo package, not productName. Derive it
+    # from Cargo.toml so a crate rename fails here instead of silently shipping a
+    # plist that points at a binary the build no longer produces.
+    binary = _cargo_package_name("companion")
     prog = _load_plist("uk.co.locai.link.companion.plist")["ProgramArguments"]
-    assert prog[0] == str(dests[0] / "Contents" / "MacOS" / "locai-link-companion")
+    assert prog[0] == str(dests[0] / "Contents" / "MacOS" / binary)
 
 
 def test_setup_assistant_destination_is_install_root(monkeypatch):
@@ -62,6 +72,23 @@ def test_agent_launchagent_points_at_launcher():
     plist = _load_plist("uk.co.locai.link.agent.plist")
     assert plist["ProgramArguments"][0] == str(MACOS_INSTALL_ROOT / "locai-link")
     assert plist["WorkingDirectory"] == str(MACOS_INSTALL_ROOT)
+
+
+def test_launchagent_plists_are_well_formed():
+    """Structural lint for every LaunchAgent: Label matches the filename, the
+    launched program is an absolute path under the install root, and RunAtLoad is
+    set. Catches a malformed or half-renamed plist without needing to boot macOS."""
+    plists = sorted(LAUNCH_AGENTS.glob("*.plist"))
+    assert plists, "no LaunchAgent plists found"
+    root = str(MACOS_INSTALL_ROOT) + "/"
+    for path in plists:
+        d = plistlib.loads(path.read_bytes())
+        stem = path.name.removesuffix(".plist")
+        assert d.get("Label") == stem, f"{path.name}: Label {d.get('Label')!r} != filename stem {stem!r}"
+        prog = d.get("ProgramArguments")
+        assert isinstance(prog, list) and prog, f"{path.name}: missing/empty ProgramArguments"
+        assert prog[0].startswith(root), f"{path.name}: {prog[0]!r} is not under {root}"
+        assert isinstance(d.get("RunAtLoad"), bool), f"{path.name}: RunAtLoad missing or not a bool"
 
 
 def _mock_launchctl(monkeypatch, *, kickstart_rc: int = 0) -> list[list[str]]:

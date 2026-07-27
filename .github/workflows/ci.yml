@@ -131,8 +131,9 @@ jobs:
   # libsoup on Linux runners to `cargo check`. Adding those OS deps
   # here doubles the job surface for near-zero incremental value — the
   # Rust logic worth guarding lives in `shared` (autostart, health
-  # probing, install-state reading). Add the Tauri crates here when
-  # they gain non-trivial Rust logic that needs its own CI safety net.
+  # probing, install-state reading). The Tauri apps are built end-to-end
+  # in the `tauri-build` job below (Linux, --no-bundle), which is where
+  # their compile + frontend breakage is caught.
   #
   # Run on all three OSes so the platform-gated `autostart/{macos,
   # windows,linux}.rs` modules (via `#[cfg(target_os = ...)]`) all
@@ -169,6 +170,56 @@ jobs:
       - name: Cargo test
         working-directory: crates
         run: cargo test -p locai-link-shared --lib
+
+  # 3b. Tauri app build (companion + Setup Assistant)
+  #
+  # The apps were previously only built in the release lane, so a broken app
+  # build (Rust error, bad tauri.conf, frontend failure) escaped every PR and
+  # only surfaced at release. `tauri build --no-bundle` compiles the Rust
+  # binary AND runs the frontend build (also catching a stale embedded UI),
+  # while skipping the slow .app/.deb packaging. Linux only: cheapest runner,
+  # and the app Rust is platform-shared.
+  tauri-build:
+    name: Tauri apps build (no-bundle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Tauri system deps
+        run: |
+          APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates -> target"
+          key: tauri-build
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build companion (no bundle)
+        working-directory: crates/companion
+        run: |
+          npm ci
+          npm run tauri build -- --no-bundle
+
+      - name: Build Setup Assistant (no bundle)
+        working-directory: crates/setup_assistant
+        run: |
+          npm ci
+          npm run tauri build -- --no-bundle
 
   # 4. Integration Tests (Plugins — downloads models and binaries)
   integration-test:
