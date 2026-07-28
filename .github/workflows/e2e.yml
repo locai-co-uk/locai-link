@@ -46,11 +46,48 @@ concurrency:
 # the same "cheap OS gates the expensive OS" pattern as ci.yml; it stays within
 # this workflow because `needs:` can't cross workflow files.
 jobs:
+  # Path filter: docs / workflow / licence / image-only PRs skip the macOS
+  # trio (a job skipped via `if:` reports "skipped" = success for branch
+  # protection). Any other changed file flips `code` true. Non-PR events always
+  # run everything. Same detector as ci.yml.
+  changes:
+    name: Detect relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "non-PR event — running everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "changed files:"; echo "$FILES"
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md|LICENSE*|docs/*|.github/*|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico) ;;
+              *) code=true ;;
+            esac
+          done <<< "$FILES"
+          echo "relevant code changed: $code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   # Swap correctness — every PR to main. Real .app swap on a macOS runner,
   # asserting the on-disk version changed (the one thing no mocked test proves).
   macos-ota-e2e:
     name: macOS OTA e2e
-    needs: [linux-roundtrip, shellcheck]
+    needs: [changes, linux-roundtrip, shellcheck]
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -78,7 +115,8 @@ jobs:
   # Real install ownership + reinstall data-preservation.
   macos-lifecycle:
     name: macOS install → reinstall
-    needs: [linux-roundtrip, shellcheck]
+    needs: [changes, linux-roundtrip, shellcheck]
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -178,7 +216,8 @@ jobs:
   # Uninstall cleans everything and refuses to run without root.
   macos-uninstall:
     name: macOS uninstall roundtrip
-    needs: [linux-roundtrip, shellcheck]
+    needs: [changes, linux-roundtrip, shellcheck]
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
