@@ -90,6 +90,13 @@ class ZenohClient:
         if self._session:
             return self._session
 
+        # Honour RUST_LOG for the in-process client (no-op unless set), so
+        # transport/connection logs can be captured in the field.
+        try:
+            zenoh.try_init_log_from_env()
+        except Exception as e:  # noqa: BLE001 - logging init must never block startup
+            logger.debug(f"Zenoh log init skipped: {e}")
+
         try:
             self._session = zenoh.open(self._zenoh_config)
         except Exception as e:

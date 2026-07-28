@@ -633,6 +633,28 @@ def test_resume_swallows_reporter_failure(mocker, mock_zenoh_session, mock_state
     agent._shutdown()
 
 
+def test_online_announced_after_pipelines_started(mocker, mock_zenoh_session, mock_state_manager):
+    """"online" must be reported only after pipelines (which declare the command
+    subscription) start, so Control never dispatches a command before the device
+    can receive it. Reporting it too early drops the first deploy/config command.
+    """
+    mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("served", 8081)]}
+    config = AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "d"}, "pipelines": []})
+    agent = AgentRuntime(config, mock_state_manager, mock_zenoh_session)
+    status_logger = mocker.patch.object(agent, "status_logger")
+
+    events: list[str] = []
+    mocker.patch.object(agent, "_start_pipeline", side_effect=lambda *a, **k: (events.append("start"), True)[1])
+    status_logger.report_lifecycle.side_effect = lambda state: events.append(f"lifecycle:{state}")
+    agent.shutdown_event.set()
+
+    agent.run()
+
+    assert "lifecycle:online" in events
+    assert events.index("start") < events.index("lifecycle:online")
+    agent._shutdown()
+
+
 def test_resume_skips_report_when_start_fails(mocker, mock_zenoh_session, mock_state_manager):
     """A failed resume must not emit serving=True — Control would then show a phantom serve."""
     mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("broken", 9000)]}

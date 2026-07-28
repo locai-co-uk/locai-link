@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 PENDING_UNINSTALL_REPORTS_PATH = StateManager.STATE_DIR / ".pending_uninstall_reports.json"
 _PENDING_REPORT_RETRY_SECONDS = 60.0
 
+# Re-announce "online" a few times after startup.
+_ONLINE_REANNOUNCE_SECONDS = 2.0
+_ONLINE_REANNOUNCE_COUNT = 3
+
 
 class _AgentWorker:
     """Handle for a long-running background command worker."""
@@ -320,7 +324,6 @@ class AgentRuntime:
         Starts the agent runtime and keeps it running until a shutdown event occurs.
         """
         logger.info("Agent Runtime active...")
-        self.status_logger.report_lifecycle("online")
         # Lazy-start the health server here (not in __init__) so tests
         # that construct an AgentRuntime in-process don't race for port 20505.
         self.health_server.start()
@@ -386,17 +389,28 @@ class AgentRuntime:
         if not recovered_any:
             logger.info("No active pipelines found. Idling...")
 
+        # Announce "online" only now that the command subscription is declared,
+        # so Control never dispatches a command before we can receive it.
+        self.status_logger.report_lifecycle("online")
+
         # Reports that failed while offline get another chance now and then
         # periodically below.
         self._flush_pending_uninstall_reports()
 
         try:
             last_flush = time.monotonic()
+            last_online = time.monotonic()
+            online_reannounces = 0
             while self.running:
                 if self.shutdown_event.wait(timeout=1.0):
                     break
-                if time.monotonic() - last_flush >= _PENDING_REPORT_RETRY_SECONDS:
-                    last_flush = time.monotonic()
+                now = time.monotonic()
+                if online_reannounces < _ONLINE_REANNOUNCE_COUNT and now - last_online >= _ONLINE_REANNOUNCE_SECONDS:
+                    last_online = now
+                    online_reannounces += 1
+                    self.status_logger.report_lifecycle("online")
+                if now - last_flush >= _PENDING_REPORT_RETRY_SECONDS:
+                    last_flush = now
                     self._flush_pending_uninstall_reports()
         finally:
             self._shutdown()

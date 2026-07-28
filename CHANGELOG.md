@@ -14,6 +14,25 @@ sections below the summary. -->
 - Removing a model while offline no longer leaves a stale row on the Control
   dashboard: the removal report is queued and re-sent automatically once the
   device can reach Control again.
+- A freshly enrolled device now reliably shows online and applies its first
+  deploy or config command without needing a restart. The agent reports
+  "online" only after it is listening for commands, and re-announces it a few
+  times, so a slow first connection can no longer leave the device stuck
+  offline while telemetry keeps flowing.
+
+### Fixed: device stuck offline / first command dropped on slow connect (`src/link/app/runtime.py`, `src/link/adapters/zenoh_client.py`)
+
+- The startup "online" lifecycle report was published once, before the command
+  subscription was declared. On a slow first Zenoh connect the report landed
+  before the router had finalised subscriber interest and was silently dropped
+  (device showed offline with live metrics), and Control could dispatch a
+  deploy/config command before the device was subscribed to receive it (the
+  command was lost until a restart).
+- `run()` now reports "online" only after the pipelines (and their command
+  subscription) have started, and re-announces it a few times over the first
+  seconds so a dropped first report self-heals without a restart.
+- The Zenoh client now calls `try_init_log_from_env()` so `RUST_LOG` activates
+  the transport's own connection logging in the field (no-op unless set).
 
 ## [1.2.0]
 
