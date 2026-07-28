@@ -2,7 +2,7 @@
 
 **Self-hosted edge AI runtime for on-prem and private cloud deployments**
 
-[![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml) [![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE.md)
+[![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml) [![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE.md)
 
 Locai Link is the distributed edge runtime for the [Locai platform](https://locai.co.uk). It is a lightweight agent that turns any device, from a Raspberry Pi to an industrial GPU cluster, into a managed node in your AI fleet. Link handles secure connectivity, model deployment and local inference orchestration on your own hardware, with no cloud dependency. It runs LLMs, speech-to-text, image classification and audio classification on one runtime, air-gapped or connected.
 

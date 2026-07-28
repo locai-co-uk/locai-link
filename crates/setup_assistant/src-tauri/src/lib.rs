@@ -480,9 +480,14 @@ pub struct RegisteredDevice {
 fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String> {
     let token = require_token(&state)?;
 
+    // macOS GUI installs report "mac_app"; other platforms keep the prior
+    // "onboarding_wizard" (already an accepted value). Control must accept
+    // "mac_app" in its registration-source allow-list before this ships, or key
+    // mint returns 422 on macOS. Do not release ahead of that.
+    let registration_source = if cfg!(target_os = "macos") { "mac_app" } else { "onboarding_wizard" };
     let mint_body = serde_json::json!({
         "ttl_hours": 1,
-        "registration_source": "onboarding_wizard",
+        "registration_source": registration_source,
     });
     let key_resp = http_agent()
         .post(&format!("{CONTROL_API_URL}/devices/registration-keys"))

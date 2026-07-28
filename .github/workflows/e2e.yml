@@ -28,8 +28,8 @@ name: E2E
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main"]
+  # PR-only: e2e's job is to catch regressions before merge; the post-merge run
+  # tested identical code (main does not move under an open PR here).
   pull_request:
     branches: ["main"]
 
@@ -40,11 +40,17 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
+# Linux-first gating: the three macOS jobs (10x) `needs:` the cheap ubuntu jobs
+# (linux-roundtrip + shellcheck). If a shipped script fails shellcheck or the
+# Linux install/uninstall roundtrip breaks, no macOS minutes are spent. This is
+# the same "cheap OS gates the expensive OS" pattern as ci.yml; it stays within
+# this workflow because `needs:` can't cross workflow files.
 jobs:
   # Swap correctness — every PR to main. Real .app swap on a macOS runner,
   # asserting the on-disk version changed (the one thing no mocked test proves).
   macos-ota-e2e:
     name: macOS OTA e2e
+    needs: [linux-roundtrip, shellcheck]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -72,6 +78,7 @@ jobs:
   # Real install ownership + reinstall data-preservation.
   macos-lifecycle:
     name: macOS install → reinstall
+    needs: [linux-roundtrip, shellcheck]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -171,6 +178,7 @@ jobs:
   # Uninstall cleans everything and refuses to run without root.
   macos-uninstall:
     name: macOS uninstall roundtrip
+    needs: [linux-roundtrip, shellcheck]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
