@@ -48,11 +48,6 @@ logger = logging.getLogger(__name__)
 PENDING_UNINSTALL_REPORTS_PATH = StateManager.STATE_DIR / ".pending_uninstall_reports.json"
 _PENDING_REPORT_RETRY_SECONDS = 60.0
 
-# Re-announce "online" a few times after startup.
-_ONLINE_REANNOUNCE_SECONDS = 2.0
-_ONLINE_REANNOUNCE_COUNT = 3
-
-
 class _AgentWorker:
     """Handle for a long-running background command worker."""
 
@@ -399,18 +394,11 @@ class AgentRuntime:
 
         try:
             last_flush = time.monotonic()
-            last_online = time.monotonic()
-            online_reannounces = 0
             while self.running:
                 if self.shutdown_event.wait(timeout=1.0):
                     break
-                now = time.monotonic()
-                if online_reannounces < _ONLINE_REANNOUNCE_COUNT and now - last_online >= _ONLINE_REANNOUNCE_SECONDS:
-                    last_online = now
-                    online_reannounces += 1
-                    self.status_logger.report_lifecycle("online")
-                if now - last_flush >= _PENDING_REPORT_RETRY_SECONDS:
-                    last_flush = now
+                if time.monotonic() - last_flush >= _PENDING_REPORT_RETRY_SECONDS:
+                    last_flush = time.monotonic()
                     self._flush_pending_uninstall_reports()
         finally:
             self._shutdown()
