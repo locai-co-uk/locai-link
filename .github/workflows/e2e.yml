@@ -67,12 +67,19 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
         run: |
+          set -uo pipefail
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "non-PR event — running everything"
             echo "code=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          # Fail closed: if change detection errors or finds nothing, run the
+          # full suite rather than silently skip it.
+          if ! FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD") || [ -z "$FILES" ]; then
+            echo "path detection failed or empty — running everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "changed files:"; echo "$FILES"
           code=false
           while IFS= read -r f; do
