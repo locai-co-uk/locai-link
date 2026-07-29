@@ -30,7 +30,7 @@ from link.utils.logger import setup_logging
 
 logger = setup_logging()
 
-DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
+DEFAULT_API_URL = constants.DEFAULT_API_URL
 DEFAULT_REPO_URL = constants.REPO_URL
 DEFAULT_BRANCH = constants.DEFAULT_BRANCH
 
@@ -107,18 +107,20 @@ def install(args: argparse.Namespace):
         logger.info("Running from repository — pulling latest changes...")
         subprocess.run(["git", "pull", "--ff-only"], check=True)
 
-    # Interactive Inputs (only prompt for missing values)
-    if not args.device_name:
-        args.device_name = input("Enter Device Name: ").strip()
-    if not args.token and not args.email:
-        args.email = input("Enter Email: ").strip()
-    if not args.registration_key:
-        args.registration_key = input("Enter Registration Key: ").strip()
+    # Fleet enrollment replaces the interactive registration flow entirely.
+    if not args.fleet_key:
+        # Interactive Inputs (only prompt for missing values)
+        if not args.device_name:
+            args.device_name = input("Enter Device Name: ").strip()
+        if not args.token and not args.email:
+            args.email = input("Enter Email: ").strip()
+        if not args.registration_key:
+            args.registration_key = input("Enter Registration Key: ").strip()
 
-    identity_provided = args.token or args.email
-    if not all([args.device_name, args.registration_key]) or not identity_provided:
-        logger.critical("Device name, registration key, and an identity (--email or --token) are required.")
-        sys.exit(1)
+        identity_provided = args.token or args.email
+        if not all([args.device_name, args.registration_key]) or not identity_provided:
+            logger.critical("Device name, registration key, and an identity (--email or --token) are required.")
+            sys.exit(1)
 
     # Helper to run commands inside the target repo
     def run_target(cmd_list):
@@ -135,20 +137,23 @@ def install(args: argparse.Namespace):
 
         # B. Register & Run
         logger.info("Registering and starting the agent...")
-        reg_args = [
-            "run",
-            "--device-name",
-            args.device_name,
-            "--registration-key",
-            args.registration_key,
-            "--api-url",
-            target_api_url,
-        ]
-        if args.token:
-            reg_args += ["--token", args.token]
+        if args.fleet_key:
+            reg_args = ["run", "--fleet-key", args.fleet_key, "--api-url", target_api_url]
         else:
-            reg_args += ["--email", args.email]
-            # Do NOT pass --password here; onboarding will prompt securely via getpass
+            reg_args = [
+                "run",
+                "--device-name",
+                args.device_name,
+                "--registration-key",
+                args.registration_key,
+                "--api-url",
+                target_api_url,
+            ]
+            if args.token:
+                reg_args += ["--token", args.token]
+            else:
+                reg_args += ["--email", args.email]
+                # Do NOT pass --password here; onboarding will prompt securely via getpass
 
         # Directly run without checking any start conditions
         run_target(reg_args)
@@ -626,6 +631,10 @@ def main():
     install_p.add_argument("--password", help="Platform password (prompted securely if omitted).")
     install_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email/password).")
     install_p.add_argument("--registration-key", help="One-time registration key.")
+    install_p.add_argument(
+        "--fleet-key",
+        help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
+    )
     install_p.add_argument("--device-type", default="other")
     install_p.add_argument("--start-running", action="store_true", help="Start the agent after installation.")
     install_p.add_argument("--api-url", help="Override API URL.")

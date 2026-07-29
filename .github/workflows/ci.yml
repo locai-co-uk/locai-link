@@ -5,23 +5,75 @@ name: CI Pipeline
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "main"
-      - "dev"
   pull_request:
     branches:
       - "main"
       - "dev"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
-  pull-requests: write
 
 env:
   PYTHON_VERSION: "3.11"
 
+# Linux-first gating: the cheap ubuntu legs run first, and the 10x-macOS /
+# 2x-Windows legs `needs:` their ubuntu sibling. A failure that reproduces on
+# Linux (most of them) skips the expensive runners entirely instead of burning
+# their minutes in parallel. GitHub has no per-matrix-entry `needs`, so each
+# 3-OS matrix is split into a linux job + a cross-OS job that depends on it.
 jobs:
+  # Path filter: does this PR touch anything the build/tests care about?
+  # Docs, workflow files, licences and images alone → the heavy build/test jobs
+  # skip (a job skipped via `if:` reports "skipped", which branch protection
+  # treats as success, so required checks stay satisfied). Any other changed
+  # file flips `code` true and the full matrix runs. Non-PR events
+  # (workflow_dispatch) always run everything.
+  changes:
+    name: Detect relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "non-PR event — running everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: if change detection errors or finds nothing, run the
+          # full suite rather than silently skip it.
+          if ! FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD") || [ -z "$FILES" ]; then
+            echo "path detection failed or empty — running everything"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed files:"; echo "$FILES"
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md|LICENSE*|docs/*|.github/*|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico) ;;
+              *) code=true ;;
+            esac
+          done <<< "$FILES"
+          echo "relevant code changed: $code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   # 0. Version bump check (PRs to main only). The check step is skipped for
   # Dependabot (dependency bumps legitimately don't touch the app version); the
   # job still succeeds so a required status check stays green.
@@ -33,6 +85,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check version was bumped
         if: github.actor != 'dependabot[bot]'
@@ -59,35 +112,50 @@ jobs:
             fi
           done
 
-  # 1. Standard Unit Tests (Fast)
-  unit-test:
-    name: Unit Test on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python: "3.11"
-          - os: windows-latest
-            python: "3.11"
-          - os: macos-latest
-            python: "3.11"
-
+  # 1. Linting (Fast) — part of the Linux gate the cross-OS unit tests wait on.
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
 
-      - name: Set up Python ${{ matrix.python }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Lint Deps
+        run: |
+          uv venv
+          uv pip install ruff
+
+      - name: Check Code
+        run: uv run ruff check .
+
+  # 2a. Unit tests — Linux gate. Fast, cheapest runner. The macOS/Windows unit
+  # tests below only start if this (and lint) pass.
+  unit-test-linux:
+    name: Unit Test on ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.11"
 
       - name: Install Project
         shell: bash
@@ -105,57 +173,103 @@ jobs:
         run: |
           uv run pytest tests/ -v
 
-  # 2. Linting (Fast)
-  lint:
-    name: Lint Code
-    runs-on: ubuntu-latest
+  # 2b. Unit tests — macOS + Windows. Gated on the Linux unit tests + lint.
+  unit-test-cross:
+    name: Unit Test on ${{ matrix.os }}
+    needs: [unit-test-linux, lint]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
 
-      - name: Install Lint Deps
+      - name: Install Project
+        shell: bash
         run: |
           uv venv
-          uv pip install ruff
+          uv pip install -e ".[dev]"
+          uv pip install -e "plugins/language_model[dev]"
 
-      - name: Check Code
-        run: uv run ruff check .
+      - name: Run Unit Tests
+        shell: bash
+        env:
+          DEVICE_MODE: "LOCAL"
+        run: |
+          uv run pytest tests/ -v
 
-  # 3. Rust crate check + unit tests (shared crate only)
+  # 3a. Rust crate check + unit tests (shared crate only) — Linux gate.
   #
   # Scoped to `locai-link-shared` deliberately: `companion` and
   # `setup_assistant` are Tauri apps that need webkit2gtk / gtk3 /
   # libsoup on Linux runners to `cargo check`. Adding those OS deps
   # here doubles the job surface for near-zero incremental value — the
   # Rust logic worth guarding lives in `shared` (autostart, health
-  # probing, install-state reading). Add the Tauri crates here when
-  # they gain non-trivial Rust logic that needs its own CI safety net.
-  #
-  # Run on all three OSes so the platform-gated `autostart/{macos,
-  # windows,linux}.rs` modules (via `#[cfg(target_os = ...)]`) all
-  # actually get compiled. The shared crate has no OS-specific system
-  # deps, so this stays fast.
-  rust-check:
-    name: Rust Check (shared) on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  # probing, install-state reading). The Tauri apps are built end-to-end
+  # in the `tauri-build` job below (Linux, --no-bundle), which is where
+  # their compile + frontend breakage is caught.
+  rust-check-linux:
+    name: Rust Check (shared) on ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           # Rust job doesn't push or fetch other repos — drop the token
           # so later steps can't inadvertently reach GitHub with write
           # access if a dependency script goes rogue.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates -> target"
+          key: ubuntu-latest
+
+      - name: Cargo check
+        working-directory: crates
+        run: cargo check -p locai-link-shared
+
+      - name: Cargo test
+        working-directory: crates
+        run: cargo test -p locai-link-shared --lib
+
+  # 3b. Rust crate check + unit tests — macOS + Windows. Gated on the Linux
+  # Rust check, so the platform-gated autostart/{macos,windows}.rs modules
+  # (via #[cfg(target_os = ...)]) still get compiled on their real OS, but only
+  # if the shared logic already passed on Linux.
+  rust-check-cross:
+    name: Rust Check (shared) on ${{ matrix.os }}
+    needs: [rust-check-linux]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
           persist-credentials: false
 
       - name: Install Rust toolchain
@@ -175,44 +289,172 @@ jobs:
         working-directory: crates
         run: cargo test -p locai-link-shared --lib
 
-  # 4. Integration Tests (Plugins — downloads models and binaries)
-  integration-test:
+  # 3c. Tauri app build (companion + Setup Assistant)
+  #
+  # The apps were previously only built in the release lane, so a broken app
+  # build (Rust error, bad tauri.conf, frontend failure) escaped every PR and
+  # only surfaced at release. `tauri build --no-bundle` compiles the Rust
+  # binary AND runs the frontend build (also catching a stale embedded UI),
+  # while skipping the slow .app/.deb packaging. Linux only: cheapest runner,
+  # and the app Rust is platform-shared.
+  tauri-build:
+    name: Tauri apps build (no-bundle)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Tauri system deps
+        run: |
+          APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates -> target"
+          key: tauri-build
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build companion (no bundle)
+        working-directory: crates/companion
+        run: |
+          npm ci
+          npm run tauri build -- --no-bundle
+
+      - name: Build Setup Assistant (no bundle)
+        working-directory: crates/setup_assistant
+        run: |
+          npm ci
+          npm run tauri build -- --no-bundle
+
+  # 4a. Integration Tests (Plugins — downloads models and binaries) — Linux gate.
+  # `needs: unit-test-linux` so we don't download models on any OS until the
+  # fast unit tests pass. The macOS/Windows integration legs below then wait on
+  # THIS ubuntu leg, so integration-only breakage that shows on Linux never
+  # reaches the expensive runners.
+  #
+  # NOTE: the steps here and in integration-test-cross are intentionally
+  # identical — keep them in sync when editing either.
+  integration-test-linux:
+    name: Integration Test on ubuntu-latest
+    needs: [changes, unit-test-linux]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install System Deps (Linux)
+        run: |
+          APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y libportaudio2
+
+      - name: Install Project and Plugins
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+          uv pip install -e "plugins/language_model[dev]"
+          uv pip install -e "plugins/image_classifier[dev]"
+          uv pip install -e "plugins/audio_classifier[dev]"
+          uv pip install -e "plugins/audio_transcriber[dev]"
+
+      - name: Install Llama Server
+        shell: bash
+        run: uv run python plugins/language_model/install.py
+
+      - name: Verify llama-swap binary
+        shell: bash
+        run: |
+          VENV_PREFIX="$(uv run python -c 'import sys; print(sys.prefix)')"
+          EXPECTED_TAG="$(uv run python -c 'import sys; sys.path.insert(0, "plugins/language_model"); import install; print(install.LLAMA_SWAP_RELEASE)')"
+          BIN="$VENV_PREFIX/bin-llama/llama-swap"
+          OUT="$("$BIN" --version 2>&1)"
+          echo "$OUT"
+          # Extract the tag ("version: v239 (sha)…" → "239") and require an
+          # exact match, so a wrong build (2390, 239.1, …) can't slip through.
+          ACTUAL_TAG="$(printf '%s\n' "$OUT" | sed -nE 's/^version:[[:space:]]*v?([^[:space:]]+).*/\1/p')"
+          if [ "$ACTUAL_TAG" != "$EXPECTED_TAG" ]; then
+            echo "::error::llama-swap version mismatch — expected tag '$EXPECTED_TAG', got: $OUT"
+            exit 1
+          fi
+
+      - name: Install Whisper Server
+        shell: bash
+        run: uv run python plugins/audio_transcriber/install.py
+
+      - name: Test Audio Classifier
+        shell: bash
+        run: uv run pytest plugins/audio_classifier/ -v -s -m ""
+
+      - name: Test Image Classifier
+        shell: bash
+        run: uv run pytest plugins/image_classifier/ -v -s -m ""
+
+      - name: Test Language Model
+        shell: bash
+        run: uv run pytest plugins/language_model/ -v -s -m ""
+
+      - name: Test Audio Transcriber
+        shell: bash
+        run: uv run pytest plugins/audio_transcriber/ -v -s -m ""
+
+  # 4b. Integration Tests — macOS + Windows. Gated on the Linux integration
+  # leg above (which is itself gated on the unit tests).
+  #
+  # NOTE: the steps here and in integration-test-linux are intentionally
+  # identical — keep them in sync when editing either.
+  integration-test-cross:
     name: Integration Test on ${{ matrix.os }}
-    needs: [unit-test]
+    needs: [integration-test-linux]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: macos-latest
             python: "3.11"
           - os: windows-latest
-            python: "3.11"
-          - os: macos-latest
             python: "3.11"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-
-      # OS-Specific Audio Deps
-      - name: Install System Deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          APT_OPTS="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
-          sudo apt-get $APT_OPTS update
-          sudo apt-get $APT_OPTS install -y libportaudio2
 
       - name: Install System Deps (macOS)
         if: runner.os == 'macOS'

@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import json
 import threading
 from typing import Any
 
 import pytest
+import requests
 
 from link.app.runtime import AgentRuntime
 from link.config.models import AgentConfig
@@ -144,6 +146,75 @@ def test_uninstall_control_command_does_not_report(mocker, mock_zenoh_session, m
     agent.handle_command({"id": "cmd-server-1", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
 
     post.assert_not_called()
+
+
+@pytest.fixture
+def pending_reports_path(tmp_path, mocker):
+    """Redirect the pending uninstall-reports file into tmp."""
+    path = tmp_path / ".pending_uninstall_reports.json"
+    mocker.patch("link.app.runtime.PENDING_UNINSTALL_REPORTS_PATH", path)
+    return path
+
+
+def test_uninstall_offline_queues_report(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """A failed uninstall report is queued (once) instead of being dropped."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "status_logger")
+    mocker.patch("link.app.runtime.requests.post", side_effect=requests.ConnectionError("offline"))
+
+    agent.handle_command({"id": "loopback-abc123", "type": "UNINSTALL_MODEL", "pipeline_id": "m1"})
+    agent._report_model_uninstalled_to_control("m1")
+
+    assert json.loads(pending_reports_path.read_text()) == ["m1"]
+
+
+def test_flush_pending_resends_and_clears(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """Queued reports are re-sent on flush; the queue empties on delivery."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    pending_reports_path.write_text(json.dumps(["m1", "m2"]))
+    post = mocker.patch("link.app.runtime.requests.post")
+    post.return_value.status_code = 200
+
+    agent._flush_pending_uninstall_reports()
+
+    assert post.call_count == 2
+    assert not pending_reports_path.exists()
+
+
+def test_flush_keeps_undelivered_reports(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """Reports that still fail stay queued for the next flush."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    pending_reports_path.write_text(json.dumps(["m1"]))
+    mocker.patch("link.app.runtime.requests.post", side_effect=requests.ConnectionError("still offline"))
+
+    agent._flush_pending_uninstall_reports()
+
+    assert json.loads(pending_reports_path.read_text()) == ["m1"]
+
+
+def test_flush_swallows_unexpected_errors(
+    mocker, mock_zenoh_session, mock_state_manager, tmp_path, pending_reports_path
+):
+    """A non-network failure during flush (e.g. a corrupt queue file) is logged
+    and swallowed, never propagated into the runtime loop."""
+    artifact = tmp_path / "m1.gguf"
+    artifact.write_bytes(b"w")
+    agent = _make_agent(_config_with_https_identity("m1", artifact), mock_state_manager, mock_zenoh_session)
+    mocker.patch.object(agent, "_load_pending_uninstalls", side_effect=ValueError("corrupt queue"))
+
+    agent._flush_pending_uninstall_reports()  # must not raise
 
 
 def test_uninstall_running_pipeline_without_force_stop_fails(empty_agent, mocker, capfd):
@@ -559,6 +630,28 @@ def test_resume_swallows_reporter_failure(mocker, mock_zenoh_session, mock_state
     agent.run()  # must not raise
 
     status_logger.report_lifecycle.assert_any_call("offline")
+    agent._shutdown()
+
+
+def test_online_announced_after_pipelines_started(mocker, mock_zenoh_session, mock_state_manager):
+    """"online" must be reported only after pipelines (which declare the command
+    subscription) start, so Control never dispatches a command before the device
+    can receive it. Reporting it too early drops the first deploy/config command.
+    """
+    mock_state_manager.load_state.return_value = {"pipelines": [_serve_pipeline("served", 8081)]}
+    config = AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "d"}, "pipelines": []})
+    agent = AgentRuntime(config, mock_state_manager, mock_zenoh_session)
+    status_logger = mocker.patch.object(agent, "status_logger")
+
+    events: list[str] = []
+    mocker.patch.object(agent, "_start_pipeline", side_effect=lambda *a, **k: (events.append("start"), True)[1])
+    status_logger.report_lifecycle.side_effect = lambda state: events.append(f"lifecycle:{state}")
+    agent.shutdown_event.set()
+
+    agent.run()
+
+    assert "lifecycle:online" in events
+    assert events.index("start") < events.index("lifecycle:online")
     agent._shutdown()
 
 

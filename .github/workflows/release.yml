@@ -152,9 +152,6 @@ jobs:
           ref: ${{ needs.release.outputs.checkout_ref }}
 
       - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
 
       - uses: actions/setup-python@v5
         with:
@@ -162,26 +159,6 @@ jobs:
 
       - name: Install Rust toolchain (for launcher)
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo downloads
-        uses: actions/cache@v4
-        with:
-          # Dependency downloads only, not crates/target: a release builds its
-          # binaries clean, and a restored stale/partial target/ has caused bad
-          # builds. No restore-keys, so a key miss fetches clean, never stale.
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('crates/Cargo.toml', 'crates/launcher/Cargo.toml', 'crates/launcher/src/**', 'crates/launcher/tests/**', 'crates/shared/src/**') }}
-
-      - name: Cache prefetched binaries
-        uses: actions/cache@v4
-        with:
-          # No restore-keys: the key hashes the pinned upstream tags
-          # (plugins/*/install.py), so a tag bump must force a fresh prefetch
-          # rather than restore stale binaries via a prefix match.
-          path: bundling/_artifacts
-          key: bundle-artifacts-${{ runner.os }}-${{ hashFiles('plugins/*/install.py') }}
 
       - name: Sync deps
         shell: bash
@@ -295,11 +272,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          # Cache both apps' node_modules — both build in this job.
-          cache: "npm"
-          cache-dependency-path: |
-            crates/setup_assistant/package-lock.json
-            crates/companion/package-lock.json
 
       - name: Install Tauri Linux system deps
         if: runner.os == 'Linux'

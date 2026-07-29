@@ -33,3 +33,16 @@ COMPANION_LABEL = f"{REVERSE_DNS}.companion"
 # loopback drift guard pins both to crates/shared/src/health.rs.
 HEALTH_HOST = "127.0.0.1"
 HEALTH_PORT = 20505
+
+# --- Control API -------------------------------------------------------------
+# Default Control API base for onboarding and the update check.
+DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
+
+# --- macOS install layout ----------------------------------------------------
+# Packaged install root; also hardcoded in crates/shared/src/endpoints.rs, the
+# pkg scripts, and the plists (drift-guarded).
+MACOS_INSTALL_ROOT = "/Library/Locai"
+# Mutable runtime state under the install root. The companion writes its running
+# version marker here (crates/companion); the updater's drift check reads it.
+STATE_SUBDIR = "state"
+COMPANION_RUNNING_VERSION_MARKER = "companion-running-version"

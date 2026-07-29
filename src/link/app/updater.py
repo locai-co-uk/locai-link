@@ -1069,10 +1069,9 @@ def _version_gt(a: str, b: str) -> bool:
     return Version(a) > Version(b)
 
 
-# Control's public version-check endpoint; appended to the device's
-# api_url. DEFAULT mirrors main.DEFAULT_API_URL.
+# Control's public version-check endpoint; appended to the device's api_url.
 LATEST_VERSION_PATH = "/devices/agent/latest-version"
-DEFAULT_CONTROL_API_BASE = "https://api.locai.co.uk/api/v1"
+DEFAULT_CONTROL_API_BASE = constants.DEFAULT_API_URL
 
 
 def latest_version_from_control(base_url: str, *, session: _HttpGetter | None = None) -> str:
@@ -1293,7 +1292,10 @@ def _restart_companion_macos(force_reload: bool = False) -> None:
     if not ok:
         # Last resort: LaunchServices. Prefer the OTA-owned install-root copy
         # (the one we de-quarantine), then the pkg-managed /Applications copy.
-        for app in (Path("/Library/Locai/Locai Link.app"), Path("/Applications/Locai Link.app")):
+        for app in (
+            Path(constants.MACOS_INSTALL_ROOT) / "Locai Link.app",
+            Path("/Applications/Locai Link.app"),
+        ):
             if app.exists():
                 subprocess.Popen(
                     ["open", "-a", str(app)],
@@ -1343,7 +1345,7 @@ def _companion_running_version(install_root: Path) -> str | None:
     when absent (pre-fix companion). This reflects the live process — unlike the
     on-disk bundle, which reads new right after a swap even if the old companion
     is still running because the relaunch silently failed."""
-    marker = install_root / "state" / "companion-running-version"
+    marker = install_root / constants.STATE_SUBDIR / constants.COMPANION_RUNNING_VERSION_MARKER
     try:
         version = marker.read_text(encoding="utf-8").strip()
         return version or None
@@ -1453,7 +1455,7 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
             settle += 1
         if not companion_version or companion_version == runtime_version:
             return
-        marker = root / "state" / "ui-drift-notified"
+        marker = root / constants.STATE_SUBDIR / "ui-drift-notified"
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == runtime_version:
             return
         logger.warning(

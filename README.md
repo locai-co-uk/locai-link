@@ -2,7 +2,7 @@
 
 **Self-hosted edge AI runtime for on-prem and private cloud deployments**
 
-[![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg)](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml) [![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE.md)
+[![Build Status](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/locai-co-uk/locai-link/actions/workflows/ci.yml) [![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE.md)
 
 Locai Link is the distributed edge runtime for the [Locai platform](https://locai.co.uk). It is a lightweight agent that turns any device, from a Raspberry Pi to an industrial GPU cluster, into a managed node in your AI fleet. Link handles secure connectivity, model deployment and local inference orchestration on your own hardware, with no cloud dependency. It runs LLMs, speech-to-text, image classification and audio classification on one runtime, air-gapped or connected.
 
@@ -75,6 +75,15 @@ curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-l
 > `--ssl-no-revoke` is needed because Windows curl uses Schannel, which fails the connection with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` when it can't reach the certificate's revocation endpoint — common on corporate networks and strict firewalls. The flag skips the revocation lookup only; server certificate validation is unaffected.
 
 The installer prompts interactively for anything you omit, including your platform password.
+
+Enrolling with an org-scoped fleet key instead? Pass it as the only argument — no device name, email, or registration key needed:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
+  --fleet-key "YOUR_FLEET_KEY"
+```
+
+`--fleet-key` accepts the key itself or `file:<path>` to read it from a file. On Windows use `-FleetKey` (PowerShell) or `--fleet-key` (CMD).
 
 ### Plugin build prerequisites (source builds only)
 

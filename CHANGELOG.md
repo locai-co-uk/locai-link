@@ -6,6 +6,28 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [1.2.1]
+
+- The one-line installer now accepts `--fleet-key`, so a device can enroll into
+  a fleet with a single argument instead of the interactive device-name /
+  email / registration-key flow (PowerShell: `-FleetKey`).
+- Removing a model while offline no longer leaves a stale row on the Control
+  dashboard: the removal report is queued and re-sent automatically once the
+  device can reach Control again.
+- A freshly enrolled device now reports "online" only after it is listening for
+  commands, so Control no longer sees the device as ready before it can receive
+  a command.
+
+### Fixed: "online" reported before the device was listening for commands (`src/link/app/runtime.py`, `src/link/adapters/zenoh_client.py`)
+
+- The startup "online" lifecycle report was published before the command
+  subscription was declared, so Control could treat the device as ready and
+  dispatch a command before the device was subscribed to receive it.
+- `run()` now reports "online" only after the pipelines (and their command
+  subscription) have started.
+- The Zenoh client now calls `try_init_log_from_env()` so `RUST_LOG` activates
+  the transport's own connection logging in the field (no-op unless set).
+
 ## [1.2.0]
 
 - Open a Workspace: the menu-bar companion gains an "Open a Workspace" menu item
