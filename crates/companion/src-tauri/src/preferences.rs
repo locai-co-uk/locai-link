@@ -130,7 +130,9 @@ pub async fn get_prefs_state() -> PrefsState {
 }
 
 #[tauri::command]
-pub async fn poll_status(handles: tauri::State<'_, crate::SharedHandles>) -> Result<StatusPoll, ()> {
+pub async fn poll_status(
+    handles: tauri::State<'_, crate::SharedHandles>,
+) -> Result<StatusPoll, ()> {
     // Read the shared flag before the await so no State reference is held across it.
     let update_in_flight = handles.lock().map(|h| h.update_in_flight).unwrap_or(false);
     let poll = tauri::async_runtime::spawn_blocking(move || {

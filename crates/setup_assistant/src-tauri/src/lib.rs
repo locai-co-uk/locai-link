@@ -489,7 +489,11 @@ fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String
     // "onboarding_wizard" (already an accepted value). Control must accept
     // "mac_app" in its registration-source allow-list before this ships, or key
     // mint returns 422 on macOS. Do not release ahead of that.
-    let registration_source = if cfg!(target_os = "macos") { "mac_app" } else { "onboarding_wizard" };
+    let registration_source = if cfg!(target_os = "macos") {
+        "mac_app"
+    } else {
+        "onboarding_wizard"
+    };
     let mint_body = serde_json::json!({
         "ttl_hours": 1,
         "registration_source": registration_source,

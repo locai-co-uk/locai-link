@@ -177,6 +177,9 @@ jobs:
   unit-test-cross:
     name: Unit Test on ${{ matrix.os }}
     needs: [unit-test-linux, lint]
+    # Dependabot PRs skip the 10x-macOS / 2x-Windows legs: a dependency bump is
+    # validated by the Linux gate + builds; the cross-OS spend isn't worth it.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -262,6 +265,7 @@ jobs:
   rust-check-cross:
     name: Rust Check (shared) on ${{ matrix.os }}
     needs: [rust-check-linux]
+    if: github.actor != 'dependabot[bot]'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -352,7 +356,9 @@ jobs:
   integration-test-linux:
     name: Integration Test on ubuntu-latest
     needs: [changes, unit-test-linux]
-    if: needs.changes.outputs.code == 'true'
+    # Skip the model-downloading integration suite on Dependabot PRs (all OSes,
+    # incl. macOS 10x). integration-test-cross cascades off this via needs.
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

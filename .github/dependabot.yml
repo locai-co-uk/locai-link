@@ -11,6 +11,11 @@ updates:
       day: "monday"
     commit-message:
       prefix: "chore(deps-pip)"
+    # Batch minor+patch into one weekly PR (one CI run); majors stay individual.
+    groups:
+      pip-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     labels:
       - "dependencies"
       - "ci"
@@ -24,6 +29,10 @@ updates:
       day: "monday"
     commit-message:
       prefix: "chore(deps-actions)"
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     labels:
       - "dependencies"
       - "ci"
@@ -36,6 +45,10 @@ updates:
       day: "monday"
     commit-message:
       prefix: "chore(deps-cargo)"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     labels:
       - "dependencies"
       - "ci"

@@ -97,7 +97,7 @@ jobs:
   macos-ota-e2e:
     name: macOS OTA e2e
     needs: [changes, linux-roundtrip, shellcheck]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -126,7 +126,7 @@ jobs:
   macos-lifecycle:
     name: macOS install → reinstall
     needs: [changes, linux-roundtrip, shellcheck]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -227,7 +227,7 @@ jobs:
   macos-uninstall:
     name: macOS uninstall roundtrip
     needs: [changes, linux-roundtrip, shellcheck]
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
