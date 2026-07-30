@@ -110,6 +110,9 @@
   // so the window is covered even while the health server is momentarily down.
   let updateInFlight = $state(false);
   const updating = $derived(updateStarted || updateInFlight);
+  // Monotonic poll counter; a response is applied only if it's still the latest,
+  // so an out-of-order poll can't clobber the OTA lock state.
+  let pollSeq = 0;
 
   // Available-models catalog: fetched from Control (device-key authed) on
   // demand, not via the /healthz poll. `requested` tracks just-tapped
@@ -206,9 +209,12 @@
     // Only poll while the window is actually visible — hidden
     // windows keep JS timers alive but there's no user watching.
     if (document.hidden) return;
+    // Discard out-of-order responses: if a newer poll started while this one was
+    // in flight, its result is stale and must not clobber the OTA lock state.
+    const seq = ++pollSeq;
     try {
       const poll = await invoke<StatusPoll>("poll_status");
-      if (!prefs) return;
+      if (seq !== pollSeq || !prefs) return;
       const prevStatus = prefs.agent.status;
       const prevUpdateAvail = updateAvailable;
       prefs.agent.status = poll.status;
@@ -267,6 +273,12 @@
       // Once it's back up after dropping, the swap is done: success hides the
       // banner (update_available now false); failure re-shows it to retry.
       if (updateStarted && updateSawDown && poll.status === "up") {
+        updateStarted = false;
+        updateSawDown = false;
+      }
+      // Authoritative flag wins when the agent is reachable: a fresh "up and not
+      // in flight" clears any stale client-side inference so the lock can't stick.
+      if (poll.status === "up" && !poll.update_in_flight) {
         updateStarted = false;
         updateSawDown = false;
       }

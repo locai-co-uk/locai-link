@@ -54,7 +54,7 @@ class TransportArgs(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    mode: str = "client"
+    mode: Literal["client", "peer", "router"] = "client"
     endpoints: list[str] = Field(default_factory=list)
     tls_root_ca: str | None = None
     username: str | None = None

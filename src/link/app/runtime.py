@@ -405,21 +405,26 @@ class AgentRuntime:
             self.status_logger.report_lifecycle("offline")
 
     def apply_config(self, target_cfg: AgentConfig, *, previous_cfg: AgentConfig) -> None:
-        """Hot-swap the running config to `target_cfg` under the runtime lock:
-        diff/stop/start pipelines relative to `previous_cfg`, rebuild the log +
-        reporting handlers, and publish the new agent_config/pipeline_configs.
+        """Hot-swap the running config to `target_cfg`: diff/stop/start pipelines
+        relative to `previous_cfg`, then rebuild handlers and publish the new
+        agent_config/pipeline_configs.
 
-        State persistence is the caller's job (StateManager.update_full_config on
-        apply, restore on revert), so this one method drives both directions.
+        Pipeline start/stop acquire `_pipeline_ops_lock` then `self.lock`, so the
+        swap must run OUTSIDE `self.lock` — calling it while holding `self.lock`
+        inverts the lock order and can deadlock. State persistence is the
+        caller's job, so this one method drives both apply and revert.
         """
+        self._diff_and_swap_pipelines(previous_cfg, target_cfg)
         with self.lock:
-            self._diff_and_swap_pipelines(previous_cfg, target_cfg)
             rebuild_handlers(target_cfg.logging, target_cfg.reporting, self.zenoh_session)
             self.agent_config = target_cfg
             self.pipeline_configs = {p.id: p for p in target_cfg.pipelines}
 
     def _diff_and_swap_pipelines(self, old: AgentConfig, new: AgentConfig) -> None:
-        """Stop removed pipelines, (re)start active ones, update inactive configs."""
+        """Stop removed pipelines and (re)start active ones. Raises if a pipeline
+        that should be active fails to start, so `apply_config`'s caller reverts
+        instead of leaving a half-applied config reported as success.
+        """
         old_ids = {p.id for p in old.pipelines}
         new_ids = {p.id for p in new.pipelines}
 
@@ -427,15 +432,14 @@ class AgentRuntime:
         for pid in old_ids - new_ids:
             self._stop_pipeline(pid)
 
-        # Start, restart, or update each pipeline in the new config.
-        # `_start_pipeline` already no-ops on unchanged active pipelines.
+        # Start active pipelines (no-ops on unchanged ones); stop now-inactive
+        # ones. Inactive configs are published by apply_config's final assignment.
         for p in new.pipelines:
             if p.active:
-                self._start_pipeline(p.id, p.model_dump())
-            else:
-                self.pipeline_configs[p.id] = p
-                if p.id in self.pipelines:
-                    self._stop_pipeline(p.id)
+                if not self._start_pipeline(p.id, p.model_dump()):
+                    raise RuntimeError(f"pipeline '{p.id}' failed to start")
+            elif p.id in self.pipelines:
+                self._stop_pipeline(p.id)
 
     def _start_pipeline(self, pipeline_id: str, config_data: dict[str, Any] | None = None) -> bool:
         """Starts (or restarts) a pipeline.

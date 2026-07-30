@@ -133,8 +133,10 @@ pub async fn get_prefs_state() -> PrefsState {
 pub async fn poll_status(
     handles: tauri::State<'_, crate::SharedHandles>,
 ) -> Result<StatusPoll, ()> {
-    // Read the shared flag before the await so no State reference is held across it.
-    let update_in_flight = handles.lock().map(|h| h.update_in_flight).unwrap_or(false);
+    // Read the shared flag before the await so no State reference is held across
+    // it. Fail closed: if the lock is poisoned, assume an update is in flight so
+    // the UI stays locked rather than re-enabling actions mid-swap.
+    let update_in_flight = handles.lock().map(|h| h.update_in_flight).unwrap_or(true);
     let poll = tauri::async_runtime::spawn_blocking(move || {
         let probe = probe_runtime_full();
         let models = match list_models(DEFAULT_MODELS_URL) {
@@ -164,10 +166,20 @@ pub async fn poll_status(
 /// POST failure clears it (the tray path does the same).
 #[tauri::command]
 pub fn install_update(handles: tauri::State<'_, crate::SharedHandles>) -> Result<(), String> {
-    if let Ok(mut h) = handles.lock() {
+    // Atomic check-and-set: reject a second trigger while one is in flight, so a
+    // double-click can't fire two updates.
+    {
+        let mut h = handles
+            .lock()
+            .map_err(|_| "companion state lock poisoned".to_string())?;
+        if h.update_in_flight {
+            return Err("An update is already in progress.".to_string());
+        }
         h.update_in_flight = true;
     }
     let res = trigger_update(DEFAULT_UPDATE_URL);
+    // The POST is to the local loopback agent, so an error is unambiguous (the
+    // agent never received it): safe to clear the lock and allow a retry.
     if res.is_err() {
         if let Ok(mut h) = handles.lock() {
             h.update_in_flight = false;
