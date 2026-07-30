@@ -36,7 +36,11 @@ jobs:
     name: Detect relevant changes
     runs-on: ubuntu-latest
     outputs:
+      # code = any non-docs change (gates the cheap Linux legs).
+      # python / rust = which area changed (gates the expensive cross-OS legs).
       code: ${{ steps.filter.outputs.code }}
+      python: ${{ steps.filter.outputs.python }}
+      rust: ${{ steps.filter.outputs.rust }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,29 +54,35 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -uo pipefail
+          emit() { { echo "code=$1"; echo "python=$2"; echo "rust=$3"; } >>"$GITHUB_OUTPUT"; }
           if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "non-PR event — running everything"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "non-PR event — running everything"; emit true true true; exit 0
           fi
-          # Fail closed: if change detection errors or finds nothing, run the
-          # full suite rather than silently skip it.
+          # Fail closed: if change detection errors or finds nothing, run everything.
           if ! FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD") || [ -z "$FILES" ]; then
-            echo "path detection failed or empty — running everything"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "path detection failed or empty — running everything"; emit true true true; exit 0
           fi
           echo "changed files:"; echo "$FILES"
-          code=false
+          code=false; python=false; rust=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
               *.md|LICENSE*|docs/*|.github/*|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico) ;;
               *) code=true ;;
             esac
+            case "$f" in
+              *.py|main.py|pyproject.toml|plugins/*|src/link/*) python=true ;;
+            esac
+            case "$f" in
+              crates/*|*.rs|*Cargo.toml|Cargo.lock) rust=true ;;
+            esac
           done <<< "$FILES"
-          echo "relevant code changed: $code"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # Fail closed: a non-docs change we couldn't categorise runs both.
+          if [ "$code" = "true" ] && [ "$python" = "false" ] && [ "$rust" = "false" ]; then
+            python=true; rust=true
+          fi
+          echo "code=$code python=$python rust=$rust"
+          emit "$code" "$python" "$rust"
 
   # 0. Version bump check (PRs to main only). The check step is skipped for
   # Dependabot (dependency bumps legitimately don't touch the app version); the
@@ -176,10 +186,11 @@ jobs:
   # 2b. Unit tests — macOS + Windows. Gated on the Linux unit tests + lint.
   unit-test-cross:
     name: Unit Test on ${{ matrix.os }}
-    needs: [unit-test-linux, lint]
-    # Dependabot PRs skip the 10x-macOS / 2x-Windows legs: a dependency bump is
-    # validated by the Linux gate + builds; the cross-OS spend isn't worth it.
-    if: github.actor != 'dependabot[bot]'
+    needs: [changes, unit-test-linux, lint]
+    # Run the 10x-macOS / 2x-Windows unit legs only when Python changed, and
+    # never for Dependabot. UI/rust/docs PRs skip them (nothing Python-facing
+    # to validate cross-OS); Python PRs still get full pre-merge coverage.
+    if: needs.changes.outputs.python == 'true' && github.actor != 'dependabot[bot]'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -264,8 +275,11 @@ jobs:
   # if the shared logic already passed on Linux.
   rust-check-cross:
     name: Rust Check (shared) on ${{ matrix.os }}
-    needs: [rust-check-linux]
-    if: github.actor != 'dependabot[bot]'
+    needs: [changes, rust-check-linux]
+    # macOS/Windows compile check for the cfg-gated autostart modules — only
+    # when Rust changed (cross-compiling these targets from Linux is blocked by
+    # the ring C dep, so a real runner is the cheap-enough option, path-gated).
+    if: needs.changes.outputs.rust == 'true' && github.actor != 'dependabot[bot]'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -356,9 +370,10 @@ jobs:
   integration-test-linux:
     name: Integration Test on ubuntu-latest
     needs: [changes, unit-test-linux]
-    # Skip the model-downloading integration suite on Dependabot PRs (all OSes,
-    # incl. macOS 10x). integration-test-cross cascades off this via needs.
-    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
+    # Integration (model downloads + engines) runs only when Python/plugins/
+    # runtime changed, and never for Dependabot. Non-Python PRs skip it on all
+    # OSes; integration-test-cross cascades off this via needs.
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.python == 'true' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -389,6 +404,18 @@ jobs:
           uv pip install -e "plugins/image_classifier[dev]"
           uv pip install -e "plugins/audio_classifier[dev]"
           uv pip install -e "plugins/audio_transcriber[dev]"
+
+      - name: Cache engine binaries
+        uses: actions/cache@v4
+        with:
+          # Skip re-downloading llama/llama-swap and re-building whisper-server
+          # from source on repeat runs. Keyed on the install scripts, which hold
+          # the pinned engine tags — a bump invalidates the cache.
+          path: |
+            .venv/bin-llama
+            .venv/bin-whisper
+            .venv/build-cache
+          key: engines-${{ runner.os }}-${{ hashFiles('plugins/language_model/install.py', 'plugins/audio_transcriber/install.py') }}
 
       - name: Install Llama Server
         shell: bash
@@ -476,6 +503,18 @@ jobs:
           uv pip install -e "plugins/image_classifier[dev]"
           uv pip install -e "plugins/audio_classifier[dev]"
           uv pip install -e "plugins/audio_transcriber[dev]"
+
+      - name: Cache engine binaries
+        uses: actions/cache@v4
+        with:
+          # Skip re-downloading llama/llama-swap and re-building whisper-server
+          # from source on repeat runs. Keyed on the install scripts, which hold
+          # the pinned engine tags — a bump invalidates the cache.
+          path: |
+            .venv/bin-llama
+            .venv/bin-whisper
+            .venv/build-cache
+          key: engines-${{ runner.os }}-${{ hashFiles('plugins/language_model/install.py', 'plugins/audio_transcriber/install.py') }}
 
       - name: Install Llama Server
         shell: bash
