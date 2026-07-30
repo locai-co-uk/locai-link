@@ -21,6 +21,14 @@ sections below the summary. -->
   run-at-login controls hide, and model actions (serve / stop / remove / cancel
   / download) are disabled until the companion relaunches on the new build.
 
+### Internal: contract hardening, no behaviour change (`src/link/app`, `crates/launcher`)
+
+- Hot-reconfigure goes through a public `AgentRuntime.apply_config()` and
+  `StateManager.snapshot()/restore()` instead of mutating `agent_config`,
+  `pipeline_configs`, and `StateManager._cache` directly.
+- Added a round-trip drift test for the `BootConfig` struct duplicated between
+  the launcher and the shared crate, so the two can't diverge silently.
+
 ## [1.2.1]
 
 - The one-line installer now accepts `--fleet-key`, so a device can enroll into

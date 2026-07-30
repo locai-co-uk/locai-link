@@ -2002,6 +2002,7 @@ name = "locai-link-launcher"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "locai-link-shared",
  "mockito",
  "serde",
  "serde_json",

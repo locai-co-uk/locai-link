@@ -35,7 +35,7 @@ from link.config.commands import (
 from link.config.models import AgentConfig, GenericConfig, PipelineConfig
 from link.config.templating import resolve_templates
 from link.infra.health_server import HealthServer, HealthState
-from link.utils.logger import LinkReporter
+from link.utils.logger import LinkReporter, rebuild_handlers
 from link.utils.version import resolve_agent_version
 
 if TYPE_CHECKING:
@@ -403,6 +403,39 @@ class AgentRuntime:
         finally:
             self._shutdown()
             self.status_logger.report_lifecycle("offline")
+
+    def apply_config(self, target_cfg: AgentConfig, *, previous_cfg: AgentConfig) -> None:
+        """Hot-swap the running config to `target_cfg` under the runtime lock:
+        diff/stop/start pipelines relative to `previous_cfg`, rebuild the log +
+        reporting handlers, and publish the new agent_config/pipeline_configs.
+
+        State persistence is the caller's job (StateManager.update_full_config on
+        apply, restore on revert), so this one method drives both directions.
+        """
+        with self.lock:
+            self._diff_and_swap_pipelines(previous_cfg, target_cfg)
+            rebuild_handlers(target_cfg.logging, target_cfg.reporting, self.zenoh_session)
+            self.agent_config = target_cfg
+            self.pipeline_configs = {p.id: p for p in target_cfg.pipelines}
+
+    def _diff_and_swap_pipelines(self, old: AgentConfig, new: AgentConfig) -> None:
+        """Stop removed pipelines, (re)start active ones, update inactive configs."""
+        old_ids = {p.id for p in old.pipelines}
+        new_ids = {p.id for p in new.pipelines}
+
+        # Stop pipelines that were removed.
+        for pid in old_ids - new_ids:
+            self._stop_pipeline(pid)
+
+        # Start, restart, or update each pipeline in the new config.
+        # `_start_pipeline` already no-ops on unchanged active pipelines.
+        for p in new.pipelines:
+            if p.active:
+                self._start_pipeline(p.id, p.model_dump())
+            else:
+                self.pipeline_configs[p.id] = p
+                if p.id in self.pipelines:
+                    self._stop_pipeline(p.id)
 
     def _start_pipeline(self, pipeline_id: str, config_data: dict[str, Any] | None = None) -> bool:
         """Starts (or restarts) a pipeline.

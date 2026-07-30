@@ -133,6 +133,19 @@ class StateManager:
         self._cache = new_data
         self._flush()
 
+    def snapshot(self) -> dict[str, Any] | None:
+        """Opaque copy of the persisted state, for a later restore(). Returns
+        None when nothing is loaded, so restore(None) is a safe no-op."""
+        return dict(self._cache) if self._cache is not None else None
+
+    def restore(self, snapshot: dict[str, Any] | None) -> None:
+        """Restore state captured by snapshot() and flush it to disk. A None
+        snapshot leaves the current state untouched."""
+        if snapshot is None:
+            return
+        self._cache = snapshot
+        self._flush()
+
     def update_pipeline_config(self, pipeline_config: PipelineConfig):
         """Updates (or adds) a pipeline configuration in the persistent state.
 

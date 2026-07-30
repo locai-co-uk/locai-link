@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 from link.adapters.http_client import HttpClient
 from link.config.models import SCHEMA_VERSION, AgentConfig
 from link.config.templating import resolve_templates
-from link.utils.logger import rebuild_handlers
 
 if TYPE_CHECKING:
     from link.app.runtime import AgentRuntime
@@ -87,19 +86,15 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
 
     # 4. Snapshot current state for revert.
     snapshot_cfg = runtime.agent_config.model_copy(deep=True)
-    snapshot_cache: dict[str, Any] | None = None
-    if runtime.state_manager is not None and runtime.state_manager._cache is not None:
-        snapshot_cache = dict(runtime.state_manager._cache)
+    snapshot_state = (
+        runtime.state_manager.snapshot() if runtime.state_manager is not None else None
+    )
 
-    # 5. Apply — hot-swap pipelines + rebuild log/reporting handlers.
+    # 5. Apply — hot-swap pipelines + handlers, then persist the new config.
     try:
-        with runtime.lock:
-            _diff_and_swap_pipelines(runtime, snapshot_cfg, new_cfg)
-            rebuild_handlers(new_cfg.logging, new_cfg.reporting, runtime.zenoh_session)
-            runtime.agent_config = new_cfg
-            runtime.pipeline_configs = {p.id: p for p in new_cfg.pipelines}
-            if runtime.state_manager is not None:
-                runtime.state_manager.update_full_config(new_cfg)
+        runtime.apply_config(new_cfg, previous_cfg=snapshot_cfg)
+        if runtime.state_manager is not None:
+            runtime.state_manager.update_full_config(new_cfg)
         identity = new_cfg.identity
         try:
             client = HttpClient(
@@ -119,16 +114,11 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
     except Exception as apply_err:
         logger.error(f"apply_agent_config failed: {apply_err}", exc_info=True)
 
-        # 6. Revert to snapshot.
+        # 6. Revert to snapshot — same hot-swap in reverse, then restore state.
         try:
-            with runtime.lock:
-                _diff_and_swap_pipelines(runtime, new_cfg, snapshot_cfg)
-                rebuild_handlers(snapshot_cfg.logging, snapshot_cfg.reporting, runtime.zenoh_session)
-                runtime.agent_config = snapshot_cfg
-                runtime.pipeline_configs = {p.id: p for p in snapshot_cfg.pipelines}
-                if runtime.state_manager is not None and snapshot_cache is not None:
-                    runtime.state_manager._cache = snapshot_cache
-                    runtime.state_manager._flush()
+            runtime.apply_config(snapshot_cfg, previous_cfg=new_cfg)
+            if runtime.state_manager is not None:
+                runtime.state_manager.restore(snapshot_state)
             return ApplyResult(False, f"Reverted after failure: {apply_err}")
 
         except Exception as revert_err:
@@ -147,23 +137,3 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
                 f"Apply + revert failed — restarting ({revert_err})",
                 scheduled_restart=True,
             )
-
-
-def _diff_and_swap_pipelines(runtime: "AgentRuntime", old: AgentConfig, new: AgentConfig) -> None:
-    """Stop removed pipelines, (re)start active ones, update inactive configs."""
-    old_ids = {p.id for p in old.pipelines}
-    new_ids = {p.id for p in new.pipelines}
-
-    # Stop pipelines that were removed
-    for pid in old_ids - new_ids:
-        runtime._stop_pipeline(pid)
-
-    # Start, restart, or update each pipeline in the new config.
-    # `_start_pipeline` already no-ops on unchanged active pipelines.
-    for p in new.pipelines:
-        if p.active:
-            runtime._start_pipeline(p.id, p.model_dump())
-        else:
-            runtime.pipeline_configs[p.id] = p
-            if p.id in runtime.pipelines:
-                runtime._stop_pipeline(p.id)
