@@ -8,6 +8,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from link.config.models import TransportArgs
+
 if TYPE_CHECKING:
     import zenoh
 
@@ -32,13 +34,14 @@ class ZenohClient:
         import zenoh  # lazy — triggers the native DLL load only when Zenoh is actually used
 
         z_conf = zenoh.Config()
+        cfg = TransportArgs(**self.args)
 
         # 1. Mode
-        mode = self.args.get("mode", "client")
+        mode = cfg.mode
         z_conf.insert_json5("mode", f'"{mode}"')
 
         # 2. Endpoints
-        endpoints = self.args.get("endpoints", [])
+        endpoints = cfg.endpoints
         if endpoints:
             ep_json = json.dumps(endpoints)
             if mode == "router":
@@ -52,7 +55,7 @@ class ZenohClient:
         # set an explicit path only for private/self-signed CAs.
         uses_tls = any(str(ep).startswith("tls/") for ep in endpoints)
         if uses_tls:
-            tls_root_ca = self.args.get("tls_root_ca")
+            tls_root_ca = cfg.tls_root_ca
             if not tls_root_ca or tls_root_ca == "auto":
                 import certifi
 
@@ -63,8 +66,8 @@ class ZenohClient:
             )
 
         # 4. usrpwd auth — username = device_id, password = api_key (or test cred).
-        username = self.args.get("username")
-        password = self.args.get("password")
+        username = cfg.username
+        password = cfg.password
         if username and password and uses_tls:
             z_conf.insert_json5(
                 "transport/auth/usrpwd",

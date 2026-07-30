@@ -21,13 +21,17 @@ sections below the summary. -->
   run-at-login controls hide, and model actions (serve / stop / remove / cancel
   / download) are disabled until the companion relaunches on the new build.
 
-### Internal: contract hardening, no behaviour change (`src/link/app`, `crates/launcher`)
+### Internal: contract hardening, no behaviour change (`src/link`, `crates/launcher`, `crates/setup_assistant`)
 
 - Hot-reconfigure goes through a public `AgentRuntime.apply_config()` and
   `StateManager.snapshot()/restore()` instead of mutating `agent_config`,
   `pipeline_configs`, and `StateManager._cache` directly.
 - Added a round-trip drift test for the `BootConfig` struct duplicated between
   the launcher and the shared crate, so the two can't diverge silently.
+- Setup Assistant parses Control's device-flow and token responses through typed
+  structs instead of `serde_json::Value` field-plucking.
+- The Zenoh transport's `args` are parsed into a typed `TransportArgs` model at
+  the consumer instead of stringly-typed `dict.get` reads.
 
 ## [1.2.1]
 

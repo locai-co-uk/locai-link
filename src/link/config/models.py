@@ -45,6 +45,22 @@ SCHEMA_VERSION = 2.1
 # -- Generic building block ----------------------------------------------------
 
 
+class TransportArgs(BaseModel):
+    """Typed view of a Zenoh transport's ``args``. Parsed from the raw
+    ``GenericConfig.args`` dict at the consumer (see ``ZenohClient``) so a
+    missing or mistyped field surfaces as validation rather than a silent
+    ``None``. Unknown keys are ignored for forward-compatibility with Control.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: str = "client"
+    endpoints: list[str] = Field(default_factory=list)
+    tls_root_ca: str | None = None
+    username: str | None = None
+    password: str | None = None
+
+
 class GenericConfig(BaseModel):
     """A pluggable component reference: `{type, args}`.
 
