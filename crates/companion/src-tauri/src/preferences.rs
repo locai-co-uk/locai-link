@@ -176,13 +176,17 @@ pub fn install_update(handles: tauri::State<'_, crate::SharedHandles>) -> Result
             return Err("An update is already in progress.".to_string());
         }
         h.update_in_flight = true;
+        h.update_started_at = Some(std::time::Instant::now());
     }
     let res = trigger_update(DEFAULT_UPDATE_URL);
-    // The POST is to the local loopback agent, so an error is unambiguous (the
-    // agent never received it): safe to clear the lock and allow a retry.
+    // The POST is to the local loopback agent and returns 202 before any
+    // shutdown, so an error is unambiguous (the update never started): safe to
+    // clear the lock and allow a retry. If it succeeds but the update later
+    // fails without restarting the agent, poll_forever's expiry releases it.
     if res.is_err() {
         if let Ok(mut h) = handles.lock() {
             h.update_in_flight = false;
+            h.update_started_at = None;
         }
     }
     res
