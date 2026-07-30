@@ -118,16 +118,18 @@ impl From<&HealthStatus> for TrayState {
 /// pick start-vs-stop without an extra GET on the click path.
 /// `in_flight` blocks re-clicks on a pipeline while its Serve/Stop HTTP is
 /// outstanding — a rapid stop→start clobbered the runtime otherwise.
-struct MenuHandles {
+pub(crate) struct MenuHandles {
     status_item: MenuItem<Wry>,
     models: Vec<ModelInfo>,
     in_flight: std::collections::HashSet<String>,
-    /// Blocks repeat "Update" clicks while a swap is in flight. Held from the
-    /// click until poll_forever sees the update finish (or on POST failure).
-    update_in_flight: bool,
+    /// Blocks repeat "Update" clicks while a swap is in flight, and drives the
+    /// Preferences "updating, will restart" lock. Held from the trigger until
+    /// poll_forever sees the update finish (or on POST failure); resets
+    /// naturally when the companion relaunches on the new build.
+    pub(crate) update_in_flight: bool,
 }
 
-type SharedHandles = Arc<Mutex<MenuHandles>>;
+pub(crate) type SharedHandles = Arc<Mutex<MenuHandles>>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

@@ -94,6 +94,9 @@ pub struct StatusPoll {
     /// A newer bundle is published for this platform.
     update_available: bool,
     latest_version: Option<String>,
+    /// An OTA swap is applying: the UI locks and shows "updating, will restart"
+    /// until the companion relaunches on the new build.
+    update_in_flight: bool,
 }
 
 // --- Commands ----------------------------------------------------------------
@@ -127,8 +130,10 @@ pub async fn get_prefs_state() -> PrefsState {
 }
 
 #[tauri::command]
-pub async fn poll_status() -> StatusPoll {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn poll_status(handles: tauri::State<'_, crate::SharedHandles>) -> Result<StatusPoll, ()> {
+    // Read the shared flag before the await so no State reference is held across it.
+    let update_in_flight = handles.lock().map(|h| h.update_in_flight).unwrap_or(false);
+    let poll = tauri::async_runtime::spawn_blocking(move || {
         let probe = probe_runtime_full();
         let models = match list_models(DEFAULT_MODELS_URL) {
             ModelsStatus::Ok(list) => list,
@@ -143,17 +148,30 @@ pub async fn poll_status() -> StatusPoll {
             deployments: probe.deployments,
             update_available: probe.update_available,
             latest_version: probe.latest_version,
+            update_in_flight,
         }
     })
     .await
-    .expect("poll_status panicked")
+    .expect("poll_status panicked");
+    Ok(poll)
 }
 
 /// Trigger the agent's in-app update. POSTs the loopback
 /// `/update`; the agent swaps the bundle and relaunches on success.
+/// Sets `update_in_flight` so Preferences locks into the "updating" state; a
+/// POST failure clears it (the tray path does the same).
 #[tauri::command]
-pub fn install_update() -> Result<(), String> {
-    trigger_update(DEFAULT_UPDATE_URL)
+pub fn install_update(handles: tauri::State<'_, crate::SharedHandles>) -> Result<(), String> {
+    if let Ok(mut h) = handles.lock() {
+        h.update_in_flight = true;
+    }
+    let res = trigger_update(DEFAULT_UPDATE_URL);
+    if res.is_err() {
+        if let Ok(mut h) = handles.lock() {
+            h.update_in_flight = false;
+        }
+    }
+    res
 }
 
 /// Start or stop serving `pipeline_id`. `action` is `"serve"` or `"stop-serving"`.

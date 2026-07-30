@@ -6,6 +6,21 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [1.2.2]
+
+- The companion now shows an "Updating…" state during an app update: the
+  runtime and model controls are locked while the update applies and the app
+  restarts, so an update no longer interrupts a mid-action user.
+
+### Changed: lock the companion UI during an OTA update (`crates/companion`)
+
+- The agent surfaces an authoritative `update_in_flight` flag through the
+  loopback status poll, set when an update is triggered from either the tray
+  "Update" item or the Preferences "Update now" button.
+- Preferences reflects it: the status pill shows "Updating…", the service and
+  run-at-login controls hide, and model actions (serve / stop / remove / cancel
+  / download) are disabled until the companion relaunches on the new build.
+
 ## [1.2.1]
 
 - The one-line installer now accepts `--fleet-key`, so a device can enroll into

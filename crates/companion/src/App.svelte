@@ -70,6 +70,7 @@
     deployments: DeploymentProgress[];
     update_available: boolean;
     latest_version: string | null;
+    update_in_flight: boolean;
   };
 
   type AvailableModel = {
@@ -104,6 +105,11 @@
   // Suppress the tray-trigger inference during a user-initiated stop/restart
   // so a manual Stop while an update is available isn't mislabelled "Updating".
   let suppressUpdateInfer = $state(false);
+  // Authoritative "an OTA swap is applying" flag from the agent, set on trigger
+  // by the tray item or the Update button. OR'd with the client-side inference
+  // so the window is covered even while the health server is momentarily down.
+  let updateInFlight = $state(false);
+  const updating = $derived(updateStarted || updateInFlight);
 
   // Available-models catalog: fetched from Control (device-key authed) on
   // demand, not via the /healthz poll. `requested` tracks just-tapped
@@ -214,6 +220,7 @@
       models = poll.models;
       deployments = poll.deployments;
       updateAvailable = poll.update_available;
+      updateInFlight = poll.update_in_flight;
       // Keep the last-known latest when the probe is Down (returns null).
       latestVersion = poll.latest_version ?? latestVersion;
 
@@ -648,7 +655,7 @@
               <span class="dot"></span>
               Checking…
             </span>
-          {:else if updateStarted}
+          {:else if updating}
             <span class="pill pill--updating">
               <span class="dot"></span>
               Updating…
@@ -659,19 +666,19 @@
               {prefs.agent.status === "up" ? "Running" : "Stopped"}
             </span>
           {/if}
-          {#if !updateStarted && prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
+          {#if !updating && prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
             <span class="uptime">· {formatUptime(prefs.agent.uptime_seconds)}</span>
           {/if}
         </span>
       </div>
-      {#if updateStarted || (updateAvailable && prefs.agent.status === "up")}
+      {#if updating || (updateAvailable && prefs.agent.status === "up")}
         <div class="update-banner">
           <div class="update-copy">
             <span class="update-title">
-              {updateStarted ? "Updating…" : `Update available${latestVersion ? ` · v${latestVersion}` : ""}`}
+              {updating ? "Updating…" : `Update available${latestVersion ? ` · v${latestVersion}` : ""}`}
             </span>
             <span class="update-hint">
-              {updateStarted
+              {updating
                 ? "Locai Link is installing the update and will restart automatically."
                 : "Locai Link will download the new version and restart automatically."}
             </span>
@@ -679,13 +686,13 @@
           <button
             class="btn btn--primary btn--sm"
             onclick={installUpdate}
-            disabled={updateStarted || pending.has("update")}
+            disabled={updating || pending.has("update")}
           >
-            {updateStarted ? "Installing…" : "Update now"}
+            {updating ? "Installing…" : "Update now"}
           </button>
         </div>
       {/if}
-      {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updateStarted}
+      {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updating}
         <!-- Service management wired for macOS (launchctl) + Linux
              (systemctl --user); hidden on Windows (no backend) and mid-update
              (the agent bounces on its own). -->
@@ -787,7 +794,7 @@
                     <button
                       class="btn btn--ghost btn--sm"
                       onclick={() => cancelDeploy(row.pipeline_id)}
-                      disabled={pending.has(`cancel:${row.pipeline_id}`)}
+                      disabled={updating || pending.has(`cancel:${row.pipeline_id}`)}
                       aria-label={`Cancel download of ${row.alias}`}
                     >
                       Cancel
@@ -798,14 +805,14 @@
                   <button
                     class="btn btn--ghost btn--sm"
                     onclick={() => toggleServing(row)}
-                    disabled={pending.has(`serve:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`serve:${row.pipeline_id}`)}
                   >
                     Stop
                   </button>
                   <button
                     class="btn btn--ghost btn--sm"
                     onclick={() => uninstallModel(row)}
-                    disabled={pending.has(`uninstall:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`uninstall:${row.pipeline_id}`)}
                     aria-label={`Remove ${row.alias}`}
                   >
                     Remove
@@ -815,14 +822,14 @@
                   <button
                     class="btn btn--primary btn--sm"
                     onclick={() => toggleServing(row)}
-                    disabled={pending.has(`serve:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`serve:${row.pipeline_id}`)}
                   >
                     Serve
                   </button>
                   <button
                     class="btn btn--ghost btn--sm"
                     onclick={() => uninstallModel(row)}
-                    disabled={pending.has(`uninstall:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`uninstall:${row.pipeline_id}`)}
                     aria-label={`Remove ${row.alias}`}
                   >
                     Remove
@@ -873,7 +880,7 @@
                   <button
                     class="btn btn--primary btn--sm"
                     onclick={() => requestDeploy(model)}
-                    disabled={pending.has(`deploy:${model.model_id}`) || prefs.agent.status === "down"}
+                    disabled={updating || pending.has(`deploy:${model.model_id}`) || prefs.agent.status === "down"}
                     title={prefs.agent.status === "down" ? "Start Locai Link to download models" : ""}
                   >
                     Download
