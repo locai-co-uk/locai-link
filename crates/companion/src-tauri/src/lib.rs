@@ -251,7 +251,7 @@ fn kickstart_runtime_if_installed() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return,
     };
-    let service = format!("gui/{uid}/uk.co.locai.link.agent");
+    let service = format!("gui/{uid}/{}", locai_link_shared::AGENT_APP_ID);
     let _ = std::process::Command::new("launchctl")
         .args(["kickstart", &service])
         .output();

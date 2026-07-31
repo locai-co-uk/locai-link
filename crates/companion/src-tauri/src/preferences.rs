@@ -31,11 +31,11 @@ fn runtime_log_file() -> String {
 
 const CONTROL_BASE_URL: &str = locai_link_shared::CONTROL_URL;
 
-/// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/`.
+/// LaunchAgent labels; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/`).
 #[cfg(target_os = "macos")]
-const AGENT_LABEL: &str = "uk.co.locai.link.agent";
+const AGENT_LABEL: &str = locai_link_shared::AGENT_APP_ID;
 #[cfg(target_os = "macos")]
-const COMPANION_LABEL: &str = "uk.co.locai.link.companion";
+const COMPANION_LABEL: &str = locai_link_shared::COMPANION_APP_ID;
 
 // --- Command outputs ---------------------------------------------------------
 

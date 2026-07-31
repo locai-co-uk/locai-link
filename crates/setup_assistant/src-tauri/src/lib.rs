@@ -21,11 +21,11 @@ const CONTROL_API_URL: &str = match option_env!("LOCAI_CONTROL_API_URL") {
     None => "https://api.locai.co.uk/api/v1",
 };
 
-/// LaunchAgent labels — must match `bundling/pkg/LaunchAgents/*.plist`.
+/// LaunchAgent labels; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/*.plist`).
 #[cfg(target_os = "macos")]
-const AGENT_LABEL: &str = "uk.co.locai.link.agent";
+const AGENT_LABEL: &str = locai_link_shared::AGENT_APP_ID;
 #[cfg(target_os = "macos")]
-const COMPANION_LABEL: &str = "uk.co.locai.link.companion";
+const COMPANION_LABEL: &str = locai_link_shared::COMPANION_APP_ID;
 
 /// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -908,11 +908,8 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
 
     // Must match bundling/pkg/LaunchAgents/.
     let agents: [(&str, &str); 2] = [
-        ("uk.co.locai.link.agent.plist", "uk.co.locai.link.agent"),
-        (
-            "uk.co.locai.link.companion.plist",
-            "uk.co.locai.link.companion",
-        ),
+        ("uk.co.locai.link.agent.plist", AGENT_LABEL),
+        ("uk.co.locai.link.companion.plist", COMPANION_LABEL),
     ];
 
     // A signed .pkg shouldn't attach com.apple.quarantine, but some macOS
