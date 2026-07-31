@@ -289,10 +289,11 @@
           updateStarted = false;
           updateSawDown = false;
         }
-        // Authoritative flag wins when the agent is reachable: a fresh "up and
-        // not in flight" clears any stale client-side inference so the lock
-        // can't stick.
-        if (poll.status === "up" && !poll.update_in_flight) {
+        // Authoritative flag wins: once the agent reports no swap in flight,
+        // clear the client-side inference even if it's still down. A failed
+        // relaunch releases the flag while down (poll_forever gives up after
+        // MAX_UPDATE_DOWN_POLLS), so gating on "up" would stick the lock.
+        if (!poll.update_in_flight) {
           updateStarted = false;
           updateSawDown = false;
         }

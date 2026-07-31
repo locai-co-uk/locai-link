@@ -355,7 +355,7 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
 
         let verification_uri_complete = body
             .verification_uri_complete
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| body.verification_uri.clone());
 
         Ok((

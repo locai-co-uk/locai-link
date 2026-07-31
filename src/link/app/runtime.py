@@ -430,7 +430,8 @@ class AgentRuntime:
 
         # Stop pipelines that were removed.
         for pid in old_ids - new_ids:
-            self._stop_pipeline(pid)
+            if not self._stop_pipeline(pid):
+                raise RuntimeError(f"pipeline '{pid}' failed to stop")
 
         # Start active pipelines (no-ops on unchanged ones); stop now-inactive
         # ones. Inactive configs are published by apply_config's final assignment.
@@ -439,7 +440,8 @@ class AgentRuntime:
                 if not self._start_pipeline(p.id, p.model_dump()):
                     raise RuntimeError(f"pipeline '{p.id}' failed to start")
             elif p.id in self.pipelines:
-                self._stop_pipeline(p.id)
+                if not self._stop_pipeline(p.id):
+                    raise RuntimeError(f"pipeline '{p.id}' failed to stop")
 
     def _start_pipeline(self, pipeline_id: str, config_data: dict[str, Any] | None = None) -> bool:
         """Starts (or restarts) a pipeline.

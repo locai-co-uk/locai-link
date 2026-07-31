@@ -84,6 +84,11 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
             f"Identity drift — device_id mismatch: expected {cur_identity.device_id!r}, got {new_identity.device_id!r}",
         )
 
+    # Transport isn't hot-swappable — the live zenoh session was built from the
+    # current transport, so reject rather than silently keep the old connection.
+    if new_cfg.transport != runtime.agent_config.transport:
+        return ApplyResult(False, "Transport change requires a restart, not hot-swappable")
+
     # 4. Snapshot current state for revert.
     snapshot_cfg = runtime.agent_config.model_copy(deep=True)
     snapshot_state = (

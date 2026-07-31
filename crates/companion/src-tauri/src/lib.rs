@@ -749,18 +749,14 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 h.update_started_at = None;
             }
         }
-        // Expire a stuck lock: the reset above only fires after a Down was seen.
-        // If an update was flagged but the agent stayed up past the cap (it
-        // failed before the re-exec, or we missed the restart), release it so
-        // Preferences doesn't stay disabled forever.
-        if is_up {
-            if let Ok(mut h) = handles.lock() {
-                if h.update_started_at
-                    .is_some_and(|t| t.elapsed() > UPDATE_LOCK_EXPIRY)
-                {
-                    h.update_in_flight = false;
-                    h.update_started_at = None;
-                }
+        // Time-based backstop, independent of health: release a stuck lock past
+        // the cap even if the runtime never came back up (or we missed it).
+        if let Ok(mut h) = handles.lock() {
+            if h.update_started_at
+                .is_some_and(|t| t.elapsed() > UPDATE_LOCK_EXPIRY)
+            {
+                h.update_in_flight = false;
+                h.update_started_at = None;
             }
         }
         prev_up_with_update = is_up && has_update;

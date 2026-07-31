@@ -67,6 +67,8 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
+              # Workflow changes are code: they gate build/test and must be validated.
+              .github/workflows/*) code=true ;;
               *.md|LICENSE*|docs/*|.github/*|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico) ;;
               *) code=true ;;
             esac
