@@ -11,8 +11,8 @@ pub mod install;
 
 pub use autostart::{AGENT_APP_ID, COMPANION_APP_ID};
 pub use catalog::{
-    deregister_device, list_available_models, read_identity, request_deploy, AvailableModel,
-    DeployOutcome, DeviceIdentity,
+    deregister_device, list_available_models, read_identity, read_session_identity, request_deploy,
+    AvailableModel, DeployOutcome, DeviceIdentity,
 };
 pub use endpoints::{install_root, CONTROL_URL, IPC_PORT, WORKSPACE_URL};
 pub use health::{

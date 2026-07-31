@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use locai_link_shared::{
     agent_health, cancel_deployment as shared_cancel_deployment, installed_version,
     list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
-    read_identity, request_deploy as shared_request_deploy,
+    read_identity, read_session_identity, request_deploy as shared_request_deploy,
     supported_model_types as shared_supported_model_types, toggle_serving as shared_toggle_serving,
     trigger_update, uninstall_model as shared_uninstall_model, AvailableModel, DeployOutcome,
     DeploymentProgress, HealthStatus, ModelInfo, ModelsStatus, ServingAction, TransportHealth,
@@ -436,29 +436,9 @@ fn probe_runtime_full() -> RuntimeProbe {
     }
 }
 
-/// Pull the identity block from the newest `session_*.json` under `configs/`.
+/// Device info (id, name, Control URL) from the newest session config.
 fn read_session_config_device() -> Option<DeviceInfo> {
-    let configs = PathBuf::from(install_root()).join("configs");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(&configs).ok()?.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("session_") || !name.ends_with(".json") {
-            continue;
-        }
-        let mtime = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
-            newest = Some((mtime, entry.path()));
-        }
-    }
-    let (_, path) = newest?;
-    let body = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let identity = json.get("identity")?;
+    let identity = read_session_identity(&PathBuf::from(install_root()))?;
     let id = identity.get("device_id")?.as_str()?.to_string();
     let name = identity
         .get("device_name")

@@ -63,9 +63,10 @@ pub struct DeployOutcome {
     pub status: String,
 }
 
-/// Read `(device_id, api_key, api_url)` from the newest `session_*.json` under
-/// `<install_root>/configs`. `None` when no session exists or a field is missing.
-pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
+/// The `identity` object from the newest `session_*.json` under
+/// `<install_root>/configs`; `None` if absent or unparsable. Mtime ties break
+/// by filename (`session_<UTC>` sorts chronologically) so selection is deterministic.
+pub fn read_session_identity(install_root: &Path) -> Option<serde_json::Value> {
     let configs = install_root.join("configs");
     let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in std::fs::read_dir(&configs).ok()?.flatten() {
@@ -79,9 +80,6 @@ pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
-        // Tie-break equal mtimes by path: session_<UTC> filenames sort
-        // chronologically, so selection stays deterministic regardless of
-        // read_dir order.
         let candidate = (mtime, entry.path());
         if newest.as_ref().is_none_or(|best| candidate > *best) {
             newest = Some(candidate);
@@ -90,7 +88,13 @@ pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
     let (_, path) = newest?;
     let body = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let identity = json.get("identity")?;
+    json.get("identity").cloned()
+}
+
+/// Read `(device_id, api_key, api_url)` from the newest `session_*.json` under
+/// `<install_root>/configs`. `None` when no session exists or a field is missing.
+pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
+    let identity = read_session_identity(install_root)?;
     let device_id = identity.get("device_id")?.as_str()?.to_string();
     let api_key = identity.get("api_key")?.as_str()?.to_string();
     let api_url = identity.get("api_url")?.as_str()?.to_string();
@@ -208,6 +212,35 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn read_session_identity_returns_newest_identity_block() {
+        let dir = std::env::temp_dir().join(format!("locai-session-id-{}", std::process::id()));
+        let configs = dir.join("configs");
+        fs::create_dir_all(&configs).unwrap();
+        fs::write(
+            configs.join("session_20260101T000000Z.json"),
+            r#"{"identity":{"device_id":"d","device_name":"My Box"}}"#,
+        )
+        .unwrap();
+        let identity = read_session_identity(&dir).expect("identity");
+        assert_eq!(
+            identity.get("device_id").and_then(|v| v.as_str()),
+            Some("d")
+        );
+        assert_eq!(
+            identity.get("device_name").and_then(|v| v.as_str()),
+            Some("My Box")
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_session_identity_none_when_no_configs_dir() {
+        let dir =
+            std::env::temp_dir().join(format!("locai-session-id-empty-{}", std::process::id()));
+        assert!(read_session_identity(&dir).is_none());
+    }
 
     #[test]
     fn read_identity_pulls_newest_session() {

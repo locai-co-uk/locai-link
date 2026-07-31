@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use locai_link_shared::{
-    deregister_device, installed_version, read_boot_json, read_identity,
+    deregister_device, installed_version, read_boot_json, read_identity, read_session_identity,
     supported_model_types as shared_supported_model_types, BootConfig,
 };
 
@@ -176,44 +176,10 @@ fn check_install(install_root: String) -> CheckInstallResult {
     }
 }
 
-/// Pull `(device_id, device_name)` from the newest `session_*.json`, best-effort.
+/// `(device_id, device_name)` from the newest session config, best-effort.
 fn read_registered_identity(install_root: &Path) -> (Option<String>, Option<String>) {
-    let configs = install_root.join("configs");
-    let entries = match std::fs::read_dir(&configs) {
-        Ok(e) => e,
-        Err(_) => return (None, None),
-    };
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("session_") || !name.ends_with(".json") {
-            continue;
-        }
-        let mtime = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
-            newest = Some((mtime, entry.path()));
-        }
-    }
-    let path = match newest {
-        Some((_, p)) => p,
-        None => return (None, None),
-    };
-    let body = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return (None, None),
-    };
-    let json: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(_) => return (None, None),
-    };
-    let identity = match json.get("identity") {
-        Some(v) => v,
-        None => return (None, None),
+    let Some(identity) = read_session_identity(install_root) else {
+        return (None, None);
     };
     let id = identity
         .get("device_id")
