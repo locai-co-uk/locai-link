@@ -113,6 +113,12 @@
   // Monotonic poll counter; a response is applied only if it's still the latest,
   // so an out-of-order poll can't clobber the OTA lock state.
   let pollSeq = 0;
+  // Bumped on every OTA-lock transition (trigger/infer/clear). A poll captures
+  // this when issued; if it changed by the time the poll returns, the poll's
+  // view of update_in_flight predates the transition and must not touch the
+  // lock — else a poll that read "not in flight" just before the user hit
+  // Update could clear the lock for a cycle and re-enable the controls.
+  let updateGen = 0;
 
   // Available-models catalog: fetched from Control (device-key authed) on
   // demand, not via the /healthz poll. `requested` tracks just-tapped
@@ -212,9 +218,14 @@
     // Discard out-of-order responses: if a newer poll started while this one was
     // in flight, its result is stale and must not clobber the OTA lock state.
     const seq = ++pollSeq;
+    const gen = updateGen;
     try {
       const poll = await invoke<StatusPoll>("poll_status");
       if (seq !== pollSeq || !prefs) return;
+      // A lock transition (Update click, tray trigger, or infer) while this poll
+      // was in flight makes its update_in_flight view stale: apply everything
+      // else, but don't let it touch the OTA-lock state.
+      const lockCurrent = gen === updateGen;
       const prevStatus = prefs.agent.status;
       const prevUpdateAvail = updateAvailable;
       prefs.agent.status = poll.status;
@@ -226,7 +237,7 @@
       models = poll.models;
       deployments = poll.deployments;
       updateAvailable = poll.update_available;
-      updateInFlight = poll.update_in_flight;
+      if (lockCurrent) updateInFlight = poll.update_in_flight;
       // Keep the last-known latest when the probe is Down (returns null).
       latestVersion = poll.latest_version ?? latestVersion;
 
@@ -259,28 +270,32 @@
         if (changed) requested = next;
       }
 
-      // Infer a tray-triggered update: agent was up with an update available
-      // and just dropped, and it wasn't a manual stop/restart.
-      if (
-        prevStatus === "up" &&
-        poll.status === "down" &&
-        prevUpdateAvail &&
-        !suppressUpdateInfer
-      ) {
-        updateStarted = true;
-      }
-      if (updateStarted && poll.status === "down") updateSawDown = true;
-      // Once it's back up after dropping, the swap is done: success hides the
-      // banner (update_available now false); failure re-shows it to retry.
-      if (updateStarted && updateSawDown && poll.status === "up") {
-        updateStarted = false;
-        updateSawDown = false;
-      }
-      // Authoritative flag wins when the agent is reachable: a fresh "up and not
-      // in flight" clears any stale client-side inference so the lock can't stick.
-      if (poll.status === "up" && !poll.update_in_flight) {
-        updateStarted = false;
-        updateSawDown = false;
+      if (lockCurrent) {
+        // Infer a tray-triggered update: agent was up with an update available
+        // and just dropped, and it wasn't a manual stop/restart.
+        if (
+          prevStatus === "up" &&
+          poll.status === "down" &&
+          prevUpdateAvail &&
+          !suppressUpdateInfer
+        ) {
+          updateStarted = true;
+          updateGen++;
+        }
+        if (updateStarted && poll.status === "down") updateSawDown = true;
+        // Once it's back up after dropping, the swap is done: success hides the
+        // banner (update_available now false); failure re-shows it to retry.
+        if (updateStarted && updateSawDown && poll.status === "up") {
+          updateStarted = false;
+          updateSawDown = false;
+        }
+        // Authoritative flag wins when the agent is reachable: a fresh "up and
+        // not in flight" clears any stale client-side inference so the lock
+        // can't stick.
+        if (poll.status === "up" && !poll.update_in_flight) {
+          updateStarted = false;
+          updateSawDown = false;
+        }
       }
       hasPolled = true;
     } catch {
@@ -511,6 +526,7 @@
         // briefly, so surface an in-progress note rather than an error.
         updateStarted = true;
         updateSawDown = false;
+        updateGen++;
       } catch (e) {
         console.warn("install_update:", e);
       }
