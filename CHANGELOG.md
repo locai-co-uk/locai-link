@@ -6,6 +6,33 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [1.2.2]
+
+- The companion now shows an "Updating…" state during an app update: the
+  runtime and model controls are locked while the update applies and the app
+  restarts, so an update no longer interrupts a mid-action user.
+
+### Changed: lock the companion UI during an OTA update (`crates/companion`)
+
+- The agent surfaces an authoritative `update_in_flight` flag through the
+  loopback status poll, set when an update is triggered from either the tray
+  "Update" item or the Preferences "Update now" button.
+- Preferences reflects it: the status pill shows "Updating…", the service and
+  run-at-login controls hide, and model actions (serve / stop / remove / cancel
+  / download) are disabled until the companion relaunches on the new build.
+
+### Internal: contract hardening, no behaviour change (`src/link`, `crates/launcher`, `crates/setup_assistant`)
+
+- Hot-reconfigure goes through a public `AgentRuntime.apply_config()` and
+  `StateManager.snapshot()/restore()` instead of mutating `agent_config`,
+  `pipeline_configs`, and `StateManager._cache` directly.
+- Added a round-trip drift test for the `BootConfig` struct duplicated between
+  the launcher and the shared crate, so the two can't diverge silently.
+- Setup Assistant parses Control's device-flow and token responses through typed
+  structs instead of `serde_json::Value` field-plucking.
+- The Zenoh transport's `args` are parsed into a typed `TransportArgs` model at
+  the consumer instead of stringly-typed `dict.get` reads.
+
 ## [1.2.1]
 
 - The one-line installer now accepts `--fleet-key`, so a device can enroll into

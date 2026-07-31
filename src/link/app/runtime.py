@@ -35,7 +35,7 @@ from link.config.commands import (
 from link.config.models import AgentConfig, GenericConfig, PipelineConfig
 from link.config.templating import resolve_templates
 from link.infra.health_server import HealthServer, HealthState
-from link.utils.logger import LinkReporter
+from link.utils.logger import LinkReporter, rebuild_handlers
 from link.utils.version import resolve_agent_version
 
 if TYPE_CHECKING:
@@ -404,6 +404,49 @@ class AgentRuntime:
             self._shutdown()
             self.status_logger.report_lifecycle("offline")
 
+    def apply_config(self, target_cfg: AgentConfig, *, previous_cfg: AgentConfig) -> None:
+        """Hot-swap the running config to `target_cfg`: diff/stop/start pipelines
+        relative to `previous_cfg`, then rebuild handlers and publish the new
+        agent_config/pipeline_configs.
+
+        Pipeline start/stop acquire `_pipeline_ops_lock` then `self.lock`, so the
+        swap must run OUTSIDE `self.lock` — calling it while holding `self.lock`
+        inverts the lock order and can deadlock. State persistence is the
+        caller's job, so this one method drives both apply and revert.
+        """
+        # Hold _pipeline_ops_lock across the whole swap so a concurrent deploy or
+        # pipeline update can't commit into the gap before the final replace
+        # (RLock: the nested start/stop calls reacquire it fine).
+        with self._pipeline_ops_lock:
+            self._diff_and_swap_pipelines(previous_cfg, target_cfg)
+            with self.lock:
+                rebuild_handlers(target_cfg.logging, target_cfg.reporting, self.zenoh_session)
+                self.agent_config = target_cfg
+                self.pipeline_configs = {p.id: p for p in target_cfg.pipelines}
+
+    def _diff_and_swap_pipelines(self, old: AgentConfig, new: AgentConfig) -> None:
+        """Stop removed pipelines and (re)start active ones. Raises if a pipeline
+        that should be active fails to start, so `apply_config`'s caller reverts
+        instead of leaving a half-applied config reported as success.
+        """
+        old_ids = {p.id for p in old.pipelines}
+        new_ids = {p.id for p in new.pipelines}
+
+        # Stop pipelines that were removed.
+        for pid in old_ids - new_ids:
+            if not self._stop_pipeline(pid):
+                raise RuntimeError(f"pipeline '{pid}' failed to stop")
+
+        # Start active pipelines (no-ops on unchanged ones); stop now-inactive
+        # ones. Inactive configs are published by apply_config's final assignment.
+        for p in new.pipelines:
+            if p.active:
+                if not self._start_pipeline(p.id, p.model_dump()):
+                    raise RuntimeError(f"pipeline '{p.id}' failed to start")
+            elif p.id in self.pipelines:
+                if not self._stop_pipeline(p.id):
+                    raise RuntimeError(f"pipeline '{p.id}' failed to stop")
+
     def _start_pipeline(self, pipeline_id: str, config_data: dict[str, Any] | None = None) -> bool:
         """Starts (or restarts) a pipeline.
 
@@ -729,15 +772,17 @@ class AgentRuntime:
         """
         self.status_logger.report_deployment_progress(cmd.pipeline_id, "configuring", 95.0, 0, 0)
         self.health_state.set_deployment_progress(cmd.pipeline_id, "configuring", 95.0, cmd.model_name)
-        with self.lock:
-            if cancel_event.is_set():
-                return False
-            self.pipeline_configs[cmd.pipeline_id] = cmd.config
-            if self.state_manager:
-                try:
-                    self.state_manager.update_pipeline_config(cmd.config)
-                except Exception as e:
-                    logger.warning(f"Failed to persist state: {e}")
+        # Serialise the commit against a concurrent reconfigure (apply_config).
+        with self._pipeline_ops_lock:
+            with self.lock:
+                if cancel_event.is_set():
+                    return False
+                self.pipeline_configs[cmd.pipeline_id] = cmd.config
+                if self.state_manager:
+                    try:
+                        self.state_manager.update_pipeline_config(cmd.config)
+                    except Exception as e:
+                        logger.warning(f"Failed to persist state: {e}")
         return True
 
     def _attach_response(self, pipeline_id: str, command_id: str, response: requests.Response | None) -> None:
@@ -820,21 +865,24 @@ class AgentRuntime:
             self.status_logger.report_command(cmd.id, "failed", "Pipeline id mismatch")
             return
 
-        with self.lock:
-            is_running = pipeline_id in self.pipelines
-
-        if is_running:
-            # _start_pipeline stops, re-creates, and persists in one step.
-            success = self._start_pipeline(pipeline_id, cmd.config.model_dump())
-        else:
+        # Hold _pipeline_ops_lock so the running-state check and the resulting
+        # start/commit stay atomic against a concurrent reconfigure.
+        with self._pipeline_ops_lock:
             with self.lock:
-                self.pipeline_configs[pipeline_id] = cmd.config
-                if self.state_manager:
-                    try:
-                        self.state_manager.update_pipeline_config(cmd.config)
-                    except Exception as e:
-                        logger.warning(f"Failed to persist state: {e}")
-            success = True
+                is_running = pipeline_id in self.pipelines
+
+            if is_running:
+                # _start_pipeline stops, re-creates, and persists in one step.
+                success = self._start_pipeline(pipeline_id, cmd.config.model_dump())
+            else:
+                with self.lock:
+                    self.pipeline_configs[pipeline_id] = cmd.config
+                    if self.state_manager:
+                        try:
+                            self.state_manager.update_pipeline_config(cmd.config)
+                        except Exception as e:
+                            logger.warning(f"Failed to persist state: {e}")
+                success = True
 
         if success:
             self.status_logger.report_command(cmd.id, "completed", f"Pipeline '{pipeline_id}' updated")

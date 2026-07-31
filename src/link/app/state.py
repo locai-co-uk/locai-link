@@ -1,5 +1,6 @@
 """Session state persistence — timestamped JSON files for crash recovery."""
 
+import copy
 import glob
 import json
 import logging
@@ -131,6 +132,21 @@ class StateManager:
                 p["active"] = False
 
         self._cache = new_data
+        self._flush()
+
+    def snapshot(self) -> dict[str, Any] | None:
+        """Deep copy of the persisted state, for a later restore(). Deep so a
+        live mutation of the cache (e.g. nested pipelines) can't corrupt the
+        frozen snapshot before restore() runs. None when nothing is loaded, so
+        restore(None) is a safe no-op."""
+        return copy.deepcopy(self._cache) if self._cache is not None else None
+
+    def restore(self, snapshot: dict[str, Any] | None) -> None:
+        """Restore state captured by snapshot() and flush it to disk. A None
+        snapshot leaves the current state untouched."""
+        if snapshot is None:
+            return
+        self._cache = snapshot
         self._flush()
 
     def update_pipeline_config(self, pipeline_config: PipelineConfig):

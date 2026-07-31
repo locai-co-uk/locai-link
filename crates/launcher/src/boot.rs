@@ -11,11 +11,11 @@
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const BOOT_JSON: &str = "boot.json";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     // host_app + channel are documented schema fields, unused at runtime today —
     // present so partner installers write the full payload now and we can enable
@@ -202,6 +202,33 @@ mod tests {
             b.asset_basename().starts_with("locai-link-base-"),
             "got: {}",
             b.asset_basename()
+        );
+    }
+
+    // Guards the two duplicated BootConfig copies against drift. Identical field
+    // values must serialize identically: a field added to only one side fails to
+    // compile here (the struct literals are exhaustive), and a serde-attr change
+    // fails the JSON comparison. Mirror: shared/src/install.rs::BootConfig.
+    #[test]
+    fn boot_config_schema_matches_shared() {
+        let launcher = BootConfig {
+            host_app: "SafeChat".into(),
+            plugin_set: vec!["llm".into(), "stt".into()],
+            channel: "beta".into(),
+            asset_repo: "locai-co-uk/locai-link".into(),
+            asset_url: Some("https://example.test/release.tar.gz".into()),
+        };
+        let shared = locai_link_shared::install::BootConfig {
+            host_app: "SafeChat".into(),
+            plugin_set: vec!["llm".into(), "stt".into()],
+            channel: "beta".into(),
+            asset_repo: "locai-co-uk/locai-link".into(),
+            asset_url: Some("https://example.test/release.tar.gz".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&launcher).unwrap(),
+            serde_json::to_value(&shared).unwrap(),
+            "launcher and shared BootConfig serialize differently — schemas drifted",
         );
     }
 }

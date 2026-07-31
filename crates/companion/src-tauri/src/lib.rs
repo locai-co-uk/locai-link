@@ -9,7 +9,7 @@ mod preferences;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use locai_link_shared::{
     agent_health, list_models, toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
@@ -118,16 +118,26 @@ impl From<&HealthStatus> for TrayState {
 /// pick start-vs-stop without an extra GET on the click path.
 /// `in_flight` blocks re-clicks on a pipeline while its Serve/Stop HTTP is
 /// outstanding — a rapid stop→start clobbered the runtime otherwise.
-struct MenuHandles {
+pub(crate) struct MenuHandles {
     status_item: MenuItem<Wry>,
     models: Vec<ModelInfo>,
     in_flight: std::collections::HashSet<String>,
-    /// Blocks repeat "Update" clicks while a swap is in flight. Held from the
-    /// click until poll_forever sees the update finish (or on POST failure).
-    update_in_flight: bool,
+    /// Blocks repeat "Update" clicks while a swap is in flight, and drives the
+    /// Preferences "updating, will restart" lock. Held from the trigger until
+    /// poll_forever sees the update finish (or on POST failure); resets
+    /// naturally when the companion relaunches on the new build.
+    pub(crate) update_in_flight: bool,
+    /// When `update_in_flight` was set, so poll_forever can expire a stuck lock
+    /// if the update fails before the runtime restarts (no Down transition).
+    pub(crate) update_started_at: Option<Instant>,
 }
 
-type SharedHandles = Arc<Mutex<MenuHandles>>;
+/// Cap on how long the OTA lock can stay set while the agent is still up. If an
+/// update is flagged but never restarts the runtime (e.g. it fails before the
+/// re-exec), release the lock so Preferences doesn't stay disabled forever.
+const UPDATE_LOCK_EXPIRY: Duration = Duration::from_secs(300);
+
+pub(crate) type SharedHandles = Arc<Mutex<MenuHandles>>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -218,6 +228,7 @@ pub fn run() {
                 models: Vec::new(),
                 in_flight: std::collections::HashSet::new(),
                 update_in_flight: false,
+                update_started_at: None,
             }));
             app.manage(handles.clone());
             let app_handle = app.handle().clone();
@@ -561,6 +572,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     return;
                 }
                 guard.update_in_flight = true;
+                guard.update_started_at = Some(Instant::now());
             }
             // Off the menu-event thread: the loopback POST shouldn't block the
             // tray. The next poll picks up the "Updating" state; poll_forever
@@ -572,6 +584,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     // Failed before the agent went down — release so a retry works.
                     if let Ok(mut g) = shared.lock() {
                         g.update_in_flight = false;
+                        g.update_started_at = None;
                     }
                     // Otherwise the click looks like it did nothing — tell the user.
                     let dialog_handle = app_handle.clone();
@@ -733,6 +746,17 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         if was_updating && !updating {
             if let Ok(mut h) = handles.lock() {
                 h.update_in_flight = false;
+                h.update_started_at = None;
+            }
+        }
+        // Time-based backstop, independent of health: release a stuck lock past
+        // the cap even if the runtime never came back up (or we missed it).
+        if let Ok(mut h) = handles.lock() {
+            if h.update_started_at
+                .is_some_and(|t| t.elapsed() > UPDATE_LOCK_EXPIRY)
+            {
+                h.update_in_flight = false;
+                h.update_started_at = None;
             }
         }
         prev_up_with_update = is_up && has_update;

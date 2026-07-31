@@ -31,6 +31,9 @@ flate2 = { version = "1.0", default-features = false, features = ["rust_backend"
 
 [dev-dependencies]
 tempfile = "3.10"
+# Test-only: lets the BootConfig drift test compare this crate's copy against
+# the shared crate's, so the two can't diverge silently. No runtime/binary dep.
+locai-link-shared = { path = "../shared" }
 # Local HTTP stub for bootstrap integration tests (download / verify /
 # extract end-to-end against a fake release on loopback).
 mockito = "1.4"

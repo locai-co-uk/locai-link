@@ -70,6 +70,7 @@
     deployments: DeploymentProgress[];
     update_available: boolean;
     latest_version: string | null;
+    update_in_flight: boolean;
   };
 
   type AvailableModel = {
@@ -104,6 +105,20 @@
   // Suppress the tray-trigger inference during a user-initiated stop/restart
   // so a manual Stop while an update is available isn't mislabelled "Updating".
   let suppressUpdateInfer = $state(false);
+  // Authoritative "an OTA swap is applying" flag from the agent, set on trigger
+  // by the tray item or the Update button. OR'd with the client-side inference
+  // so the window is covered even while the health server is momentarily down.
+  let updateInFlight = $state(false);
+  const updating = $derived(updateStarted || updateInFlight);
+  // Monotonic poll counter; a response is applied only if it's still the latest,
+  // so an out-of-order poll can't clobber the OTA lock state.
+  let pollSeq = 0;
+  // Bumped on every OTA-lock transition (trigger/infer/clear). A poll captures
+  // this when issued; if it changed by the time the poll returns, the poll's
+  // view of update_in_flight predates the transition and must not touch the
+  // lock — else a poll that read "not in flight" just before the user hit
+  // Update could clear the lock for a cycle and re-enable the controls.
+  let updateGen = 0;
 
   // Available-models catalog: fetched from Control (device-key authed) on
   // demand, not via the /healthz poll. `requested` tracks just-tapped
@@ -200,9 +215,17 @@
     // Only poll while the window is actually visible — hidden
     // windows keep JS timers alive but there's no user watching.
     if (document.hidden) return;
+    // Discard out-of-order responses: if a newer poll started while this one was
+    // in flight, its result is stale and must not clobber the OTA lock state.
+    const seq = ++pollSeq;
+    const gen = updateGen;
     try {
       const poll = await invoke<StatusPoll>("poll_status");
-      if (!prefs) return;
+      if (seq !== pollSeq || !prefs) return;
+      // A lock transition (Update click, tray trigger, or infer) while this poll
+      // was in flight makes its update_in_flight view stale: apply everything
+      // else, but don't let it touch the OTA-lock state.
+      const lockCurrent = gen === updateGen;
       const prevStatus = prefs.agent.status;
       const prevUpdateAvail = updateAvailable;
       prefs.agent.status = poll.status;
@@ -214,6 +237,7 @@
       models = poll.models;
       deployments = poll.deployments;
       updateAvailable = poll.update_available;
+      if (lockCurrent) updateInFlight = poll.update_in_flight;
       // Keep the last-known latest when the probe is Down (returns null).
       latestVersion = poll.latest_version ?? latestVersion;
 
@@ -246,22 +270,33 @@
         if (changed) requested = next;
       }
 
-      // Infer a tray-triggered update: agent was up with an update available
-      // and just dropped, and it wasn't a manual stop/restart.
-      if (
-        prevStatus === "up" &&
-        poll.status === "down" &&
-        prevUpdateAvail &&
-        !suppressUpdateInfer
-      ) {
-        updateStarted = true;
-      }
-      if (updateStarted && poll.status === "down") updateSawDown = true;
-      // Once it's back up after dropping, the swap is done: success hides the
-      // banner (update_available now false); failure re-shows it to retry.
-      if (updateStarted && updateSawDown && poll.status === "up") {
-        updateStarted = false;
-        updateSawDown = false;
+      if (lockCurrent) {
+        // Infer a tray-triggered update: agent was up with an update available
+        // and just dropped, and it wasn't a manual stop/restart.
+        if (
+          prevStatus === "up" &&
+          poll.status === "down" &&
+          prevUpdateAvail &&
+          !suppressUpdateInfer
+        ) {
+          updateStarted = true;
+          updateGen++;
+        }
+        if (updateStarted && poll.status === "down") updateSawDown = true;
+        // Once it's back up after dropping, the swap is done: success hides the
+        // banner (update_available now false); failure re-shows it to retry.
+        if (updateStarted && updateSawDown && poll.status === "up") {
+          updateStarted = false;
+          updateSawDown = false;
+        }
+        // Authoritative flag wins: once the agent reports no swap in flight,
+        // clear the client-side inference even if it's still down. A failed
+        // relaunch releases the flag while down (poll_forever gives up after
+        // MAX_UPDATE_DOWN_POLLS), so gating on "up" would stick the lock.
+        if (!poll.update_in_flight) {
+          updateStarted = false;
+          updateSawDown = false;
+        }
       }
       hasPolled = true;
     } catch {
@@ -492,6 +527,7 @@
         // briefly, so surface an in-progress note rather than an error.
         updateStarted = true;
         updateSawDown = false;
+        updateGen++;
       } catch (e) {
         console.warn("install_update:", e);
       }
@@ -648,7 +684,7 @@
               <span class="dot"></span>
               Checking…
             </span>
-          {:else if updateStarted}
+          {:else if updating}
             <span class="pill pill--updating">
               <span class="dot"></span>
               Updating…
@@ -659,19 +695,19 @@
               {prefs.agent.status === "up" ? "Running" : "Stopped"}
             </span>
           {/if}
-          {#if !updateStarted && prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
+          {#if !updating && prefs.agent.status === "up" && prefs.agent.uptime_seconds !== null}
             <span class="uptime">· {formatUptime(prefs.agent.uptime_seconds)}</span>
           {/if}
         </span>
       </div>
-      {#if updateStarted || (updateAvailable && prefs.agent.status === "up")}
+      {#if updating || (updateAvailable && prefs.agent.status === "up")}
         <div class="update-banner">
           <div class="update-copy">
             <span class="update-title">
-              {updateStarted ? "Updating…" : `Update available${latestVersion ? ` · v${latestVersion}` : ""}`}
+              {updating ? "Updating…" : `Update available${latestVersion ? ` · v${latestVersion}` : ""}`}
             </span>
             <span class="update-hint">
-              {updateStarted
+              {updating
                 ? "Locai Link is installing the update and will restart automatically."
                 : "Locai Link will download the new version and restart automatically."}
             </span>
@@ -679,13 +715,13 @@
           <button
             class="btn btn--primary btn--sm"
             onclick={installUpdate}
-            disabled={updateStarted || pending.has("update")}
+            disabled={updating || pending.has("update")}
           >
-            {updateStarted ? "Installing…" : "Update now"}
+            {updating ? "Installing…" : "Update now"}
           </button>
         </div>
       {/if}
-      {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updateStarted}
+      {#if (prefs.platform === "macos" || prefs.platform === "linux") && !updating}
         <!-- Service management wired for macOS (launchctl) + Linux
              (systemctl --user); hidden on Windows (no backend) and mid-update
              (the agent bounces on its own). -->
@@ -787,7 +823,7 @@
                     <button
                       class="btn btn--ghost btn--sm"
                       onclick={() => cancelDeploy(row.pipeline_id)}
-                      disabled={pending.has(`cancel:${row.pipeline_id}`)}
+                      disabled={updating || pending.has(`cancel:${row.pipeline_id}`)}
                       aria-label={`Cancel download of ${row.alias}`}
                     >
                       Cancel
@@ -798,14 +834,14 @@
                   <button
                     class="btn btn--ghost btn--sm"
                     onclick={() => toggleServing(row)}
-                    disabled={pending.has(`serve:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`serve:${row.pipeline_id}`)}
                   >
                     Stop
                   </button>
                   <button
                     class="btn btn--ghost btn--sm"
                     onclick={() => uninstallModel(row)}
-                    disabled={pending.has(`uninstall:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`uninstall:${row.pipeline_id}`)}
                     aria-label={`Remove ${row.alias}`}
                   >
                     Remove
@@ -815,14 +851,14 @@
                   <button
                     class="btn btn--primary btn--sm"
                     onclick={() => toggleServing(row)}
-                    disabled={pending.has(`serve:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`serve:${row.pipeline_id}`)}
                   >
                     Serve
                   </button>
                   <button
                     class="btn btn--ghost btn--sm"
                     onclick={() => uninstallModel(row)}
-                    disabled={pending.has(`uninstall:${row.pipeline_id}`)}
+                    disabled={updating || pending.has(`uninstall:${row.pipeline_id}`)}
                     aria-label={`Remove ${row.alias}`}
                   >
                     Remove
@@ -873,7 +909,7 @@
                   <button
                     class="btn btn--primary btn--sm"
                     onclick={() => requestDeploy(model)}
-                    disabled={pending.has(`deploy:${model.model_id}`) || prefs.agent.status === "down"}
+                    disabled={updating || pending.has(`deploy:${model.model_id}`) || prefs.agent.status === "down"}
                     title={prefs.agent.status === "down" ? "Start Locai Link to download models" : ""}
                   >
                     Download

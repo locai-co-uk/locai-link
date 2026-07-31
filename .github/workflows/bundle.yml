@@ -81,6 +81,8 @@ jobs:
   bundle-cross:
     name: Bundle on ${{ matrix.os }}
     needs: [bundle-linux]
+    # Dependabot PRs validate the Linux bundle only; skip the macOS/Windows legs.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

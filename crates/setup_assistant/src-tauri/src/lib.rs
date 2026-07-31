@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use locai_link_shared::{
@@ -239,6 +239,48 @@ pub struct DeviceCodeStart {
     pub expires_in: u64,
 }
 
+/// Control's `POST /auth/device` response. Typed so a shape/format change is a
+/// deserialize error instead of a silently dropped field.
+#[derive(Deserialize)]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    #[serde(default = "default_poll_interval")]
+    interval: u64,
+    #[serde(default = "default_expires_in")]
+    expires_in: u64,
+}
+
+fn default_poll_interval() -> u64 {
+    5
+}
+
+fn default_expires_in() -> u64 {
+    600
+}
+
+/// Control's `POST /auth/device/token` success response.
+#[derive(Deserialize)]
+struct TokenResponse {
+    #[serde(default)]
+    access_token: String,
+    refresh_token: Option<String>,
+    #[serde(default)]
+    user: TokenUser,
+}
+
+#[derive(Deserialize, Default)]
+struct TokenUser {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    username: String,
+}
+
 /// Every RFC §3.5 error case is a distinct variant so the front-end
 /// doesn't inspect strings.
 #[derive(Serialize)]
@@ -307,41 +349,23 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
             Err(e) => return Err(describe_ureq_err("device code request", e)),
         };
 
-        let body: serde_json::Value = resp
+        let body: DeviceCodeResponse = resp
             .into_json()
             .map_err(|e| format!("device code response malformed: {e}"))?;
 
-        let device_code = body
-            .get("device_code")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "device_code missing from response".to_string())?
-            .to_string();
-        let user_code = body
-            .get("user_code")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "user_code missing from response".to_string())?
-            .to_string();
-        let verification_uri = body
-            .get("verification_uri")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "verification_uri missing from response".to_string())?
-            .to_string();
         let verification_uri_complete = body
-            .get("verification_uri_complete")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&verification_uri)
-            .to_string();
-        let interval = body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5);
-        let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(600);
+            .verification_uri_complete
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| body.verification_uri.clone());
 
         Ok((
-            device_code,
+            body.device_code,
             DeviceCodeStart {
-                user_code,
-                verification_uri,
+                user_code: body.user_code,
+                verification_uri: body.verification_uri,
                 verification_uri_complete,
-                interval,
-                expires_in,
+                interval: body.interval,
+                expires_in: body.expires_in,
             },
         ))
     })
@@ -385,7 +409,7 @@ fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
         .send_json(payload)
     {
         Ok(resp) => {
-            let body: serde_json::Value = match resp.into_json() {
+            let body: TokenResponse = match resp.into_json() {
                 Ok(v) => v,
                 Err(e) => {
                     return SignInPollResult::Error {
@@ -395,34 +419,16 @@ fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
             };
             // Reject empty/missing access_token: storing Some("") would let
             // require_token() hand out an empty bearer downstream.
-            let access_token = match body.get("access_token").and_then(|v| v.as_str()) {
-                Some(t) if !t.is_empty() => t.to_string(),
-                _ => {
-                    return SignInPollResult::Error {
-                        message: "token response missing access_token".to_string(),
-                    }
-                }
-            };
-            let refresh_token = body
-                .get("refresh_token")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let user = body.get("user").cloned().unwrap_or_default();
-            let user_id = user
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let email = user
-                .get("email")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let username = user
-                .get("username")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            if body.access_token.is_empty() {
+                return SignInPollResult::Error {
+                    message: "token response missing access_token".to_string(),
+                };
+            }
+            let access_token = body.access_token;
+            let refresh_token = body.refresh_token;
+            let user_id = body.user.id;
+            let email = body.user.email;
+            let username = body.user.username;
 
             if let Some(session) = state.inner.lock().expect("SignInState poisoned").as_mut() {
                 session.access_token = Some(access_token);
@@ -480,14 +486,9 @@ pub struct RegisteredDevice {
 fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String> {
     let token = require_token(&state)?;
 
-    // macOS GUI installs report "mac_app"; other platforms keep the prior
-    // "onboarding_wizard" (already an accepted value). Control must accept
-    // "mac_app" in its registration-source allow-list before this ships, or key
-    // mint returns 422 on macOS. Do not release ahead of that.
-    let registration_source = if cfg!(target_os = "macos") { "mac_app" } else { "onboarding_wizard" };
     let mint_body = serde_json::json!({
         "ttl_hours": 1,
-        "registration_source": registration_source,
+        "registration_source": "onboarding_wizard",
     });
     let key_resp = http_agent()
         .post(&format!("{CONTROL_API_URL}/devices/registration-keys"))
