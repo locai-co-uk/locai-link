@@ -204,7 +204,7 @@ pub fn run() {
             // this off the Dock and out of Cmd-Tab; tauri.conf's `visible: false`
             // isn't enough on macOS.
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             // Backgrounded so we don't block the tray icon appearing.
             #[cfg(target_os = "macos")]

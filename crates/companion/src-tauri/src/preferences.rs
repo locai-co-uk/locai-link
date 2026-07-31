@@ -513,7 +513,7 @@ fn user_launchagent_plist(label: &str) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn plistbuddy_set_run_at_load(plist: &PathBuf, value: bool) -> Result<(), String> {
+fn plistbuddy_set_run_at_load(plist: &std::path::Path, value: bool) -> Result<(), String> {
     if !plist.exists() {
         // Preferences opened before SA has ever run — silently succeed;
         // SA will pick up the toggle on Finish.
