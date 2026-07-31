@@ -414,11 +414,15 @@ class AgentRuntime:
         inverts the lock order and can deadlock. State persistence is the
         caller's job, so this one method drives both apply and revert.
         """
-        self._diff_and_swap_pipelines(previous_cfg, target_cfg)
-        with self.lock:
-            rebuild_handlers(target_cfg.logging, target_cfg.reporting, self.zenoh_session)
-            self.agent_config = target_cfg
-            self.pipeline_configs = {p.id: p for p in target_cfg.pipelines}
+        # Hold _pipeline_ops_lock across the whole swap so a concurrent deploy or
+        # pipeline update can't commit into the gap before the final replace
+        # (RLock: the nested start/stop calls reacquire it fine).
+        with self._pipeline_ops_lock:
+            self._diff_and_swap_pipelines(previous_cfg, target_cfg)
+            with self.lock:
+                rebuild_handlers(target_cfg.logging, target_cfg.reporting, self.zenoh_session)
+                self.agent_config = target_cfg
+                self.pipeline_configs = {p.id: p for p in target_cfg.pipelines}
 
     def _diff_and_swap_pipelines(self, old: AgentConfig, new: AgentConfig) -> None:
         """Stop removed pipelines and (re)start active ones. Raises if a pipeline
@@ -768,15 +772,17 @@ class AgentRuntime:
         """
         self.status_logger.report_deployment_progress(cmd.pipeline_id, "configuring", 95.0, 0, 0)
         self.health_state.set_deployment_progress(cmd.pipeline_id, "configuring", 95.0, cmd.model_name)
-        with self.lock:
-            if cancel_event.is_set():
-                return False
-            self.pipeline_configs[cmd.pipeline_id] = cmd.config
-            if self.state_manager:
-                try:
-                    self.state_manager.update_pipeline_config(cmd.config)
-                except Exception as e:
-                    logger.warning(f"Failed to persist state: {e}")
+        # Serialise the commit against a concurrent reconfigure (apply_config).
+        with self._pipeline_ops_lock:
+            with self.lock:
+                if cancel_event.is_set():
+                    return False
+                self.pipeline_configs[cmd.pipeline_id] = cmd.config
+                if self.state_manager:
+                    try:
+                        self.state_manager.update_pipeline_config(cmd.config)
+                    except Exception as e:
+                        logger.warning(f"Failed to persist state: {e}")
         return True
 
     def _attach_response(self, pipeline_id: str, command_id: str, response: requests.Response | None) -> None:
@@ -859,21 +865,24 @@ class AgentRuntime:
             self.status_logger.report_command(cmd.id, "failed", "Pipeline id mismatch")
             return
 
-        with self.lock:
-            is_running = pipeline_id in self.pipelines
-
-        if is_running:
-            # _start_pipeline stops, re-creates, and persists in one step.
-            success = self._start_pipeline(pipeline_id, cmd.config.model_dump())
-        else:
+        # Hold _pipeline_ops_lock so the running-state check and the resulting
+        # start/commit stay atomic against a concurrent reconfigure.
+        with self._pipeline_ops_lock:
             with self.lock:
-                self.pipeline_configs[pipeline_id] = cmd.config
-                if self.state_manager:
-                    try:
-                        self.state_manager.update_pipeline_config(cmd.config)
-                    except Exception as e:
-                        logger.warning(f"Failed to persist state: {e}")
-            success = True
+                is_running = pipeline_id in self.pipelines
+
+            if is_running:
+                # _start_pipeline stops, re-creates, and persists in one step.
+                success = self._start_pipeline(pipeline_id, cmd.config.model_dump())
+            else:
+                with self.lock:
+                    self.pipeline_configs[pipeline_id] = cmd.config
+                    if self.state_manager:
+                        try:
+                            self.state_manager.update_pipeline_config(cmd.config)
+                        except Exception as e:
+                            logger.warning(f"Failed to persist state: {e}")
+                success = True
 
         if success:
             self.status_logger.report_command(cmd.id, "completed", f"Pipeline '{pipeline_id}' updated")
