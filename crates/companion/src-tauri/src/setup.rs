@@ -1206,7 +1206,7 @@ pub fn finish_setup(app: tauri::AppHandle) {
 /// "already set up" splash's explicit "Open Preferences" action.
 #[tauri::command]
 pub fn open_preferences_window(app: tauri::AppHandle) {
-    crate::show_preferences_window(&app);
+    crate::tray::show_preferences_window(&app);
     if let Some(setup) = app.get_webview_window("setup") {
         let _ = setup.hide();
     }

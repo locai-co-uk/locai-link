@@ -19,26 +19,42 @@ name = "companion_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+# Only invoked in `ui` builds (see build.rs); harmless as a build dep otherwise.
 tauri-build = { version = "2", features = [] }
 
+[features]
+# `ui` = the desktop app (tray + setup/preferences windows). Off = the headless
+# supervisor binary: no Tauri/webkit deps, just the supervisor loop.
+default = ["ui"]
+ui = [
+    "dep:tauri",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-single-instance",
+]
+
 [dependencies]
+# --- UI (desktop) only, gated behind `ui` ---
 # `tray-icon` gives us TrayIconBuilder + native menu; `image-png` lets
 # us load PNG bytes into a `tauri::image::Image` at build time so the
 # tray icon isn't coupled to the app bundle's icon assets at runtime.
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-opener = "2"
-serde = { workspace = true }
-serde_json = { workspace = true }
-# Direct Control-plane HTTP for the onboarding flow (device auth, register,
-# model catalog). Preferences reaches the local agent via the shared crate.
-ureq = { workspace = true }
-locai-link-shared = { path = "../../shared" }
+tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
 # Native quit-confirmation dialog. Tauri's own plugin marshals the dialog onto
 # the correct (main) thread and event loop — rfd's sync GTK dialog doesn't
 # display reliably from inside a Tauri app on Linux.
-tauri-plugin-dialog = "2"
-# Single-instance guard: a second launch (Dock/Launchpad, or a stale
-# /Applications copy) focuses the running instance instead of spawning a
-# duplicate tray icon.
-tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = { version = "2", optional = true }
+# Single-instance guard: a second launch focuses the running instance instead
+# of spawning a duplicate tray icon.
+tauri-plugin-single-instance = { version = "2", optional = true }
+# --- shared across both builds ---
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Control-plane HTTP for onboarding (ui) + bootstrap download (supervisor).
+ureq = { workspace = true }
+locai-link-shared = { path = "../../shared" }
+# Supervisor bootstrap: verify + extract the runtime tarball on first launch.
+sha2 = "0.10"
+tar = "0.4"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 

@@ -131,7 +131,7 @@ pub async fn get_prefs_state() -> PrefsState {
 
 #[tauri::command]
 pub async fn poll_status(
-    handles: tauri::State<'_, crate::SharedHandles>,
+    handles: tauri::State<'_, crate::tray::SharedHandles>,
 ) -> Result<StatusPoll, ()> {
     // Read the shared flag before the await so no State reference is held across
     // it. Fail closed: if the lock is poisoned, assume an update is in flight so
@@ -165,7 +165,7 @@ pub async fn poll_status(
 /// Sets `update_in_flight` so Preferences locks into the "updating" state; a
 /// POST failure clears it (the tray path does the same).
 #[tauri::command]
-pub fn install_update(handles: tauri::State<'_, crate::SharedHandles>) -> Result<(), String> {
+pub fn install_update(handles: tauri::State<'_, crate::tray::SharedHandles>) -> Result<(), String> {
     // Atomic check-and-set: reject a second trigger while one is in flight, so a
     // double-click can't fire two updates.
     {
