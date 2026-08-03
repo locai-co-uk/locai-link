@@ -23,7 +23,7 @@ use tauri::{
     tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Emitter, Manager, WindowEvent, Wry,
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 // All four consts point at the same 32×32 asset for now — cfg structure
@@ -98,6 +98,9 @@ fn status_text_down() -> String {
 fn status_text_updating() -> String {
     format!("Locai Link{} · UPDATING", *CHANNEL_SUFFIX)
 }
+fn status_text_registering() -> String {
+    format!("Locai Link{} · REGISTERING", *CHANNEL_SUFFIX)
+}
 
 /// Malformed and Down collapse into `Down` — both mean "no usable data".
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -169,6 +172,7 @@ pub fn run() {
             preferences::runtime_stop,
             preferences::runtime_restart,
             preferences::reveal_log_file,
+            preferences::open_install_root,
             preferences::open_control_device,
             // Onboarding wizard (setup window).
             setup::check_install,
@@ -183,6 +187,7 @@ pub fn run() {
             setup::wait_for_agent_ready,
             setup::re_register,
             setup::open_preferences_window,
+            setup::finish_setup,
             setup::launch_uninstaller,
             setup::mint_registration_key,
             setup::register_device,
@@ -232,8 +237,20 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             thread::spawn(kickstart_runtime_if_installed);
 
-            let (menu, status_item) =
-                build_tray_menu(app.handle(), &[], &[], &status_text_initial(), None)?;
+            let registered_at_start = device_registered();
+            let initial_status = if registered_at_start {
+                status_text_initial()
+            } else {
+                status_text_registering()
+            };
+            let (menu, status_item) = build_tray_menu(
+                app.handle(),
+                &[],
+                &[],
+                &initial_status,
+                None,
+                registered_at_start,
+            )?;
 
             let icon = Image::from_bytes(TRAY_ICON_UP)?;
             let tray = TrayIconBuilder::with_id("main")
@@ -292,6 +309,15 @@ fn device_registered() -> bool {
 /// Route a re-launch (single-instance) to the window that matters: the setup
 /// wizard while unregistered, Preferences once onboarding is done.
 fn focus_primary_window(app: &AppHandle) {
+    // If the setup window is still up (onboarding in progress), a second launch
+    // is the companion service starting on Finish — keep the user on the wizard,
+    // don't pop Preferences even though the device just registered.
+    if let Some(setup) = app.get_webview_window("setup") {
+        if setup.is_visible().unwrap_or(false) {
+            let _ = setup.set_focus();
+            return;
+        }
+    }
     if device_registered() {
         show_preferences_window(app);
     } else {
@@ -344,9 +370,21 @@ fn build_tray_menu(
     deployments: &[DeploymentProgress],
     status_text: &str,
     update: Option<&str>,
+    registered: bool,
 ) -> tauri::Result<(Menu<Wry>, MenuItem<Wry>)> {
     // `enabled: false` renders as grey/unclickable — informational only.
     let status = MenuItem::with_id(app, MENU_ID_STATUS, status_text, false, None::<&str>)?;
+
+    // Before the device is registered (onboarding still running) the runtime
+    // isn't up and none of these actions apply — show a minimal menu: the
+    // status header + Quit, nothing else.
+    if !registered {
+        let sep = PredefinedMenuItem::separator(app)?;
+        let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
+        let menu = Menu::with_items(app, &[&status as &dyn IsMenuItem<Wry>, &sep, &quit])?;
+        return Ok((menu, status));
+    }
+
     let sep1 = PredefinedMenuItem::separator(app)?;
 
     let models_submenu = build_models_submenu(app, models, deployments)?;
@@ -509,6 +547,7 @@ fn menu_digest(
     models: &[ModelInfo],
     deployments: &[DeploymentProgress],
     update: Option<&str>,
+    registered: bool,
 ) -> MenuDigest {
     let mut m: Vec<(String, bool)> = models
         .iter()
@@ -530,6 +569,7 @@ fn menu_digest(
         models: m,
         deployments: d,
         update: update.map(str::to_string),
+        registered,
     }
 }
 
@@ -538,6 +578,8 @@ struct MenuDigest {
     models: Vec<(String, bool)>,
     deployments: Vec<(String, String, u32)>,
     update: Option<String>,
+    /// Onboarding-vs-registered gate; a transition swaps the whole menu shape.
+    registered: bool,
 }
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
@@ -602,30 +644,12 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             });
         }
         MENU_ID_QUIT => {
-            // Make the choice explicit: also stop the Link runtime, or just close
-            // the tray (Link keeps running — the historical default). Non-blocking
-            // so the tray/menu event loop isn't held; act in the callback.
-            let app_handle = app.clone();
-            app.dialog()
-                .message(
-                    "Also stop the Link service?\n\n\
-                     \"Stop Link\" stops it and quits.\n\
-                     \"Keep running\" just closes this app.",
-                )
-                .title("Quit Locai Link")
-                .kind(MessageDialogKind::Info)
-                .buttons(MessageDialogButtons::OkCancelCustom(
-                    "Stop Link".to_string(),
-                    "Keep running".to_string(),
-                ))
-                .show(move |stop| {
-                    if stop {
-                        if let Err(e) = preferences::runtime_stop() {
-                            eprintln!("[companion] runtime_stop on quit failed: {e}");
-                        }
-                    }
-                    app_handle.exit(0);
-                });
+            // The companion is tied to the runtime, so quitting stops Link too —
+            // no "keep running" choice to make. Stop the runtime, then exit.
+            if let Err(e) = preferences::runtime_stop() {
+                eprintln!("[companion] runtime_stop on quit failed: {e}");
+            }
+            app.exit(0);
         }
         _ if id.starts_with(MENU_ID_MODEL_PREFIX) => {
             let pipeline_id = id[MENU_ID_MODEL_PREFIX.len()..].to_string();
@@ -784,7 +808,12 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             current_tray = next_tray;
         }
 
-        let status_text = if updating {
+        // Onboarding still running: minimal tray + "REGISTERING" header until a
+        // device identity exists (cheap file check each tick).
+        let registered = device_registered();
+        let status_text = if !registered {
+            status_text_registering()
+        } else if updating {
             status_text_updating()
         } else {
             status_label(&health, &models)
@@ -823,7 +852,12 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             HealthStatus::Up(h) if h.update_available => h.latest_version.clone(),
             _ => None,
         };
-        let new_digest = menu_digest(&new_models, &new_deployments, update_latest.as_deref());
+        let new_digest = menu_digest(
+            &new_models,
+            &new_deployments,
+            update_latest.as_deref(),
+            registered,
+        );
         let text_changed = status_text != current_status_text;
 
         if new_digest != current_digest || text_changed {
@@ -833,6 +867,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 &new_deployments,
                 &status_text,
                 update_latest.as_deref(),
+                registered,
             ) {
                 Ok((new_menu, new_status_item)) => {
                     if let Err(e) = tray.set_menu(Some(new_menu)) {

@@ -389,6 +389,32 @@ pub fn reveal_log_file(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// Open the install-root folder in the system file manager.
+#[tauri::command]
+pub fn open_install_root() -> Result<(), String> {
+    let root = install_root();
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&root)
+            .status()
+            .map_err(|e| format!("open: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&root)
+            .status()
+            .map_err(|e| format!("xdg-open: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("open_install_root: unsupported platform".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn open_control_device(app: AppHandle, device_id: Option<String>) -> Result<(), String> {
     let url = match device_id {

@@ -192,6 +192,10 @@
 
   function onVisibility() {
     if (!document.hidden) {
+      // Re-read the static snapshot too: the window is pre-created hidden and
+      // mounts before onboarding finishes, so the device identity is cached as
+      // "not registered" until we reload it on show.
+      void load();
       void refreshStatus();
       void loadAvailableModels();
     }
@@ -552,6 +556,14 @@
       await invoke("reveal_log_file");
     } catch (e) {
       console.warn("reveal_log_file:", e);
+    }
+  }
+
+  async function openRoot() {
+    try {
+      await invoke("open_install_root");
+    } catch (e) {
+      console.warn("open_install_root:", e);
     }
   }
 
@@ -970,18 +982,15 @@
     <!-- ============ ADVANCED ============ -->
     <section>
       <h2>Advanced</h2>
-      <div class="row">
-        <span class="row__label">Log file</span>
+      <div class="row row--path">
+        <span class="row__label">Logs</span>
         <span class="row__value mono short">{prefs.advanced.log_file}</span>
+        <button class="btn btn--secondary btn--tiny" onclick={revealLog}>Open</button>
       </div>
-      <div class="row row--action">
-        <button class="btn btn--secondary" onclick={revealLog}>
-          {prefs.platform === "macos" ? "Reveal in Finder" : "Open folder"}
-        </button>
-      </div>
-      <div class="row">
-        <span class="row__label">Install root</span>
-        <span class="row__value mono">{prefs.advanced.install_root}</span>
+      <div class="row row--path">
+        <span class="row__label">Root</span>
+        <span class="row__value mono short">{prefs.advanced.install_root}</span>
+        <button class="btn btn--secondary btn--tiny" onclick={openRoot}>Open</button>
       </div>
 
       <!-- Danger zone: removes this device's install (deregisters from Control,
@@ -1108,6 +1117,14 @@
     justify-content: flex-start;
     gap: 8px;
     padding: 6px 0 2px;
+  }
+  /* label | path (grows, truncates) | Open — all on one line */
+  .row--path {
+    gap: 10px;
+  }
+  .row--path .row__value {
+    flex: 1;
+    justify-content: flex-start;
   }
 
   .pill {

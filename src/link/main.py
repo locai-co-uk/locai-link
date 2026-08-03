@@ -30,10 +30,6 @@ from link.utils.logger import setup_logging
 
 logger = setup_logging()
 
-DEFAULT_API_URL = constants.DEFAULT_API_URL
-DEFAULT_REPO_URL = constants.REPO_URL
-DEFAULT_BRANCH = constants.DEFAULT_BRANCH
-
 
 def setup(args: argparse.Namespace):
     """Lightweight Setup: Only installs Python dependencies.
@@ -66,7 +62,7 @@ def install(args: argparse.Namespace):
     cwd = Path.cwd()
 
     # Determine API URL
-    target_api_url = DEFAULT_API_URL
+    target_api_url = constants.DEFAULT_API_URL
     if args.api_url:
         target_api_url = args.api_url
         logger.info(f"Using provided API URL: {target_api_url}")
@@ -217,7 +213,7 @@ def run(args: argparse.Namespace):
 
     # C. Fallback ladder: JIT onboarding → fleet-marker fail-loud → factory defaults.
     if agent_config is None:
-        api_url = args.api_url or DEFAULT_API_URL
+        api_url = args.api_url or constants.DEFAULT_API_URL
         if args.registration_key:
             try:
                 if args.device_name and (args.email or args.token):
@@ -624,8 +620,8 @@ def main():
 
     # Install (one-liner orchestrator)
     install_p = subparsers.add_parser("install", help="Full installation wizard.")
-    install_p.add_argument("--repo-url", default=DEFAULT_REPO_URL)
-    install_p.add_argument("--branch", default=DEFAULT_BRANCH)
+    install_p.add_argument("--repo-url", default=constants.REPO_URL)
+    install_p.add_argument("--branch", default=constants.DEFAULT_BRANCH)
     install_p.add_argument("--device-name", help="Device name for onboarding.")
     install_p.add_argument("--email", help="Platform email for authentication.")
     install_p.add_argument("--password", help="Platform password (prompted securely if omitted).")

@@ -523,11 +523,21 @@
     };
   }
 
+  // Finish onboarding: just dismiss this window and leave the app in the tray.
+  // Preferences is NOT auto-opened — the user reaches it from the tray.
+  async function completeOnboarding() {
+    try {
+      await invoke<void>("finish_setup");
+    } catch (e) {
+      console.warn("finish_setup:", e);
+    }
+  }
+
   async function openCompanionPrefs() {
     splashAction = { kind: "working", message: "Opening Preferences…" };
     try {
-      // Reveals the Preferences window and dismisses this setup window; the
-      // tray keeps running (setup and preferences are one app now).
+      // Explicit "Open Preferences" (already-set-up splash): reveal prefs and
+      // dismiss this window; the tray keeps running (one app now).
       await invoke<void>("open_preferences_window");
     } catch (e) {
       splashAction = {
@@ -1001,8 +1011,8 @@
       <footer class="bar">
         <button class="btn btn--ghost" onclick={back} disabled={current === 0}>Go Back</button>
         <!-- Continue drives the wizard forward; on the last step it's replaced
-             by Complete, which reveals Preferences and dismisses this window
-             once registration finished. Both never render together. -->
+             by Complete, which dismisses this window and leaves the app in the
+             tray (Preferences is NOT auto-opened). Both never render together. -->
         {#if current < STEPS.length - 1}
           <button
             class="btn btn--primary"
@@ -1014,7 +1024,7 @@
         {:else if finish.kind === "done"}
           <button
             class="btn btn--primary"
-            onclick={openCompanionPrefs}
+            onclick={completeOnboarding}
           >
             Complete
           </button>

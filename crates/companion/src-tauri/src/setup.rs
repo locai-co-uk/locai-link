@@ -1190,9 +1190,20 @@ pub fn re_register(
     Ok(())
 }
 
-/// Reveal the Preferences window and dismiss the setup window. Called by the
-/// wizard when onboarding finishes — an in-process window swap now that setup
-/// and preferences are one app (was a cross-process loopback call).
+/// Finish onboarding: dismiss the setup window and leave the app in the tray.
+/// Deliberately does NOT open Preferences — the user reaches it from the tray
+/// when they want it. macOS drops back to Accessory so no Dock icon lingers.
+#[tauri::command]
+pub fn finish_setup(app: tauri::AppHandle) {
+    if let Some(setup) = app.get_webview_window("setup") {
+        let _ = setup.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+}
+
+/// Reveal the Preferences window and dismiss the setup window. Used by the
+/// "already set up" splash's explicit "Open Preferences" action.
 #[tauri::command]
 pub fn open_preferences_window(app: tauri::AppHandle) {
     crate::show_preferences_window(&app);
