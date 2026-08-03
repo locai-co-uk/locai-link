@@ -233,13 +233,13 @@ jobs:
 
   # 3a. Rust crate check + unit tests (shared crate only) — Linux gate.
   #
-  # Scoped to `locai-link-shared` deliberately: `companion` and
-  # `setup_assistant` are Tauri apps that need webkit2gtk / gtk3 /
-  # libsoup on Linux runners to `cargo check`. Adding those OS deps
-  # here doubles the job surface for near-zero incremental value — the
-  # Rust logic worth guarding lives in `shared` (autostart, health
-  # probing, install-state reading). The Tauri apps are built end-to-end
-  # in the `tauri-build` job below (Linux, --no-bundle), which is where
+  # Scoped to `locai-link-shared` deliberately: `companion` is a Tauri
+  # app that needs webkit2gtk / gtk3 / libsoup on Linux runners to
+  # `cargo check`. Adding those OS deps here doubles the job surface for
+  # near-zero incremental value — the Rust logic worth guarding lives in
+  # `shared` (autostart, health probing, install-state reading). The
+  # Tauri app is built end-to-end in the `tauri-build` job below
+  # (Linux, --no-bundle), which is where
   # their compile + frontend breakage is caught.
   rust-check-linux:
     name: Rust Check (shared) on ubuntu-latest
@@ -309,7 +309,7 @@ jobs:
         working-directory: crates
         run: cargo test -p locai-link-shared --lib
 
-  # 3c. Tauri app build (companion + Setup Assistant)
+  # 3c. Tauri app build (the single desktop app: tray + first-run setup)
   #
   # The apps were previously only built in the release lane, so a broken app
   # build (Rust error, bad tauri.conf, frontend failure) escaped every PR and
@@ -351,12 +351,6 @@ jobs:
 
       - name: Build companion (no bundle)
         working-directory: crates/companion
-        run: |
-          npm ci
-          npm run tauri build -- --no-bundle
-
-      - name: Build Setup Assistant (no bundle)
-        working-directory: crates/setup_assistant
         run: |
           npm ci
           npm run tauri build -- --no-bundle

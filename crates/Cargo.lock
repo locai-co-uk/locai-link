@@ -1995,6 +1995,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "ureq",
 ]
 
 [[package]]
@@ -2009,19 +2010,6 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "locai-link-setup-assistant"
-version = "0.1.0"
-dependencies = [
- "locai-link-shared",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
  "ureq",
 ]
 

@@ -565,6 +565,27 @@
     }
   }
 
+  // Danger zone. Fires the uninstaller (deregisters from Control, stops +
+  // removes services, deletes the install root), then exits so we don't linger
+  // as a tray with nothing behind it. Destructive + not undoable → two-step
+  // confirm in the UI below.
+  let confirmingUninstall = $state(false);
+  let uninstallError = $state<string | null>(null);
+
+  async function uninstallDevice() {
+    await withPending("uninstall-device", async () => {
+      uninstallError = null;
+      try {
+        await invoke<void>("launch_uninstaller", {
+          installRoot: prefs?.advanced.install_root ?? "",
+        });
+        await invoke<void>("exit_app");
+      } catch (e) {
+        uninstallError = e instanceof Error ? e.message : String(e);
+      }
+    });
+  }
+
   async function copyDeviceId() {
     if (!prefs?.device) return;
     try {
@@ -962,8 +983,41 @@
         <span class="row__label">Install root</span>
         <span class="row__value mono">{prefs.advanced.install_root}</span>
       </div>
-      <!-- Uninstall lives on the Setup Assistant, not here: Preferences tweaks
-           a running install; lifecycle ops (re-register, uninstall) go to the SA. -->
+
+      <!-- Danger zone: removes this device's install (deregisters from Control,
+           stops + removes services, deletes the install root). Not undoable, so
+           a two-step confirm. -->
+      <div class="row danger-zone">
+        {#if confirmingUninstall}
+          <p class="danger-zone__msg">
+            This removes Locai Link from this device and deregisters it from
+            Control. You'll need to run setup again to use it.
+          </p>
+          <div class="danger-zone__actions">
+            <button
+              class="btn btn--danger"
+              onclick={uninstallDevice}
+              disabled={pending.has("uninstall-device")}
+            >
+              {pending.has("uninstall-device") ? "Removing…" : "Uninstall Locai Link"}
+            </button>
+            <button
+              class="btn btn--ghost"
+              onclick={() => (confirmingUninstall = false)}
+              disabled={pending.has("uninstall-device")}
+            >
+              Cancel
+            </button>
+          </div>
+          {#if uninstallError}
+            <p class="danger-zone__error">{uninstallError}</p>
+          {/if}
+        {:else}
+          <button class="btn btn--danger" onclick={() => (confirmingUninstall = true)}>
+            Uninstall Locai Link…
+          </button>
+        {/if}
+      </div>
     </section>
   {/if}
 </div>
@@ -1333,6 +1387,30 @@
   .btn--ghost:hover:not(:disabled) {
     color: var(--color-text-strong, #0A0A0A);
     background: var(--color-surface-hover, #F5F4F1);
+  }
+  .danger-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 16px;
+    border-top: 1px solid var(--color-border, #E7E4DD);
+  }
+  .danger-zone__msg {
+    margin: 0;
+    font-size: 12px;
+    color: var(--color-text-secondary, #55524C);
+    max-width: 46ch;
+  }
+  .danger-zone__actions {
+    display: flex;
+    gap: 8px;
+  }
+  .danger-zone__error {
+    margin: 0;
+    font-size: 12px;
+    color: var(--color-error, #E84D3D);
   }
   .btn--tiny {
     font-size: 11px;

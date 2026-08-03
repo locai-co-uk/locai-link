@@ -14,7 +14,7 @@ pub use catalog::{
     deregister_device, list_available_models, read_identity, read_session_identity, request_deploy,
     AvailableModel, DeployOutcome, DeviceIdentity,
 };
-pub use endpoints::{install_root, CONTROL_URL, IPC_PORT, WORKSPACE_URL};
+pub use endpoints::{install_root, CONTROL_URL, WORKSPACE_URL};
 pub use health::{
     agent_health, cancel_deployment, list_models, mark_deployment_pending, toggle_serving,
     trigger_update, uninstall_model, AgentHealth, DeploymentProgress, HealthStatus, ModelInfo,

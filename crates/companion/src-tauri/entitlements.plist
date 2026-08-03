@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <!--
-    Hardened-runtime entitlements for the Setup Assistant .app.
+    Hardened-runtime entitlements for the Locai Link .app.
 
     Not sandboxed (Developer ID distribution), so `com.apple.security.
     network.client` is unnecessary. Only WebKit's JIT relaxation is

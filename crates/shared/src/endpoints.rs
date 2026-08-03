@@ -15,10 +15,6 @@ pub const CONTROL_URL: &str = match option_env!("LOCAI_CONTROL_URL") {
 /// Workspace (chat) URL.
 pub const WORKSPACE_URL: &str = "https://workspace.locai.co.uk";
 
-/// Companion IPC port, adjacent to the agent health server's 20505. The
-/// companion listens here; the Setup Assistant posts to it.
-pub const IPC_PORT: u16 = 20506;
-
 /// Platform install root: macOS `/Library/Locai`, Linux `~/.local/share/locai`.
 pub fn install_root() -> String {
     #[cfg(target_os = "macos")]

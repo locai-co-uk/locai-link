@@ -10,9 +10,8 @@ resolver = "2"
 members = [
     "launcher",
     "shared",
-    # Tauri apps. Each has a `src-tauri/` directory housing the Rust
+    # The desktop app: tray + first-run setup. `src-tauri/` houses the Rust
     # backend; the Svelte frontend lives alongside it under `src/`.
-    "setup_assistant/src-tauri",
     "companion/src-tauri",
 ]
 

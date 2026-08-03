@@ -4,9 +4,9 @@
 #
 # Locai Link installer for Linux (per-user, no sudo).
 #
-# Lays down the launcher + bundled runtime, GUI binaries, boot.json, and
+# Lays down the launcher + bundled runtime, the GUI binary, boot.json, and
 # service units under ~/.local/share/locai/. Service activation is deferred
-# to the Setup Assistant on Finish (per the "Start at login" toggle).
+# to the setup wizard on Finish (per the "Start at login" toggle).
 #
 # Layout after install:
 #
@@ -15,16 +15,15 @@
 #     ├── versions/vX.Y.Z/…              (PyInstaller runtime + plugins)
 #     ├── current -> versions/vX.Y.Z     (OTA-swappable symlink)
 #     ├── manifest.json                  (from the runtime bundle)
-#     ├── setup-assistant                (Tauri ELF)
-#     ├── companion                      (Tauri ELF)
+#     ├── companion                      (Tauri ELF: tray + first-run setup)
 #     ├── boot.json                      (channel config)
-#     ├── configs/                       (session state — SA writes here)
+#     ├── configs/                       (session state — setup writes here)
 #     ├── logs/                          (agent + companion stdout/stderr)
-#     ├── systemd/*.service              (staged; SA activates them)
+#     ├── systemd/*.service              (staged; activated on Finish)
 #     └── uninstall.sh
 #
 #     ~/.config/systemd/user/locai-link-{agent,companion}.service
-#     ~/.local/share/applications/locai-{link,setup-assistant}.desktop
+#     ~/.local/share/applications/locai-link.desktop
 #
 # Payload discovery (see resolve_paths): either an extracted release tarball
 # (install.sh next to bundle/ + binaries) or a local repo checkout (picks up
@@ -52,20 +51,18 @@ err() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BUNDLE_DIR=""      # Rust launcher + versions/ + current + manifest.json
-SA_BIN=""          # setup-assistant Tauri binary (name differs per layout)
-COMPANION_BIN=""   # companion Tauri binary
+COMPANION_BIN=""   # companion Tauri binary (tray + first-run setup)
 UNITS_DIR=""       # locai-link-{agent,companion}.service
-DESKTOPS_DIR=""    # locai-{link,setup-assistant}.desktop
+DESKTOPS_DIR=""    # locai-link.desktop
 ICONS_SRC=""       # dir with 32x32.png / 128x128.png / 128x128@2x.png
 BOOT_JSON=""
 
 resolve_paths() {
-    # Case 1 — extracted tarball: install.sh sits next to bundle/ + Tauri
-    # binaries renamed setup-assistant/companion (no locai-link- prefix) +
-    # boot.json + systemd/ + applications/ + icons/. Fall through if no match.
-    if [[ -d "$SCRIPT_DIR/bundle" && -f "$SCRIPT_DIR/setup-assistant" ]]; then
+    # Case 1 — extracted tarball: install.sh sits next to bundle/ + the Tauri
+    # binary renamed companion (no locai-link- prefix) + boot.json + systemd/ +
+    # applications/ + icons/. Fall through if no match.
+    if [[ -d "$SCRIPT_DIR/bundle" && -f "$SCRIPT_DIR/companion" ]]; then
         BUNDLE_DIR="$SCRIPT_DIR/bundle"
-        SA_BIN="$SCRIPT_DIR/setup-assistant"
         COMPANION_BIN="$SCRIPT_DIR/companion"
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
@@ -76,28 +73,25 @@ resolve_paths() {
 
     # Case 2 — local repo checkout. Expects build.py + `cargo tauri build
     # --no-bundle` run first; cargo target names carry the crate prefix.
-    # Icons come from the SA crate (companion shares the same brand set).
     local repo_root
     repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
     if [[ -f "$repo_root/dist/locai-link/locai-link" ]]; then
         BUNDLE_DIR="$repo_root/dist/locai-link"
-        SA_BIN="$repo_root/crates/target/release/locai-link-setup-assistant"
         COMPANION_BIN="$repo_root/crates/target/release/locai-link-companion"
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
-        ICONS_SRC="$repo_root/crates/setup_assistant/src-tauri/icons"
+        ICONS_SRC="$repo_root/crates/companion/src-tauri/icons"
         BOOT_JSON="$repo_root/bundling/pkg/boot.json"
         return
     fi
 
-    err "couldn't locate build artefacts. Either extract a release tarball and run its install.sh, or from a repo checkout run \`uv run python bundling/build.py --plugins language_model audio_transcriber\` + \`cargo tauri build --no-bundle\` on both crates first."
+    err "couldn't locate build artefacts. Either extract a release tarball and run its install.sh, or from a repo checkout run \`uv run python bundling/build.py --plugins language_model audio_transcriber\` + \`cargo tauri build --no-bundle\` in crates/companion first."
 }
 
 resolve_paths
 
 log "install root:       $INSTALL_ROOT"
 log "runtime bundle:     $BUNDLE_DIR"
-log "setup assistant:    $SA_BIN"
 log "companion:          $COMPANION_BIN"
 log "systemd units:      $UNITS_DIR"
 log "desktop entries:    $DESKTOPS_DIR"
@@ -110,7 +104,6 @@ command -v systemctl >/dev/null 2>&1 || err "systemctl not found — this instal
 LAUNCHER_BIN="$BUNDLE_DIR/locai-link"
 
 [[ -f "$LAUNCHER_BIN" ]]  || err "runtime launcher not at $LAUNCHER_BIN"
-[[ -f "$SA_BIN" ]]        || err "setup-assistant binary not at $SA_BIN"
 [[ -f "$COMPANION_BIN" ]] || err "companion binary not at $COMPANION_BIN"
 [[ -f "$BOOT_JSON" ]]     || err "boot.json not at $BOOT_JSON"
 [[ -d "$UNITS_DIR" ]]     || err "systemd units dir not at $UNITS_DIR"
@@ -126,8 +119,7 @@ mkdir -p "$INSTALL_ROOT/configs" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/systemd"
 cp -a "$BUNDLE_DIR"/. "$INSTALL_ROOT"/
 log "runtime bundle copied to $INSTALL_ROOT"
 
-# 2. Tauri binaries — user-facing GUI apps.
-install -m 0755 "$SA_BIN"        "$INSTALL_ROOT/setup-assistant"
+# 2. Tauri binary — the user-facing GUI app (tray + first-run setup).
 install -m 0755 "$COMPANION_BIN" "$INSTALL_ROOT/companion"
 
 # 3. boot.json — channel config, read by the launcher on first start.
@@ -137,7 +129,12 @@ install -m 0644 "$BOOT_JSON" "$INSTALL_ROOT/boot.json"
 # and by hand from the terminal).
 install -m 0755 "$SCRIPT_DIR/uninstall.sh" "$INSTALL_ROOT/uninstall.sh"
 
-log "tauri binaries + boot.json + uninstall.sh installed"
+# LEGACY-SA-CLEANUP: drop a pre-merge standalone setup-assistant binary left by
+# an older install (onboarding is now part of the companion). Remove once no
+# pre-merge install remains.
+rm -f "$INSTALL_ROOT/setup-assistant"
+
+log "tauri binary + boot.json + uninstall.sh installed"
 
 # --- systemd units (staged, not activated) ----------------------------
 # Stage .service files under $INSTALL_ROOT/systemd/; the Setup Assistant
@@ -157,10 +154,10 @@ mkdir -p "$DESKTOP_DIR"
 # has no portable home-dir field code (`%h` is KDE-only), so an absolute path
 # baked in per-user is the only reliable option. `install /dev/stdin` avoids
 # leaving a tmp file behind.
-for entry in locai-link.desktop locai-setup-assistant.desktop; do
-    sed "s|@HOME@|$HOME|g" "$DESKTOPS_DIR/$entry" \
-        | install -m 0644 /dev/stdin "$DESKTOP_DIR/$entry"
-done
+sed "s|@HOME@|$HOME|g" "$DESKTOPS_DIR/locai-link.desktop" \
+    | install -m 0644 /dev/stdin "$DESKTOP_DIR/locai-link.desktop"
+# LEGACY-SA-CLEANUP: remove the pre-merge setup-assistant menu entry.
+rm -f "$DESKTOP_DIR/locai-setup-assistant.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
@@ -170,7 +167,7 @@ log "menu entries installed to $DESKTOP_DIR"
 # --- Icons ------------------------------------------------------------
 # `.desktop` files reference `Icon=locai-link` (themed name); without a
 # matching PNG in the hicolor theme, launchers show a placeholder. Copy the
-# SA-crate icons into the user hicolor tree at the sizes launchers look up.
+# companion-crate icons into the user hicolor tree at the sizes launchers look up.
 ICON_ROOT="$HOME/.local/share/icons/hicolor"
 if [[ -d "$ICONS_SRC" ]]; then
     for size in 32 128; do
@@ -194,15 +191,16 @@ else
     log "WARN: no icons source at $ICONS_SRC — menu entries will show a placeholder icon"
 fi
 
-# --- Launch Setup Assistant ------------------------------------------
-# The wizard picks up from here (sign-in, models, permissions incl. the
-# "start at login" toggle, Finish). Backgrounded so this script returns.
+# --- Launch Locai Link -----------------------------------------------
+# The app opens the setup wizard on first run (no registered device): sign-in,
+# models, permissions incl. the "start at login" toggle, Finish. Backgrounded so
+# this script returns. On Finish the app activates the services per the toggle.
 
-log "launching Setup Assistant…"
+log "launching Locai Link…"
 # WebKit's DMABUF renderer breaks on many Wayland setups (Nvidia, some
 # Intel); GDK_BACKEND=x11 sidesteps it. Also set in the companion service.
 WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=x11 \
-    nohup "$INSTALL_ROOT/setup-assistant" >/dev/null 2>&1 &
+    nohup "$INSTALL_ROOT/companion" >/dev/null 2>&1 &
 disown
 
 cat <<EOF
@@ -210,11 +208,11 @@ cat <<EOF
 $LOG_PREFIX Install complete.
 
 Next:
-  * The Setup Assistant window should have opened. Complete the wizard
-    to register this device with Control. On Finish, the runtime and
+  * The setup window should have opened. Complete the wizard to
+    register this device with Control. On Finish, the runtime and
     companion services are enabled + started.
   * "Locai Link" is now in your Applications menu — click to bring
-    the companion tray back up if you ever close it.
+    the tray back up if you ever close it.
 
 Manual controls:
   systemctl --user status locai-link-agent locai-link-companion

@@ -26,7 +26,6 @@ from pathlib import Path
 # actually feed each Tauri binary.
 APP_SOURCES: dict[str, list[str]] = {
     "companion": ["crates/companion", "crates/shared", "crates/Cargo.lock", "crates/Cargo.toml"],
-    "setup_assistant": ["crates/setup_assistant", "crates/shared", "crates/Cargo.lock", "crates/Cargo.toml"],
 }
 
 # Build/output dirs to skip when walking source trees (huge + not source).

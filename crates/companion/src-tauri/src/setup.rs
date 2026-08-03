@@ -1,16 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
+//! First-run onboarding backend — Tauri commands driving the setup window's
+//! Svelte wizard (device sign-in, register, install config + services, deploy
+//! first model). Preferences backend lives in `preferences`.
+
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use locai_link_shared::{
     deregister_device, installed_version, read_boot_json, read_identity, read_session_identity,
-    supported_model_types as shared_supported_model_types, BootConfig,
+    BootConfig,
 };
 
 // Overridable at build time via `LOCAI_CONTROL_API_URL` (dev builds); unset
@@ -76,13 +80,13 @@ fn machine_hostname() -> String {
 }
 
 #[tauri::command]
-fn suggest_device_name() -> String {
+pub fn suggest_device_name() -> String {
     machine_hostname()
 }
 
 // --- Check Install -----------------------------------------------------------
 
-/// Wire-format result for the SA's "Check Install" step.
+/// Wire-format result for the setup wizard's "Check Install" step.
 #[derive(Serialize)]
 pub struct CheckInstallResult {
     pub installed: bool,
@@ -92,7 +96,7 @@ pub struct CheckInstallResult {
     /// Distinct from `reason` so the UI can say "install found but config is broken".
     pub boot_error: Option<String>,
     pub reason: Option<String>,
-    /// From the newest `session_*.json`; when set, the SA renders the
+    /// From the newest `session_*.json`; when set, the setup UI renders the
     /// "already set up" splash instead of the wizard.
     pub device_id: Option<String>,
     pub device_name: Option<String>,
@@ -104,28 +108,20 @@ fn resolve_install_root() -> String {
 
 /// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
 #[tauri::command]
-fn get_install_root() -> String {
+pub fn get_install_root() -> String {
     resolve_install_root()
 }
 
-/// OS the SA is running on, so the frontend can render platform-appropriate strings.
+/// OS the app is running on, so the frontend can render platform-appropriate strings.
 #[tauri::command]
-fn get_platform() -> String {
+pub fn get_platform() -> String {
     std::env::consts::OS.to_string()
-}
-
-/// Model types this build can serve, derived from the installed bundle's manifest
-/// plugins. The installer list filters to these so an LLM-only build
-/// never offers audio/other models it can't run.
-#[tauri::command]
-fn supported_model_types() -> Vec<String> {
-    shared_supported_model_types(&PathBuf::from(resolve_install_root()))
 }
 
 /// Read the on-disk install state. Never `Err` — the failure modes are legitimate
 /// outcomes the UI needs to render; `reason` / `boot_error` carry the detail.
 #[tauri::command]
-fn check_install(install_root: String) -> CheckInstallResult {
+pub fn check_install(install_root: String) -> CheckInstallResult {
     let root = PathBuf::from(&install_root);
     if !root.exists() {
         return CheckInstallResult {
@@ -286,8 +282,8 @@ pub struct SignInState {
 /// doesn't surface as a sign-in failure. The retry waits first — an immediate
 /// one doesn't help while the instance is still warming.
 #[tauri::command]
-async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
-    // HTTP + optional retry sleep runs on the blocking pool so the SA
+pub async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart, String> {
+    // HTTP + optional retry sleep runs on the blocking pool so the setup
     // window doesn't freeze during the device-code request.
     let (device_code, start) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, DeviceCodeStart), String> {
         let payload = serde_json::json!({
@@ -354,7 +350,7 @@ async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeStart,
 /// Poll the token endpoint once. Front-end paces polls by `interval` from
 /// `sign_in_start` (bumped on `SlowDown`).
 #[tauri::command]
-fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
+pub fn sign_in_poll(state: State<'_, SignInState>) -> SignInPollResult {
     let device_code = match state.inner.lock().expect("SignInState poisoned").as_ref() {
         Some(s) => s.device_code.clone(),
         None => {
@@ -449,7 +445,7 @@ pub struct RegisteredDevice {
 /// Mint a single-use registration key. Split from `register_device` so the UI
 /// can render distinct progress states — register-with-key can take 5-10s cold.
 #[tauri::command]
-fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String> {
+pub fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String> {
     let token = require_token(&state)?;
 
     let mint_body = serde_json::json!({
@@ -476,7 +472,7 @@ fn mint_registration_key(state: State<'_, SignInState>) -> Result<String, String
 /// Redeem a registration key for a (device_id, api_key, AgentConfig) triple.
 /// Requires the caller to be signed in — JWT is used in addition to the key.
 #[tauri::command]
-fn register_device(
+pub fn register_device(
     state: State<'_, SignInState>,
     device_name: String,
     registration_key: String,
@@ -534,7 +530,10 @@ fn register_device(
 /// Write `config` to `<install_root>/configs/session_<UTC>.json` — the location
 /// the runtime's `StateManager` picks up on next start. Returns the written path.
 #[tauri::command]
-fn install_agent_config(install_root: String, config: serde_json::Value) -> Result<String, String> {
+pub fn install_agent_config(
+    install_root: String,
+    config: serde_json::Value,
+) -> Result<String, String> {
     if config.is_null() {
         return Err("config from register_device was null — nothing to write".to_string());
     }
@@ -638,7 +637,7 @@ fn require_token(state: &State<'_, SignInState>) -> Result<String, String> {
 /// List models visible to the signed-in user. Hits `list_without_layers_info`
 /// to skip the ~MB of per-layer detail.
 #[tauri::command]
-fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, String> {
+pub fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, String> {
     let token = require_token(&state)?;
 
     let resp = http_agent()
@@ -704,7 +703,10 @@ fn list_models(state: State<'_, SignInState>) -> Result<Vec<ModelSummary>, Strin
 /// immediately — the runtime processes deploys serially, so without this the
 /// panel only reveals models one at a time.
 #[tauri::command]
-fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> Result<(), String> {
+pub fn mark_deployment_pending(
+    pipeline_id: String,
+    model_name: Option<String>,
+) -> Result<(), String> {
     #[derive(serde::Serialize)]
     struct Body<'a> {
         pipeline_id: &'a str,
@@ -742,8 +744,8 @@ fn mark_deployment_pending(pipeline_id: String, model_name: Option<String>) -> R
 /// subscriber setup and the command is dropped (deploy accepted, no download).
 /// Polls up to ~15 s to cover PyInstaller unpack + zenoh handshake on slow disks.
 #[tauri::command]
-async fn wait_for_agent_ready() -> Result<(), String> {
-    // 15 s of polling on the main thread froze the SA window; hop onto the
+pub async fn wait_for_agent_ready() -> Result<(), String> {
+    // 15 s of polling on the main thread froze the setup window; hop onto the
     // blocking pool so the WebView stays responsive during the wait.
     tauri::async_runtime::spawn_blocking(|| {
         let url = locai_link_shared::DEFAULT_HEALTH_URL;
@@ -789,7 +791,7 @@ async fn wait_for_agent_ready() -> Result<(), String> {
 /// Queue a deploy of `model_id` onto `device_id`; returns the deployment id.
 /// Enqueue-only — Control dispatches via Zenoh, runtime downloads later.
 #[tauri::command]
-fn deploy_model(
+pub fn deploy_model(
     state: State<'_, SignInState>,
     device_id: String,
     model_id: String,
@@ -891,7 +893,7 @@ fn lookup_context_path(context: &serde_json::Value, path: &str) -> Option<String
 /// agents are always kickstarted now so the user sees the setup pay off immediately.
 #[tauri::command]
 #[cfg(target_os = "macos")]
-fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
+pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
     let root = PathBuf::from(&install_root);
     let source_dir = root.join("LaunchAgents");
     if !source_dir.is_dir() {
@@ -961,7 +963,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
             }
         }
 
-        let uid = current_uid()?;
+        let uid = crate::preferences::current_uid()?;
         let domain = format!("gui/{uid}");
         let service = format!("{domain}/{label}");
 
@@ -1033,7 +1035,7 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
 /// just starts based on the toggle. Idempotent.
 #[tauri::command]
 #[cfg(target_os = "linux")]
-fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
+pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
     let root = PathBuf::from(&install_root);
     let source_dir = root.join("systemd");
     if !source_dir.is_dir() {
@@ -1117,28 +1119,15 @@ fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), 
 
 #[tauri::command]
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn install_launchagents(_install_root: String, _run_at_login: bool) -> Result<(), String> {
+pub fn install_launchagents(_install_root: String, _run_at_login: bool) -> Result<(), String> {
     Ok(())
-}
-
-/// UID via `id -u` — avoids pulling libc into an otherwise-libc-free crate.
-#[cfg(target_os = "macos")]
-fn current_uid() -> Result<String, String> {
-    let out = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .map_err(|e| format!("id -u: {e}"))?;
-    if !out.status.success() {
-        return Err("id -u failed".to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Wipe local state for re-register: best-effort Control delete, stop runtime,
 /// remove session file + downloaded models + pipeline state. Install itself
 /// (binaries, units, launcher, versions) stays intact.
 #[tauri::command]
-fn re_register(
+pub fn re_register(
     state: State<'_, SignInState>,
     install_root: String,
     old_device_id: String,
@@ -1177,7 +1166,10 @@ fn re_register(
             let _ = std::process::Command::new("launchctl")
                 .args([
                     "bootout",
-                    &format!("gui/{}/{label}", current_uid().unwrap_or_default()),
+                    &format!(
+                        "gui/{}/{label}",
+                        crate::preferences::current_uid().unwrap_or_default()
+                    ),
                 ])
                 .output();
         }
@@ -1198,82 +1190,15 @@ fn re_register(
     Ok(())
 }
 
-/// Open the companion's Preferences window via its IPC endpoint. If the
-/// companion isn't running, start the service and retry with backoff.
+/// Reveal the Preferences window and dismiss the setup window. Called by the
+/// wizard when onboarding finishes — an in-process window swap now that setup
+/// and preferences are one app (was a cross-process loopback call).
 #[tauri::command]
-fn open_companion_preferences() -> Result<(), String> {
-    if try_show_preferences_now().is_ok() {
-        return Ok(());
+pub fn open_preferences_window(app: tauri::AppHandle) {
+    crate::show_preferences_window(&app);
+    if let Some(setup) = app.get_webview_window("setup") {
+        let _ = setup.hide();
     }
-
-    // IPC listener binds a beat after the process launches.
-    start_companion_service()?;
-
-    let mut attempts_left = 15u32;
-    let mut delay_ms = 150u64;
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        if try_show_preferences_now().is_ok() {
-            return Ok(());
-        }
-        attempts_left = attempts_left.saturating_sub(1);
-        if attempts_left == 0 {
-            return Err(
-                "Preferences window didn't open — companion may not have finished starting.".into(),
-            );
-        }
-        delay_ms = (delay_ms + 100).min(600);
-    }
-}
-
-fn try_show_preferences_now() -> Result<(), String> {
-    match http_agent()
-        .post(&format!(
-            "http://127.0.0.1:{}/preferences/show",
-            locai_link_shared::IPC_PORT
-        ))
-        .send_bytes(&[])
-    {
-        Ok(resp) if (200..300).contains(&resp.status()) => Ok(()),
-        Ok(resp) => Err(format!("HTTP {} from IPC endpoint", resp.status())),
-        Err(e) => Err(format!("IPC POST: {e}")),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn start_companion_service() -> Result<(), String> {
-    let out = std::process::Command::new("systemctl")
-        .args(["--user", "start", "locai-link-companion.service"])
-        .output()
-        .map_err(|e| format!("systemctl start: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "systemctl start failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn start_companion_service() -> Result<(), String> {
-    let uid = current_uid()?;
-    let out = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", &format!("gui/{uid}/{COMPANION_LABEL}")])
-        .output()
-        .map_err(|e| format!("launchctl kickstart: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "launchctl kickstart failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn start_companion_service() -> Result<(), String> {
-    Err("start_companion_service: unsupported platform".to_string())
 }
 
 /// Best-effort device self-deregister before uninstall.
@@ -1287,18 +1212,19 @@ fn start_companion_service() -> Result<(), String> {
 fn best_effort_deregister() {
     match read_identity(&PathBuf::from(resolve_install_root())) {
         Some(id) => match deregister_device(&id) {
-            Ok(()) => eprintln!("[setup-assistant] device deregistered from Control"),
-            Err(e) => eprintln!("[setup-assistant] deregister failed (continuing uninstall): {e}"),
+            Ok(()) => eprintln!("[setup] device deregistered from Control"),
+            Err(e) => eprintln!("[setup] deregister failed (continuing uninstall): {e}"),
         },
-        None => eprintln!("[setup-assistant] no device identity found; skipping deregister"),
+        None => eprintln!("[setup] no device identity found; skipping deregister"),
     }
 }
 
-/// Fire the uninstaller from the SA splash. `systemd-run --user --collect` on
-/// Linux so the script survives the runtime + companion being killed mid-run.
+/// Fire the uninstaller (setup splash or Preferences danger zone).
+/// `systemd-run --user --collect` on Linux so the script survives the runtime +
+/// companion being killed mid-run.
 #[tauri::command]
 #[cfg(target_os = "linux")]
-fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
+pub fn launch_uninstaller(install_root: String) -> Result<(), String> {
     let script = format!("{install_root}/uninstall.sh");
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
@@ -1330,7 +1256,7 @@ fn launch_uninstaller_from_sa(install_root: String) -> Result<(), String> {
 
 #[tauri::command]
 #[cfg(target_os = "macos")]
-fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
+pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
     // Ignore the frontend-supplied install_root and resolve canonically — the
     // uninstaller runs with admin privileges, so no injectable path on that surface.
     let script = format!("{}/uninstall.sh", resolve_install_root());
@@ -1362,14 +1288,14 @@ fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
 
 #[tauri::command]
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn launch_uninstaller_from_sa(_install_root: String) -> Result<(), String> {
-    Err("launch_uninstaller_from_sa: unsupported platform".to_string())
+pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
+    Err("launch_uninstaller: unsupported platform".to_string())
 }
 
-/// Exit the SA. `close()` on macOS just hides the window (Cocoa default);
-/// this one-shot wizard needs the process to actually terminate.
+/// Quit the whole app. Used by the uninstall flow (the app is being removed, so
+/// the tray must go too); `close()` on macOS only hides the window.
 #[tauri::command]
-fn exit_app(app: tauri::AppHandle) {
+pub fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
@@ -1402,34 +1328,4 @@ fn format_utc_compact(unix_secs: u64) -> String {
         m = m,
         s = s
     )
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .manage(SignInState::default())
-        .invoke_handler(tauri::generate_handler![
-            check_install,
-            get_install_root,
-            get_platform,
-            supported_model_types,
-            sign_in_start,
-            sign_in_poll,
-            suggest_device_name,
-            list_models,
-            deploy_model,
-            mark_deployment_pending,
-            wait_for_agent_ready,
-            re_register,
-            open_companion_preferences,
-            launch_uninstaller_from_sa,
-            mint_registration_key,
-            register_device,
-            install_agent_config,
-            install_launchagents,
-            exit_app,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

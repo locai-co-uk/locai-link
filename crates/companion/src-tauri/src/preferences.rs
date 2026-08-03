@@ -544,7 +544,7 @@ fn agent_service() -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn current_uid() -> Result<String, String> {
+pub(crate) fn current_uid() -> Result<String, String> {
     let out = std::process::Command::new("id")
         .arg("-u")
         .output()

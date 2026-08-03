@@ -6,6 +6,26 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [Unreleased]
+
+- Setup and Preferences are now one desktop app. First-run onboarding opens in a
+  window of Locai Link instead of a separate Setup Assistant, so there is a
+  single app, one bundle to install, and one thing to update. Upgrades and
+  uninstalls automatically remove the old Setup Assistant.
+
+### Changed: merge the Setup Assistant into the companion (`crates/companion`, `bundling/`, `src/link/app/updater.py`)
+
+- The onboarding wizard is now a second window (`setup.html`) of the companion
+  app; the tray/preferences window is `index.html`. First run (no registered
+  device) opens the setup window; completing onboarding reveals Preferences.
+- The cross-process loopback handshake (companion IPC on 20506) is gone —
+  revealing Preferences after onboarding is a direct in-process window call.
+- Whole-app OTA now tracks a single app; the manifest `apps` map carries only
+  `companion`. Installers launch the one app for first-run setup.
+- Legacy cleanup: the pkg postinstall, both uninstallers, and the OTA path
+  remove any pre-merge Setup Assistant left on disk (search `LEGACY-SA-CLEANUP`;
+  remove once no pre-merge install remains).
+
 ## [1.2.2]
 
 - The companion now shows an "Updating…" state during an app update: the

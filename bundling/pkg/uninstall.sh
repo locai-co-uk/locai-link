@@ -4,9 +4,12 @@
 #
 # Removes Locai Link from the machine.
 #
-# Invoked two ways: (1) from the Setup Assistant "Uninstall" action, which
-# runs this via osascript `with administrator privileges` (always root); or
+# Invoked two ways: (1) from the app's "Uninstall" action, which runs this via
+# osascript `with administrator privileges` (always root); or
 # (2) directly: `sudo /Library/Locai/uninstall.sh`.
+#
+# Also clears any legacy Setup Assistant.app (pre-merge installs shipped a
+# separate onboarding app; it now lives inside the main app).
 #
 # Refuses to run without root (see the $EUID check) — prior versions
 # swallowed permission-denied errors and exited 0, falsely claiming success.
@@ -19,8 +22,8 @@
 # Locai + /Applications copies + CLI symlink, per-user Tauri data (caches /
 # WebKit / HTTPStorages / prefs / saved state), pinned Dock tiles, pkg receipt.
 #
-# The Setup Assistant deregisters the device from Control before it runs this
-# script, so the normal uninstall flow removes the dashboard row.
+# The app deregisters the device from Control before it runs this script, so the
+# normal uninstall flow removes the dashboard row.
 # Running this script standalone does NOT deregister — delete the device row in
 # Control manually in that case. No Keychain items are touched.
 set -uo pipefail
@@ -32,10 +35,12 @@ CLI_SYMLINK="/usr/local/bin/locai"
 COMPANION_APP_IN_APPLICATIONS="/Applications/Locai Link.app"
 SA_APP_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 PKG_RECEIPT="uk.co.locai.link.runtime"
-# Bundle identifiers for the two Tauri apps — used to clean per-user
-# caches / prefs / WebKit storage that live outside $INSTALL_ROOT.
+# Bundle identifiers used to clean per-user caches / prefs / WebKit storage that
+# live outside $INSTALL_ROOT. LEGACY-SA-CLEANUP: the legacy Setup Assistant id is
+# still cleaned on upgrade/uninstall (its onboarding is now part of the main
+# app); drop it once no pre-merge install remains.
 COMPANION_BUNDLE_ID="uk.co.locai.link.companion"
-SA_BUNDLE_ID="uk.co.locai.link.setup-assistant"
+LEGACY_SA_BUNDLE_ID="uk.co.locai.link.setup-assistant"
 
 log() {
     echo "[uninstall] $*"
@@ -48,9 +53,9 @@ if [[ $EUID -ne 0 ]]; then
     cat >&2 <<EOF
 [uninstall] This script must run as root.
 
-  Option A (recommended): open the Locai Link Setup Assistant and
-                          click "Uninstall" — it invokes this script
-                          via osascript with an admin prompt.
+  Option A (recommended): open Locai Link and use the "Uninstall"
+                          action — it invokes this script via
+                          osascript with an admin prompt.
 
   Option B (Terminal):    sudo /Library/Locai/uninstall.sh
 
@@ -85,14 +90,15 @@ fi
 # bootout SIGTERMs each service, but a runtime spawned outside launchd (e.g.
 # `locai run` from a terminal) isn't covered. Match `/<name>.app/` (leading +
 # trailing slashes) so we don't hit macOS's own /System .../Setup Assistant.app.
-# SA is killed LAST — it typically invoked us via osascript, so killing it
-# earlier cuts off our own error path.
+# The main app is killed LAST — it typically invoked us via osascript, so
+# killing it earlier cuts off our own error path.
 pkill -f "$INSTALL_ROOT/locai-link"                 2>/dev/null || true
-pkill -f "/Locai Link.app/"                         2>/dev/null || true
+# Legacy Setup Assistant copies (pre-merge installs).
 pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
 # Install-root SA copy ("Setup Assistant.app", no "Locai " prefix); the
 # full path skips macOS's own /CoreServices copy.
 pkill -f "$INSTALL_ROOT/Setup Assistant.app/"       2>/dev/null || true
+pkill -f "/Locai Link.app/"                         2>/dev/null || true
 
 # --- 3. Unregister the .apps from LaunchServices --------------------
 # After removing a .app, LaunchServices can keep a stale entry pointing at the
@@ -118,7 +124,7 @@ log "removed $INSTALL_ROOT + /Applications copies + symlinks"
 # cookies, and WebKit state from the previous device.
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
     USER_HOME="/Users/$CONSOLE_USER"
-    for bundle_id in "$COMPANION_BUNDLE_ID" "$SA_BUNDLE_ID"; do
+    for bundle_id in "$COMPANION_BUNDLE_ID" "$LEGACY_SA_BUNDLE_ID"; do
         rm -rf "$USER_HOME/Library/Caches/$bundle_id"
         rm -rf "$USER_HOME/Library/WebKit/$bundle_id"
         rm -rf "$USER_HOME/Library/HTTPStorages/$bundle_id"

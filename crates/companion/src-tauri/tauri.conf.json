@@ -22,10 +22,22 @@
         "visible": false,
         "skipTaskbar": true,
         "titleBarStyle": "Visible"
+      },
+      {
+        "label": "setup",
+        "url": "setup.html",
+        "title": "Locai Link Setup",
+        "width": 900,
+        "height": 720,
+        "resizable": false,
+        "center": true,
+        "fullscreen": false,
+        "visible": false,
+        "skipTaskbar": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:20505; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:20505 https://control.locai.co.uk https://api.locai.co.uk; font-src 'self' data:"
     }
   },
   "bundle": {

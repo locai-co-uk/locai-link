@@ -29,6 +29,9 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Direct Control-plane HTTP for the onboarding flow (device auth, register,
+# model catalog). Preferences reaches the local agent via the shared crate.
+ureq = { workspace = true }
 locai-link-shared = { path = "../../shared" }
 # Native quit-confirmation dialog. Tauri's own plugin marshals the dialog onto
 # the correct (main) thread and event loop — rfd's sync GTK dialog doesn't

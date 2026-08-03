@@ -1023,7 +1023,6 @@ def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
             f"{wrap}/bundle/versions/{new_version}/manifest.json": manifest_json,
             f"{wrap}/bundle/versions/{new_version}/{updater.RUNTIME_BINARY}": b"runtime",
             f"{wrap}/companion": b"NEW-COMPANION",
-            f"{wrap}/setup-assistant": b"NEW-SA",
         }
     )
 
@@ -1054,6 +1053,24 @@ def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
     assert (root / updater.CURRENT_LINK).resolve().name == new_version
     assert (root / "companion").read_bytes() == b"NEW-COMPANION"
     restart.assert_any_call("companion")
+
+
+def test_ota_sweeps_legacy_setup_assistant_linux(tmp_path, monkeypatch):
+    """An OTA-only device keeps a pre-merge Setup Assistant on disk (the pkg /
+    uninstall scripts never run for it) — swap_bundle's sweep removes it."""
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "setup-assistant").write_bytes(b"legacy")
+    desktop = tmp_path / "home" / ".local" / "share" / "applications"
+    desktop.mkdir(parents=True)
+    (desktop / "locai-setup-assistant.desktop").write_text("[Desktop Entry]\n")
+    monkeypatch.setattr(updater.Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+    updater._remove_legacy_setup_assistant(root)
+
+    assert not (root / "setup-assistant").exists()
+    assert not (desktop / "locai-setup-assistant.desktop").exists()
 
 
 # --- check_update_available --------------------------------------

@@ -9,8 +9,7 @@
 #
 # Prereqs (run these first in the repo root):
 #     uv run python bundling/build.py --plugins <plugin-set>
-#     ( cd crates/setup_assistant && npm run tauri build -- --no-bundle )
-#     ( cd crates/companion       && npm run tauri build -- --no-bundle )
+#     ( cd crates/companion && npm run tauri build -- --no-bundle )
 #
 # Plugin selection is read from dist/locai-link/manifest.json (written by
 # build.py) — the tarball is labelled for whatever plugins the bundle has;
@@ -19,8 +18,7 @@
 # Output layout (inside the tarball):
 #     locai-link-<code>-linux-x86_64-<version>/
 #     ├── bundle/                       (contents of dist/locai-link/)
-#     ├── setup-assistant               (Tauri release binary)
-#     ├── companion                     (Tauri release binary)
+#     ├── companion                     (Tauri release binary: tray + setup)
 #     ├── boot.json
 #     ├── systemd/*.service
 #     ├── applications/*.desktop
@@ -72,11 +70,10 @@ TAURI_DIR="$REPO_ROOT/crates/target/release"
 BOOT_JSON="$REPO_ROOT/bundling/pkg/boot.json"
 MANIFEST="$BUNDLE_DIR/current/manifest.json"
 
-[[ -f "$BUNDLE_DIR/locai-link" ]]                || err "runtime bundle not at $BUNDLE_DIR — run \`uv run python bundling/build.py --plugins …\` first."
-[[ -f "$MANIFEST" ]]                             || err "manifest.json not at $MANIFEST — did build.py finish?"
-[[ -f "$TAURI_DIR/locai-link-setup-assistant" ]] || err "setup-assistant binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/setup_assistant."
-[[ -f "$TAURI_DIR/locai-link-companion" ]]       || err "companion binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/companion."
-[[ -f "$BOOT_JSON" ]]                            || err "boot.json not at $BOOT_JSON."
+[[ -f "$BUNDLE_DIR/locai-link" ]]          || err "runtime bundle not at $BUNDLE_DIR — run \`uv run python bundling/build.py --plugins …\` first."
+[[ -f "$MANIFEST" ]]                       || err "manifest.json not at $MANIFEST — did build.py finish?"
+[[ -f "$TAURI_DIR/locai-link-companion" ]] || err "companion binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/companion."
+[[ -f "$BOOT_JSON" ]]                      || err "boot.json not at $BOOT_JSON."
 
 # --- Derive the asset name from manifest.json ------------------------
 # manifest.json is the single source of truth for bundle contents (build.py
@@ -115,9 +112,8 @@ mkdir -p "$ROOT"
 mkdir -p "$ROOT/bundle"
 cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
 
-# 2. Tauri release binaries.
-install -m 0755 "$TAURI_DIR/locai-link-setup-assistant" "$ROOT/setup-assistant"
-install -m 0755 "$TAURI_DIR/locai-link-companion"       "$ROOT/companion"
+# 2. Tauri release binary (tray + first-run setup).
+install -m 0755 "$TAURI_DIR/locai-link-companion" "$ROOT/companion"
 
 # 2b. App content hashes for whole-app OTA — written to the tarball's
 # manifest so swap_bundle re-swaps a UI app only when its source changed.
@@ -133,9 +129,9 @@ chmod 0644 "$ROOT/boot.json"
 mkdir -p "$ROOT/systemd" "$ROOT/applications" "$ROOT/icons"
 install -m 0644 "$SCRIPT_DIR/systemd/"*.service         "$ROOT/systemd/"
 install -m 0644 "$SCRIPT_DIR/applications/"*.desktop    "$ROOT/applications/"
-# Icons come from the SA crate — companion has the same brand set. The
-# install.sh reshuffles these into hicolor sizes at install time.
-ICONS_SRC="$REPO_ROOT/crates/setup_assistant/src-tauri/icons"
+# Icons come from the companion crate. The install.sh reshuffles these into
+# hicolor sizes at install time.
+ICONS_SRC="$REPO_ROOT/crates/companion/src-tauri/icons"
 for name in 32x32.png 128x128.png 128x128@2x.png; do
     [[ -f "$ICONS_SRC/$name" ]] && install -m 0644 "$ICONS_SRC/$name" "$ROOT/icons/$name"
 done

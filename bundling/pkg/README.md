@@ -24,7 +24,7 @@ bundling/pkg/
 ├── license.html         ← Licence pane content (BUSL-1.1-LOCAI)
 ├── conclusion.html      ← Summary pane content shown after install
 └── scripts/
-    └── postinstall      ← Runs after payload copy: chown, symlink CLI, launch Setup Assistant
+    └── postinstall      ← Runs after payload copy: chown, symlink CLI, launch Locai Link (first-run setup)
 ```
 
 ## What's NOT here (yet)
@@ -34,9 +34,9 @@ bundling/pkg/
   then feeds that directory to `pkgbuild --root` as the payload. This
   directory only holds the *scripts* and *resources* that describe
   the wizard.
-- **The Setup Assistant `.app` bundle.** Built by Tauri
-  (`crates/setup_assistant/`) and copied into the payload by the
-  release workflow.
+- **The `Locai Link.app` bundle.** Built by Tauri
+  (`crates/companion/`) — the tray app that also hosts first-run setup —
+  and copied into the payload by the release workflow.
 - **A working build pipeline.** The `pkgbuild` + `productbuild` +
   notarisation invocations live in the release CI once the Installer
   cert is available. Reference commands below.
@@ -56,8 +56,8 @@ python3 bundling/gen_boot_json.py \
     --manifest "$STAGING/current/manifest.json" \
     --template bundling/pkg/boot.json \
     --output   "$STAGING/boot.json"
-cp -R crates/target/release/bundle/macos/Setup\ Assistant.app \
-                                                    "$STAGING/Setup Assistant.app"
+cp -R "crates/target/release/bundle/macos/Locai Link.app" \
+                                                    "$STAGING/Locai Link.app"
 
 # 2. Build the component .pkg with the postinstall script.
 pkgbuild \
@@ -88,8 +88,9 @@ xcrun stapler staple "Locai Link.pkg"
 3. **Destination Select** — Apple's stock disk picker (system-wide only)
 4. **Installation** — payload copy progress; `scripts/postinstall`
    runs after copy completes
-5. **Summary** — `conclusion.html` content; Setup Assistant has
-   already launched by the time this pane appears
+5. **Summary** — `conclusion.html` content; Locai Link has already
+   launched (the setup window opens on first run) by the time this
+   pane appears
 
 Steps 3–5 are Installer.app's stock chrome — we don't restyle them.
 See `INSTALLER_PLAN.md` for the design decision.

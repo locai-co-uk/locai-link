@@ -1136,7 +1136,7 @@ def bundle_asset_available(install_root: Path | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Whole-app OTA — swap changed UI apps (companion / setup assistant)
+# Whole-app OTA — swap the changed UI app (the single desktop app)
 # ---------------------------------------------------------------------------
 
 _APP_COMPANION = "companion"
@@ -1145,10 +1145,10 @@ _APP_COMPANION = "companion"
 def _ui_app_payload_name(key: str) -> str:
     """Name of the app inside the OTA payload for the current platform."""
     if sys.platform == "darwin":
-        return {"companion": "Locai Link.app", "setup_assistant": "Setup Assistant.app"}[key]
+        return {"companion": "Locai Link.app"}[key]
     if sys.platform == "win32":
-        return {"companion": "companion.exe", "setup_assistant": "setup-assistant.exe"}[key]
-    return {"companion": "companion", "setup_assistant": "setup-assistant"}[key]
+        return {"companion": "companion.exe"}[key]
+    return {"companion": "companion"}[key]
 
 
 def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
@@ -1158,13 +1158,10 @@ def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
     the OTA can't rewrite it (writing inside /Applications needs admin) so it's
     left alone and refreshed on the next pkg install."""
     if sys.platform == "darwin":
-        if key == _APP_COMPANION:
-            return [install_root / "Locai Link.app"]
-        return [install_root / "Setup Assistant.app"]
+        return [install_root / "Locai Link.app"]
     if sys.platform == "win32":
         return []  # no companion OTA on Windows yet
-    name = "companion" if key == _APP_COMPANION else "setup-assistant"
-    return [install_root / name]
+    return [install_root / "companion"]
 
 
 def _rm(path: Path) -> None:
@@ -1172,6 +1169,30 @@ def _rm(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     elif path.exists() or path.is_symlink():
         path.unlink(missing_ok=True)
+
+
+def _remove_legacy_setup_assistant(install_root: Path) -> None:
+    """Remove the pre-merge standalone Setup Assistant left on disk by an
+    upgrade-in-place OTA (onboarding is now a window of the main app). The pkg
+    postinstall + uninstaller cover the reinstall/uninstall paths; this covers
+    OTA-only devices. Best-effort — a leftover is harmless (no LaunchAgent
+    targets it). LEGACY-SA-CLEANUP: remove once no pre-merge install remains."""
+    targets: list[Path] = []
+    if sys.platform == "darwin":
+        # Only the user-owned install-root copy is removable from the user-context
+        # OTA; the /Applications copy is pkg-managed (root-owned) and clears on the
+        # next pkg reinstall/uninstall.
+        targets.append(install_root / "Setup Assistant.app")
+    elif sys.platform.startswith("linux"):
+        targets.append(install_root / "setup-assistant")
+        targets.append(Path.home() / ".local" / "share" / "applications" / "locai-setup-assistant.desktop")
+    for t in targets:
+        try:
+            if t.exists() or t.is_symlink():
+                _rm(t)
+                logger.info(f"removed legacy Setup Assistant artifact: {t}")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"legacy Setup Assistant cleanup skipped {t}: {e}")
 
 
 def _locate_in_payload(staging: Path, name: str) -> Path | None:
@@ -1224,8 +1245,7 @@ _COMPANION_LABEL = constants.COMPANION_LABEL
 
 
 def _restart_ui_app(key: str) -> None:
-    """Relaunch the companion so it picks up the swapped binary. Setup Assistant
-    only runs during setup, so it has nothing to restart. Best-effort."""
+    """Relaunch the app so it picks up the swapped binary. Best-effort."""
     if key != _APP_COMPANION:
         return
     try:
@@ -1261,7 +1281,7 @@ def _home_for_uid(uid: str) -> Path:
 
 
 def _restart_companion_macos(force_reload: bool = False) -> None:
-    """Relaunch the companion, mirroring the Setup Assistant's proven sequence:
+    """Relaunch the companion:
     kickstart in place; if the service isn't reachable in this domain (stale /
     legacy-domain registration), rebootstrap from the installed plist and retry;
     fall back to LaunchServices. Each launchctl call is bounded so a hung
@@ -1614,6 +1634,10 @@ def swap_bundle(install_root: Path | None = None) -> bool:
             _restart_ui_app(key)
     except Exception as e:  # noqa: BLE001
         logger.error(f"whole-app OTA: UI app swap failed (runtime still updated): {e}")
+
+    # Devices that only ever OTA-update never run the pkg/uninstaller scripts, so
+    # sweep the merged-away Setup Assistant here too. See LEGACY-SA-CLEANUP.
+    _remove_legacy_setup_assistant(install_root)
 
     gc_old_versions(install_root)
     clear_staging(install_root)

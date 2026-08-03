@@ -60,13 +60,6 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
     assert prog[0] == str(dests[0] / "Contents" / "MacOS" / binary)
 
 
-def test_setup_assistant_destination_is_install_root(monkeypatch):
-    monkeypatch.setattr(updater.sys, "platform", "darwin")
-    assert updater._ui_app_destinations("setup_assistant", MACOS_INSTALL_ROOT) == [  # pyright: ignore[reportArgumentType]
-        MACOS_INSTALL_ROOT / "Setup Assistant.app"
-    ]
-
-
 def test_agent_launchagent_points_at_launcher():
     """The runtime LaunchAgent runs the launcher, which follows `current`."""
     plist = _load_plist("uk.co.locai.link.agent.plist")
@@ -180,11 +173,9 @@ def test_payload_names_match_release_workflow(monkeypatch):
     """The names the OTA looks for in the payload must match what release.yml stages."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     assert updater._ui_app_payload_name("companion") == "Locai Link.app"
-    assert updater._ui_app_payload_name("setup_assistant") == "Setup Assistant.app"
 
     release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert '"$OTA_ROOT/Locai Link.app"' in release
-    assert '"$OTA_ROOT/Setup Assistant.app"' in release
 
 
 def test_postinstall_makes_install_root_copy_swappable():
@@ -256,8 +247,9 @@ def test_identical_source_keeps_stable_hash(tmp_path):
 
 def test_uninstaller_bundle_ids_match_tauri_apps():
     """The uninstaller cleans per-user caches/prefs by bundle id, so its ids must
-    match what the Tauri apps are actually built with — otherwise the cleanup
-    silently misses (the Setup Assistant used `.setup` vs the built `.setup-assistant`)."""
+    match what the Tauri app is actually built with — otherwise the cleanup
+    silently misses. The legacy Setup Assistant id is a literal (its crate is
+    gone, merged into the companion), still cleaned up on upgrade."""
     uninstall = (PKG / "uninstall.sh").read_text(encoding="utf-8")
 
     def _sh_var(name: str) -> str:
@@ -270,4 +262,5 @@ def test_uninstaller_bundle_ids_match_tauri_apps():
         return str(json.loads(conf.read_text(encoding="utf-8"))["identifier"])
 
     assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("companion")
-    assert _sh_var("SA_BUNDLE_ID") == _tauri_id("setup_assistant")
+    # Legacy id, hardcoded for upgrade cleanup now the SA crate is removed.
+    assert _sh_var("LEGACY_SA_BUNDLE_ID") == "uk.co.locai.link.setup-assistant"

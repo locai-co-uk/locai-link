@@ -6,6 +6,7 @@
 //! header text, and Models submenu.
 
 mod preferences;
+mod setup;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -147,10 +148,12 @@ pub fn run() {
         // then exits, so no duplicate tray icon; surface Preferences so the
         // relaunch isn't a silent no-op.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_preferences_window(app);
+            focus_primary_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Onboarding sign-in session (JWT held Rust-side, never crosses IPC).
+        .manage(setup::SignInState::default())
         .invoke_handler(tauri::generate_handler![
             preferences::get_prefs_state,
             preferences::poll_status,
@@ -167,6 +170,25 @@ pub fn run() {
             preferences::runtime_restart,
             preferences::reveal_log_file,
             preferences::open_control_device,
+            // Onboarding wizard (setup window).
+            setup::check_install,
+            setup::get_install_root,
+            setup::get_platform,
+            setup::sign_in_start,
+            setup::sign_in_poll,
+            setup::suggest_device_name,
+            setup::list_models,
+            setup::deploy_model,
+            setup::mark_deployment_pending,
+            setup::wait_for_agent_ready,
+            setup::re_register,
+            setup::open_preferences_window,
+            setup::launch_uninstaller,
+            setup::mint_registration_key,
+            setup::register_device,
+            setup::install_agent_config,
+            setup::install_launchagents,
+            setup::exit_app,
         ])
         // Close-button hides Preferences; tray keeps running. macOS: flip back
         // to Accessory so the Dock icon drops while no window is visible.
@@ -234,8 +256,11 @@ pub fn run() {
             let app_handle = app.handle().clone();
             thread::spawn(move || poll_forever(app_handle, tray, handles));
 
-            let ipc_handle = app.handle().clone();
-            thread::spawn(move || spawn_ipc_listener(ipc_handle));
+            // First run (no registered identity) shows the onboarding window;
+            // post-onboarding launches skip straight to the tray.
+            if !device_registered() {
+                show_setup_window(app.handle());
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -257,66 +282,43 @@ fn kickstart_runtime_if_installed() {
         .output();
 }
 
-/// Companion IPC port, adjacent to the health server's 20505. Both live
-/// below the ephemeral range floor (32768 on Linux / 49152 on macOS) so the
-/// OS can't grab them for an outgoing connection before we bind.
-const IPC_PORT: u16 = locai_link_shared::IPC_PORT;
+/// Whether a device identity has been registered — the signal that onboarding
+/// is complete. Drives first-run window selection.
+fn device_registered() -> bool {
+    locai_link_shared::read_identity(&std::path::PathBuf::from(preferences::install_root()))
+        .is_some()
+}
 
-/// Loopback listener so other processes can ask the companion to open
-/// Preferences. One endpoint: `POST /preferences/show` → 204; anything else → 404.
-fn spawn_ipc_listener(app: AppHandle) {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
-
-    let listener = match TcpListener::bind(("127.0.0.1", IPC_PORT)) {
-        Ok(l) => l,
-        Err(e) => {
-            // Non-fatal — tray still works; SA falls through to starting the service.
-            eprintln!("[companion] IPC listener bind {IPC_PORT}: {e}");
-            return;
-        }
-    };
-
-    for incoming in listener.incoming() {
-        let mut stream = match incoming {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
-        if reader.read_line(&mut request_line).is_err() {
-            continue;
-        }
-        // Drain remaining headers to avoid RST-ing the client mid-write.
-        let mut header = String::new();
-        while reader
-            .read_line(&mut header)
-            .map(|n| n > 2)
-            .unwrap_or(false)
-        {
-            header.clear();
-        }
-
-        let is_show = request_line.starts_with("POST /preferences/show ")
-            || request_line.starts_with("POST /preferences/show?");
-        let (status_line, do_show) = if is_show {
-            ("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", true)
-        } else {
-            ("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", false)
-        };
-        let _ = stream.write_all(status_line.as_bytes());
-        let _ = stream.flush();
-
-        if do_show {
-            // Tauri window ops must run on the main thread.
-            let handle = app.clone();
-            let _ = app.run_on_main_thread(move || show_preferences_window(&handle));
-        }
+/// Route a re-launch (single-instance) to the window that matters: the setup
+/// wizard while unregistered, Preferences once onboarding is done.
+fn focus_primary_window(app: &AppHandle) {
+    if device_registered() {
+        show_preferences_window(app);
+    } else {
+        show_setup_window(app);
     }
 }
 
+/// Show + focus the first-run setup window; macOS flips to Regular so it gets a
+/// Dock icon + focus during onboarding (mirrors the Preferences window).
+fn show_setup_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("setup") else {
+        eprintln!("[companion] setup window not found");
+        return;
+    };
+    if let Err(e) = window.show() {
+        eprintln!("[companion] setup window.show failed: {e}");
+        return;
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("[companion] setup window.set_focus failed: {e}");
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+}
+
 /// Show + focus the Preferences window; un-hides if the user closed it earlier.
-fn show_preferences_window(app: &AppHandle) {
+pub(crate) fn show_preferences_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("[companion] preferences window not found");
         return;

@@ -450,10 +450,12 @@
 
     // Phase 5: queue deploys for selected models, in parallel (independent
     // POST + Zenoh dispatch each, so ~1 RTT not N). Failures don't roll back.
-    const selected =
-      models.kind === "ready"
-        ? models.models.filter((m) => models.selected.has(m.id))
-        : [];
+    // Capture the narrowed value: `models` is reactive $state, so TS widens it
+    // back to the union inside the filter closure.
+    const ready = models.kind === "ready" ? models : null;
+    const selected = ready
+      ? ready.models.filter((m) => ready.selected.has(m.id))
+      : [];
     finish = {
       kind: "deploying",
       registered,
@@ -524,10 +526,9 @@
   async function openCompanionPrefs() {
     splashAction = { kind: "working", message: "Opening Preferences…" };
     try {
-      await invoke<void>("open_companion_preferences");
-      // Preferences window is up in the companion — no need for two
-      // windows fighting for focus. Exit the SA cleanly.
-      await invoke<void>("exit_app");
+      // Reveals the Preferences window and dismisses this setup window; the
+      // tray keeps running (setup and preferences are one app now).
+      await invoke<void>("open_preferences_window");
     } catch (e) {
       splashAction = {
         kind: "error",
@@ -564,9 +565,9 @@
   async function confirmUninstall() {
     splashAction = { kind: "working", message: "Removing Locai Link…" };
     try {
-      await invoke<void>("launch_uninstaller_from_sa", { installRoot });
+      await invoke<void>("launch_uninstaller", { installRoot });
       // Uninstaller runs as a transient user-scope service, so it survives us
-      // exiting. Close the SA; the tray disappears as it stops the companion.
+      // exiting. Quit the app; the uninstaller tears down the rest.
       await invoke<void>("exit_app");
     } catch (e) {
       splashAction = {
@@ -999,9 +1000,9 @@
 
       <footer class="bar">
         <button class="btn btn--ghost" onclick={back} disabled={current === 0}>Go Back</button>
-        <!-- Continue drives the wizard forward; on the last step it's
-             replaced by Complete, which exits the app once registration
-             finished. Both never render together. -->
+        <!-- Continue drives the wizard forward; on the last step it's replaced
+             by Complete, which reveals Preferences and dismisses this window
+             once registration finished. Both never render together. -->
         {#if current < STEPS.length - 1}
           <button
             class="btn btn--primary"
@@ -1013,7 +1014,7 @@
         {:else if finish.kind === "done"}
           <button
             class="btn btn--primary"
-            onclick={() => void invoke("exit_app")}
+            onclick={openCompanionPrefs}
           >
             Complete
           </button>
@@ -1024,8 +1025,8 @@
 {/if}
 
 <style>
-  /* Global reset (border-box, body margin, hidden scrollbars) lives in
-     lib/tokens/tokens.css so it applies without Svelte scoping quirks. */
+  /* Global reset (border-box, body margin, hidden scrollbars) + wizard shell
+     layout live in setup.css so they apply without Svelte scoping quirks. */
 
   .wizard {
     display: flex;

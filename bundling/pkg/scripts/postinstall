@@ -7,18 +7,21 @@
 # Payload provides:
 #     /Library/Locai/locai-link            (the launcher binary)
 #     /Library/Locai/boot.json             (production channel config)
-#     /Library/Locai/Setup Assistant.app   (the Tauri first-run app)
+#     /Library/Locai/Locai Link.app        (the Tauri app: tray + first-run setup)
 #
 # This script:
 #     1. Ensures the launcher is executable and owned correctly.
 #     2. Symlinks /usr/local/bin/locai to the launcher so users can
 #        invoke "locai …" from a terminal without a PATH edit.
-#     3. Launches Setup Assistant.app so the user picks up in the
-#        wizard the moment Installer.app's conclusion pane appears.
+#     3. Removes any legacy Setup Assistant.app (pre-merge installs shipped a
+#        separate onboarding app; onboarding is now a window of the main app).
+#     4. Launches Locai Link.app; on first run (no registered device) it opens
+#        the setup window so the user picks up in the wizard the moment
+#        Installer.app's conclusion pane appears.
 #
 # We deliberately do NOT register the runtime or LaunchAgents here — the
-# "Run at login" choice is captured by Setup Assistant's Permissions step,
-# so registration happens on Finish, not at .pkg install time.
+# "Run at login" choice is captured in the setup wizard's Permissions step, so
+# registration happens on Finish, not at .pkg install time.
 #
 # pkgbuild passes these positional args:
 #     $1 — the .pkg's own path (unused)
@@ -30,11 +33,12 @@ set -euo pipefail
 INSTALL_ROOT="/Library/Locai"
 LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
-SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
-SETUP_ASSISTANT_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 COMPANION_APP="${INSTALL_ROOT}/Locai Link.app"
 COMPANION_SYMLINK="/Applications/Locai Link.app"
 UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
+# Legacy onboarding app from pre-merge installs — removed on upgrade.
+LEGACY_SA="${INSTALL_ROOT}/Setup Assistant.app"
+LEGACY_SA_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 
 log() {
     echo "[postinstall] $*"
@@ -153,50 +157,47 @@ else
     log "companion app not found at $COMPANION_APP — skipping /Applications copy"
 fi
 
-# --- 4b. /Applications/Locai Setup Assistant.app ---------------------
-# Copied into /Applications so it's discoverable via Spotlight / Launchpad.
-# Otherwise a user who quit the auto-launched SA before finishing couldn't
-# reopen it (the /Library/Locai copy isn't indexed by Launch Services).
-if [[ -d "$SETUP_ASSISTANT" ]]; then
-    rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
-    ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
-    if [[ "$INSTALL_USER" != "root" ]]; then
-        chown -R "$INSTALL_USER:staff" "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
+# --- 4b. Remove legacy Setup Assistant.app ---------------------------
+# LEGACY-SA-CLEANUP: pre-merge installs shipped a separate onboarding app;
+# onboarding is now a window of the main app. Clear both copies + their
+# LaunchServices entries so a stale tile / Spotlight hit doesn't linger after an
+# upgrade. Remove this block once no pre-merge install remains.
+for legacy in "$LEGACY_SA" "$LEGACY_SA_IN_APPLICATIONS"; do
+    if [[ -d "$legacy" ]]; then
+        [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$legacy" 2>/dev/null || true
+        rm -rf "$legacy"
+        log "removed legacy Setup Assistant: $legacy"
     fi
-    log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
-    register_app "$SETUP_ASSISTANT_IN_APPLICATIONS"
-else
-    log "setup assistant not found at $SETUP_ASSISTANT — skipping /Applications copy"
-fi
+done
 
-# --- 5. Launch Setup Assistant ---------------------------------------
-# postinstall runs as root, but the SA must run as the actual user for
-# LaunchAgent registration + Keychain access. Hand off via "sudo -u".
+# --- 5. Launch Locai Link --------------------------------------------
+# postinstall runs as root, but the app must run as the actual user for
+# LaunchAgent registration (on Finish) + Keychain access. Hand off via "sudo -u".
+# First launch has no registered device, so the app opens the setup window.
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     # No graphical console user (headless / remote / root Terminal). Skip the
-    # launch — the user can open Setup Assistant.app manually.
-    log "no console user detected; skipping Setup Assistant auto-launch"
+    # launch — the user can open Locai Link manually.
+    log "no console user detected; skipping app auto-launch"
     exit 0
 fi
 
-# Prefer the /Applications copy so LaunchServices registers the .app
-# by its indexed bundle identity; fall back to the /Library/Locai copy
-# if the copy step above failed.
-SA_TO_LAUNCH=""
-if [[ -d "$SETUP_ASSISTANT_IN_APPLICATIONS" ]]; then
-    SA_TO_LAUNCH="$SETUP_ASSISTANT_IN_APPLICATIONS"
-elif [[ -d "$SETUP_ASSISTANT" ]]; then
-    SA_TO_LAUNCH="$SETUP_ASSISTANT"
+# Prefer the /Applications copy so LaunchServices dispatches by the app's
+# indexed bundle identity; fall back to the /Library/Locai copy.
+APP_TO_LAUNCH=""
+if [[ -d "$COMPANION_SYMLINK" ]]; then
+    APP_TO_LAUNCH="$COMPANION_SYMLINK"
+elif [[ -d "$COMPANION_APP" ]]; then
+    APP_TO_LAUNCH="$COMPANION_APP"
 fi
-if [[ -n "$SA_TO_LAUNCH" ]]; then
+if [[ -n "$APP_TO_LAUNCH" ]]; then
     # `open` returns immediately once the .app is dispatched to
     # launchd; the postinstall doesn't hold the Installer.app UI thread.
-    sudo -u "$CONSOLE_USER" open -a "$SA_TO_LAUNCH" || {
-        log "WARN: failed to launch $SA_TO_LAUNCH; user must launch it manually"
+    sudo -u "$CONSOLE_USER" open -a "$APP_TO_LAUNCH" || {
+        log "WARN: failed to launch $APP_TO_LAUNCH; user must launch it manually"
     }
-    log "Setup Assistant handed off to $CONSOLE_USER (from $SA_TO_LAUNCH)"
+    log "Locai Link handed off to $CONSOLE_USER (from $APP_TO_LAUNCH)"
 else
-    log "Setup Assistant.app not found; user must launch it manually"
+    log "Locai Link.app not found; user must launch it manually"
 fi
 
 exit 0

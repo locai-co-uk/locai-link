@@ -39,7 +39,6 @@ COMPANION_APP = "Locai Link.app"
 # Tauri names the binary after the cargo package, not the productName; the plist
 # and updater target this (INFRA-374 fix).
 COMPANION_EXEC = "locai-link-companion"
-SA_APP = "Setup Assistant.app"
 
 
 # ---------------------------------------------------------------------------
@@ -91,29 +90,27 @@ def _app_marker(path: Path) -> str:
 
 def test_whole_app_ota_swaps_changed_companion_on_disk(tmp_path):
     """Companion hash changed → the install-root .app is replaced with the new
-    build; an unchanged app is left untouched."""
+    build; an unchanged hash leaves it untouched."""
     install_root = tmp_path / "Library" / "Locai"
     install_root.mkdir(parents=True)
     _make_app(install_root / COMPANION_APP, version="1.0.0", executable=COMPANION_EXEC, marker="old-companion")
-    _make_app(install_root / SA_APP, version="1.0.0", executable="Setup Assistant", marker="old-sa")
 
     staging = tmp_path / "extracted"
     staging.mkdir()
     _make_app(staging / COMPANION_APP, version="1.1.0", executable=COMPANION_EXEC, marker="new-companion")
-    _make_app(staging / SA_APP, version="1.1.0", executable="Setup Assistant", marker="new-sa")
 
-    old_apps = {"companion": "hash-c-old", "setup_assistant": "hash-s-same"}
-    new_apps = {"companion": "hash-c-new", "setup_assistant": "hash-s-same"}  # only companion changed
+    # Unchanged hash → skipped.
+    assert updater.swap_changed_ui_apps(staging, install_root, {"companion": "h"}, {"companion": "h"}) == []
+    assert _app_version(install_root / COMPANION_APP) == "1.0.0"
 
-    swapped = updater.swap_changed_ui_apps(staging, install_root, old_apps, new_apps)
+    swapped = updater.swap_changed_ui_apps(
+        staging, install_root, {"companion": "hash-c-old"}, {"companion": "hash-c-new"}
+    )
 
     assert swapped == ["companion"]
     # THE assertion: the UI on disk is now the new build.
     assert _app_version(install_root / COMPANION_APP) == "1.1.0"
     assert _app_marker(install_root / COMPANION_APP) == "new-companion"
-    # Unchanged app must not be disturbed.
-    assert _app_version(install_root / SA_APP) == "1.0.0"
-    assert _app_marker(install_root / SA_APP) == "old-sa"
     # No stray temp/backup artifacts left behind.
     assert not (install_root / f".{COMPANION_APP}.new").exists()
     assert not (install_root / f".{COMPANION_APP}.old").exists()
@@ -222,7 +219,7 @@ def _write_manifest(path: Path, *, version: str, asset_name: str, apps: dict[str
 
 def test_swap_bundle_end_to_end_updates_runtime_and_ui(tmp_path, monkeypatch):
     """The full OTA chain against a local 'release', asserting the runtime flips
-    AND both UI apps land on the new version at the install root."""
+    AND the UI app lands on the new version at the install root."""
     stem = "locai-link-llm-stt"
     repo = "locai-co-uk/locai-link"
     old_v, new_v = "1.0.0", "1.1.0"
@@ -234,11 +231,10 @@ def test_swap_bundle_end_to_end_updates_runtime_and_ui(tmp_path, monkeypatch):
     old_ver_dir.mkdir(parents=True)
     (old_ver_dir / updater.RUNTIME_BINARY).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (old_ver_dir / updater.RUNTIME_BINARY).chmod(0o755)
-    old_apps = {"companion": "c-old", "setup_assistant": "s-old"}
+    old_apps = {"companion": "c-old"}
     _write_manifest(old_ver_dir / "manifest.json", version=old_v, asset_name=stem, apps=old_apps)
     (install_root / "current").symlink_to(Path("versions") / old_v, target_is_directory=True)
     _make_app(install_root / COMPANION_APP, version=old_v, executable=COMPANION_EXEC, marker="old-companion")
-    _make_app(install_root / SA_APP, version=old_v, executable="Setup Assistant", marker="old-sa")
 
     # --- new OTA tarball (matches release.yml layout) ---------------------
     ota_root = tmp_path / "ota"
@@ -246,10 +242,9 @@ def test_swap_bundle_end_to_end_updates_runtime_and_ui(tmp_path, monkeypatch):
     new_ver_dir.mkdir(parents=True)
     (new_ver_dir / updater.RUNTIME_BINARY).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (new_ver_dir / updater.RUNTIME_BINARY).chmod(0o755)
-    new_apps = {"companion": "c-new", "setup_assistant": "s-new"}
+    new_apps = {"companion": "c-new"}
     _write_manifest(new_ver_dir / "manifest.json", version=new_v, asset_name=stem, apps=new_apps)
     _make_app(ota_root / COMPANION_APP, version=new_v, executable=COMPANION_EXEC, marker="new-companion")
-    _make_app(ota_root / SA_APP, version=new_v, executable="Setup Assistant", marker="new-sa")
 
     tar_path = tmp_path / asset
     with tarfile.open(tar_path, "w:gz") as tf:
@@ -272,10 +267,8 @@ def test_swap_bundle_end_to_end_updates_runtime_and_ui(tmp_path, monkeypatch):
     assert flipped is True
     # Runtime advanced.
     assert updater.read_manifest(install_root).version == new_v
-    # THE assertion: both UI apps on disk are the new build.
+    # THE assertion: the UI app on disk is the new build.
     assert _app_version(install_root / COMPANION_APP) == new_v
     assert _app_marker(install_root / COMPANION_APP) == "new-companion"
-    assert _app_version(install_root / SA_APP) == new_v
-    assert _app_marker(install_root / SA_APP) == "new-sa"
     # Companion was asked to relaunch.
     assert "companion" in restarts
