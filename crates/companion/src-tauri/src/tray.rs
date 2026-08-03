@@ -5,9 +5,9 @@
 //! agent's `/healthz` and `/models` and reflects state in the tray icon,
 //! header text, and Models submenu.
 
-// `preferences` and `setup` are declared in lib.rs (ui-gated); reference them
-// here so the bare `preferences::` / `setup::` paths below keep working.
-use crate::{preferences, setup};
+// `preferences`, `setup`, `supervisor` are declared in lib.rs; reference them
+// here so the bare `preferences::` / `setup::` / `supervisor::` paths work.
+use crate::{preferences, setup, supervisor};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -146,6 +146,12 @@ pub(crate) type SharedHandles = Arc<Mutex<MenuHandles>>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // In-process supervision of the Python runtime child (replaces the separate
+    // agent service). One clone drives the supervise thread; one lives in Tauri
+    // state so the prefs Start/Stop/Restart commands can signal it.
+    let control = supervisor::SupervisorControl::running();
+    let supervise_control = control.clone();
+
     tauri::Builder::default()
         // Must be the first plugin registered. A second launch (Dock/Launchpad,
         // or a stale /Applications copy) reaches the running instance here and
@@ -158,6 +164,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // Onboarding sign-in session (JWT held Rust-side, never crosses IPC).
         .manage(setup::SignInState::default())
+        // Runtime supervisor control (prefs Start/Stop/Restart signal this).
+        .manage(control)
         .invoke_handler(tauri::generate_handler![
             preferences::get_prefs_state,
             preferences::poll_status,
@@ -210,7 +218,7 @@ pub fn run() {
                 }
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             // Publish our running build version so the runtime's post-OTA drift
             // check can tell whether the companion actually relaunched onto the
             // new build. macOS-only: the drift check is Darwin-only, and
@@ -234,9 +242,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Backgrounded so we don't block the tray icon appearing.
-            #[cfg(target_os = "macos")]
-            thread::spawn(kickstart_runtime_if_installed);
+            // Supervise the Python runtime child in-process (replaces the
+            // separate agent service). Backgrounded so the tray icon appears
+            // immediately; the prefs Start/Stop/Restart commands drive the same
+            // control via managed state.
+            thread::spawn(move || supervisor::supervise_forever(supervise_control));
 
             let registered_at_start = device_registered();
             let initial_status = if registered_at_start {
@@ -283,21 +293,6 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Kick the runtime LaunchAgent so "open Locai Link" implicitly starts it if down.
-/// `kickstart` (no `-k`) is a no-op on a live service and silently fails when the
-/// agent isn't bootstrapped.
-#[cfg(target_os = "macos")]
-fn kickstart_runtime_if_installed() {
-    let uid = match std::process::Command::new("id").arg("-u").output() {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return,
-    };
-    let service = format!("gui/{uid}/{}", locai_link_shared::AGENT_APP_ID);
-    let _ = std::process::Command::new("launchctl")
-        .args(["kickstart", &service])
-        .output();
 }
 
 /// Whether a device identity has been registered — the signal that onboarding
@@ -646,10 +641,9 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         MENU_ID_QUIT => {
             // The companion is tied to the runtime, so quitting stops Link too —
-            // no "keep running" choice to make. Stop the runtime, then exit.
-            if let Err(e) = preferences::runtime_stop() {
-                eprintln!("[companion] runtime_stop on quit failed: {e}");
-            }
+            // no "keep running" choice. Signal the supervisor to stop the child,
+            // then quit; the service manager reaps anything left in the unit.
+            app.state::<supervisor::SupervisorControl>().stop();
             app.exit(0);
         }
         _ if id.starts_with(MENU_ID_MODEL_PREFIX) => {

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
-const LAUNCHER: &str = env!("CARGO_BIN_EXE_locai-link-companion");
+const LAUNCHER: &str = env!("CARGO_BIN_EXE_locai-link");
 
 /// Copy the launcher binary into the test's install_root so `current_exe()`
 /// + canonicalize resolves to the tempdir, not `target/debug/`.

@@ -299,60 +299,26 @@ pub fn set_run_at_login(_enabled: bool) -> Result<(), String> {
     Err("set_run_at_login: unsupported platform".to_string())
 }
 
+// Runtime lifecycle now goes through the in-process supervisor (the merged
+// binary owns the Python child), not a separate service. Cross-platform.
+type Control<'a> = tauri::State<'a, crate::supervisor::SupervisorControl>;
+
 #[tauri::command]
-#[cfg(target_os = "macos")]
-pub fn runtime_start() -> Result<(), String> {
-    launchctl(&["kickstart", &agent_service()?])
+pub fn runtime_start(control: Control<'_>) -> Result<(), String> {
+    control.start();
+    Ok(())
 }
 
 #[tauri::command]
-#[cfg(target_os = "linux")]
-pub fn runtime_start() -> Result<(), String> {
-    systemctl(&["--user", "start", "locai-link-agent.service"])
+pub fn runtime_stop(control: Control<'_>) -> Result<(), String> {
+    control.stop();
+    Ok(())
 }
 
 #[tauri::command]
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn runtime_start() -> Result<(), String> {
-    Err("runtime_start: unsupported platform".to_string())
-}
-
-#[tauri::command]
-#[cfg(target_os = "macos")]
-pub fn runtime_stop() -> Result<(), String> {
-    // Stops the current run; LaunchAgent bootstrap + RunAtLoad are untouched.
-    launchctl(&["kill", "SIGTERM", &agent_service()?])
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-pub fn runtime_stop() -> Result<(), String> {
-    systemctl(&["--user", "stop", "locai-link-agent.service"])
-}
-
-#[tauri::command]
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn runtime_stop() -> Result<(), String> {
-    Err("runtime_stop: unsupported platform".to_string())
-}
-
-#[tauri::command]
-#[cfg(target_os = "macos")]
-pub fn runtime_restart() -> Result<(), String> {
-    // -k forces a restart if already running, otherwise starts fresh.
-    launchctl(&["kickstart", "-k", &agent_service()?])
-}
-
-#[tauri::command]
-#[cfg(target_os = "linux")]
-pub fn runtime_restart() -> Result<(), String> {
-    systemctl(&["--user", "restart", "locai-link-agent.service"])
-}
-
-#[tauri::command]
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn runtime_restart() -> Result<(), String> {
-    Err("runtime_restart: unsupported platform".to_string())
+pub fn runtime_restart(control: Control<'_>) -> Result<(), String> {
+    control.restart();
+    Ok(())
 }
 
 #[tauri::command]
@@ -561,12 +527,6 @@ fn plistbuddy_set_run_at_load(plist: &std::path::Path, value: bool) -> Result<()
         ));
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn agent_service() -> Result<String, String> {
-    let uid = current_uid()?;
-    Ok(format!("gui/{uid}/{AGENT_LABEL}"))
 }
 
 #[cfg(target_os = "macos")]

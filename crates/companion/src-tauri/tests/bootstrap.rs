@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-const LAUNCHER: &str = env!("CARGO_BIN_EXE_locai-link-companion");
+const LAUNCHER: &str = env!("CARGO_BIN_EXE_locai-link");
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("create tempdir")

@@ -138,7 +138,6 @@ pub fn supervise_forever(control: SupervisorControl) {
             return;
         }
     };
-    let args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
     let poll = Duration::from_millis(200);
     let mut backoff = Duration::from_secs(1);
 
@@ -185,7 +184,9 @@ pub fn supervise_forever(control: SupervisorControl) {
             continue;
         }
 
-        let mut child = match Command::new(&runtime).args(&args).spawn() {
+        // The runtime is always launched in `run` mode (the GUI app isn't
+        // invoked with that arg the way the headless service is).
+        let mut child = match Command::new(&runtime).arg("run").spawn() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[supervisor] spawn {}: {e}", runtime.display());

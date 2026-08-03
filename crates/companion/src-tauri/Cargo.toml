@@ -18,6 +18,12 @@ description = "Locai Link menu-bar companion — tray icon + status + Models fly
 name = "companion_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The single shipped binary (supervisor + optional ui). Was the launcher's name;
+# the launcher crate is folded in.
+[[bin]]
+name = "locai-link"
+path = "src/main.rs"
+
 [build-dependencies]
 # Only invoked in `ui` builds (see build.rs); harmless as a build dep otherwise.
 tauri-build = { version = "2", features = [] }

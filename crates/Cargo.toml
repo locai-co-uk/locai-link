@@ -8,10 +8,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "launcher",
     "shared",
-    # The desktop app: tray + first-run setup. `src-tauri/` houses the Rust
-    # backend; the Svelte frontend lives alongside it under `src/`.
+    # The single Locai Link binary: supervisor + (with the `ui` feature) the tray
+    # + first-run setup. `src-tauri/` houses the Rust backend; the Svelte frontend
+    # lives alongside it under `src/`. The former standalone launcher is folded in.
     "companion/src-tauri",
 ]
 

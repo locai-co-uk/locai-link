@@ -2004,21 +2004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "locai-link-launcher"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "locai-link-shared",
- "mockito",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "ureq",
-]
-
-[[package]]
 name = "locai-link-shared"
 version = "0.1.0"
 dependencies = [
