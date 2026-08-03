@@ -22,7 +22,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RUNTIME_BINARY_NAME: &str = if cfg!(windows) {
     "locai-link-runtime.exe"
@@ -55,6 +56,184 @@ pub fn run_supervisor() -> ExitCode {
         Err(e) => {
             eprintln!("locai-link launcher: {e}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// In-process control of the runtime child for the desktop (`ui`) build. The
+/// tray/preferences send Start/Stop/Restart and read status; `supervise_forever`
+/// honours them. Cloneable (Arc) so it can live in Tauri managed state.
+#[derive(Clone, Default)]
+pub struct SupervisorControl {
+    inner: Arc<Mutex<ControlState>>,
+}
+
+#[derive(Default)]
+struct ControlState {
+    /// What the user wants: keep the runtime running, or leave it stopped.
+    want_running: bool,
+    /// One-shot: kill + respawn even while `want_running`.
+    restart: bool,
+    /// A child is currently alive (read by the tray).
+    running: bool,
+}
+
+impl SupervisorControl {
+    /// Start out wanting the runtime up (normal launch).
+    pub fn running() -> Self {
+        let c = Self::default();
+        c.inner.lock().expect("control poisoned").want_running = true;
+        c
+    }
+    pub fn start(&self) {
+        self.inner.lock().expect("control poisoned").want_running = true;
+    }
+    pub fn stop(&self) {
+        self.inner.lock().expect("control poisoned").want_running = false;
+    }
+    pub fn restart(&self) {
+        let mut g = self.inner.lock().expect("control poisoned");
+        g.want_running = true;
+        g.restart = true;
+    }
+    pub fn is_running(&self) -> bool {
+        self.inner.lock().expect("control poisoned").running
+    }
+    fn want_running(&self) -> bool {
+        self.inner.lock().expect("control poisoned").want_running
+    }
+    fn take_restart(&self) -> bool {
+        let mut g = self.inner.lock().expect("control poisoned");
+        std::mem::take(&mut g.restart)
+    }
+    fn set_running(&self, v: bool) {
+        self.inner.lock().expect("control poisoned").running = v;
+    }
+}
+
+enum Outcome {
+    /// Killed by us (Stop or Restart).
+    Interrupted,
+    /// Child exited on its own; `Some(code)` or `None` (signal).
+    Exited(Option<i32>),
+}
+
+fn next_backoff(b: Duration) -> Duration {
+    (b * 2).min(Duration::from_secs(30))
+}
+
+/// Desktop in-process supervision: keep the runtime child alive on a background
+/// thread, honouring Start/Stop/Restart from `control`. Reuses the same resolve
+/// / bootstrap / rollback helpers as the headless `run()`; unlike `run()` the
+/// wait is interruptible so a Stop can kill the child. Runs forever.
+///
+/// TODO(P3): graceful shutdown — SIGTERM + wait + SIGKILL fallback so the Python
+/// runtime cleans up its engine subprocesses (llama-swap/llama-server) instead
+/// of being SIGKILLed and orphaning them.
+pub fn supervise_forever(control: SupervisorControl) {
+    let install_root = match find_install_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[supervisor] {e}");
+            return;
+        }
+    };
+    let args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
+    let poll = Duration::from_millis(200);
+    let mut backoff = Duration::from_secs(1);
+
+    loop {
+        if !control.want_running() {
+            control.set_running(false);
+            std::thread::sleep(poll);
+            continue;
+        }
+
+        let version = match resolve_current_version(&install_root) {
+            Some(v) => v,
+            None => {
+                if !install_root.join("boot.json").is_file() {
+                    eprintln!("[supervisor] no installed version and no boot.json");
+                    std::thread::sleep(backoff);
+                    backoff = next_backoff(backoff);
+                    continue;
+                }
+                match bootstrap::bootstrap_from_boot(&install_root) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        status::emit(&status::Status::BootstrapFailed {
+                            stage: e.stage(),
+                            error: e.message(),
+                        });
+                        eprintln!("[supervisor] bootstrap failed: {}", e.message());
+                        std::thread::sleep(backoff);
+                        backoff = next_backoff(backoff);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let runtime = install_root
+            .join(VERSIONS_DIR)
+            .join(&version)
+            .join(RUNTIME_BINARY_NAME);
+        if !runtime.is_file() {
+            eprintln!("[supervisor] runtime missing: {}", runtime.display());
+            std::thread::sleep(backoff);
+            backoff = next_backoff(backoff);
+            continue;
+        }
+
+        let mut child = match Command::new(&runtime).args(&args).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[supervisor] spawn {}: {e}", runtime.display());
+                std::thread::sleep(backoff);
+                backoff = next_backoff(backoff);
+                continue;
+            }
+        };
+        control.set_running(true);
+
+        // Interruptible wait: poll for exit while honouring Stop/Restart.
+        let outcome = loop {
+            if !control.want_running() || control.take_restart() {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Outcome::Interrupted;
+            }
+            match child.try_wait() {
+                Ok(Some(st)) => break Outcome::Exited(st.code()),
+                Ok(None) => std::thread::sleep(poll),
+                Err(e) => {
+                    eprintln!("[supervisor] wait: {e}");
+                    break Outcome::Exited(Some(1));
+                }
+            }
+        };
+        control.set_running(false);
+
+        match outcome {
+            // Stop -> idle next iteration; Restart -> respawn immediately.
+            Outcome::Interrupted => backoff = Duration::from_secs(1),
+            // OTA: re-resolve `current` (an update may have flipped it) + respawn.
+            Outcome::Exited(Some(EXIT_RESTART_FOR_UPDATE)) => backoff = Duration::from_secs(1),
+            // Clean stop: leave it stopped until the user starts it again.
+            Outcome::Exited(Some(0)) => {
+                control.stop();
+            }
+            // Crash: roll back if inside the OTA window, else respawn with backoff.
+            Outcome::Exited(code) => {
+                let code = code.unwrap_or(1);
+                if try_rollback(&install_root, &version, code).unwrap_or(false) {
+                    backoff = Duration::from_secs(1);
+                } else {
+                    eprintln!("[supervisor] runtime exited {code}; respawning in {backoff:?}");
+                    std::thread::sleep(backoff);
+                    backoff = next_backoff(backoff);
+                }
+            }
         }
     }
 }
