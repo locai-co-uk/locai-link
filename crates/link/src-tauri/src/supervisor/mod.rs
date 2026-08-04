@@ -148,6 +148,17 @@ pub fn supervise_forever(control: SupervisorControl) {
             continue;
         }
 
+        // Don't spawn the runtime until the device is registered. During
+        // first-run onboarding there's no session identity yet; a config-less
+        // runtime would exit immediately, and (before this gate) that clean exit
+        // latched the supervisor stopped. Idle until `finish_setup` registers +
+        // re-arms. Already-provisioned installs pass this on the first tick.
+        if crate::shared::read_identity(&install_root).is_none() {
+            control.set_running(false);
+            std::thread::sleep(poll);
+            continue;
+        }
+
         let version = match resolve_current_version(&install_root) {
             Some(v) => v,
             None => {
@@ -185,8 +196,15 @@ pub fn supervise_forever(control: SupervisorControl) {
         }
 
         // The runtime is always launched in `run` mode (the GUI app isn't
-        // invoked with that arg the way the headless service is).
-        let mut child = match Command::new(&runtime).arg("run").spawn() {
+        // invoked with that arg the way the headless service is). Run it FROM the
+        // install root: the runtime resolves `configs/` (its session + state)
+        // relative to its cwd, and the supervisor inherits the launcher's cwd
+        // ($HOME under systemd --user), not the install root.
+        let mut child = match Command::new(&runtime)
+            .arg("run")
+            .current_dir(&install_root)
+            .spawn()
+        {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[supervisor] spawn {}: {e}", runtime.display());
@@ -220,7 +238,11 @@ pub fn supervise_forever(control: SupervisorControl) {
             Outcome::Interrupted => backoff = Duration::from_secs(1),
             // OTA: re-resolve `current` (an update may have flipped it) + respawn.
             Outcome::Exited(Some(EXIT_RESTART_FOR_UPDATE)) => backoff = Duration::from_secs(1),
-            // Clean stop: leave it stopped until the user starts it again.
+            // Deliberate stop: the runtime's contract is 42=respawn, 1=crash,
+            // 0=stay stopped (see src/link/main.py). Honour it — respawning a
+            // 0-exit would resurrect a Control-/user-initiated shutdown. The
+            // onboarding case that motivated a change here is handled by the
+            // registration gate above (a config-less runtime exits 1, not 0).
             Outcome::Exited(Some(0)) => {
                 control.stop();
             }
@@ -285,8 +307,11 @@ fn run() -> Result<u8, String> {
             ));
         }
 
+        // cwd = install root: the runtime resolves `configs/` relative to its
+        // working directory, which otherwise inherits the launcher's ($HOME).
         let status = Command::new(&runtime)
             .args(&args)
+            .current_dir(&install_root)
             .status()
             .map_err(|e| format!("failed to spawn {}: {e}", runtime.display()))?;
 

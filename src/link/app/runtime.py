@@ -99,6 +99,13 @@ class AgentRuntime:
         self.shutdown_event = threading.Event()
         # Guards read-modify-write of the pending uninstall-reports file.
         self._pending_reports_lock = threading.Lock()
+        # Serializes concurrent DEPLOY_MODEL downloads that target the SAME file
+        # (e.g. two catalog aliases for one GGUF, deployed together at onboarding).
+        # Without it both stream into the same `<name>.partial` and race the
+        # rename — the loser hits FileNotFoundError. Keyed on model_name; the
+        # waiter then hits the `target_path.exists()` cache guard and skips.
+        self._download_locks: dict[str, threading.Lock] = {}
+        self._download_locks_guard = threading.Lock()
         self.update_requested = False
         self.config_restart_requested = False
 
@@ -608,6 +615,13 @@ class AgentRuntime:
             logger.info(f"Initiating deployment for command '{command_id}'...")
             thread.start()
 
+    def _download_lock_for(self, model_name: str) -> threading.Lock:
+        """Per-model_name download lock, created on first use. Concurrent deploys
+        of the same target file share it so they serialize instead of racing the
+        `.partial` staging path."""
+        with self._download_locks_guard:
+            return self._download_locks.setdefault(model_name, threading.Lock())
+
     def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event) -> None:
         """Orchestrate download → publish → commit for a single DEPLOY_MODEL.
 
@@ -633,10 +647,14 @@ class AgentRuntime:
                 + "/agent"
             )
 
-            if target_path.exists():
-                logger.info(f"Model {cmd.model_name} already exists. Using cached file.")
-            elif not self._download_and_publish(cmd, cancel_event, download_url, target_path, partial_path):
-                return
+            # Serialize downloads that share this target file so a concurrent
+            # same-file deploy doesn't race the `.partial` rename; the waiter
+            # then sees the cached file below and skips the re-download.
+            with self._download_lock_for(cmd.model_name):
+                if target_path.exists():
+                    logger.info(f"Model {cmd.model_name} already exists. Using cached file.")
+                elif not self._download_and_publish(cmd, cancel_event, download_url, target_path, partial_path):
+                    return
 
             if not self._commit_deploy(cmd, cancel_event):
                 self._report_cancelled(cmd, "before configuring")

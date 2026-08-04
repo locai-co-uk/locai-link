@@ -1160,11 +1160,17 @@ pub fn re_register(
     Ok(())
 }
 
-/// Finish onboarding: dismiss the setup window and leave the app in the tray.
-/// Deliberately does NOT open Preferences — the user reaches it from the tray
-/// when they want it. macOS drops back to Accessory so no Dock icon lingers.
+/// Finish onboarding: re-arm the supervisor, dismiss the setup window, leave the
+/// app in the tray. The device is registered by this point, so `control.start()`
+/// lets the supervise loop spawn the runtime (it idled through onboarding, and
+/// `re_register` explicitly stops it). Does NOT open Preferences — the user
+/// reaches it from the tray. macOS drops back to Accessory so no Dock icon lingers.
 #[tauri::command]
-pub fn finish_setup(app: tauri::AppHandle) {
+pub fn finish_setup(
+    app: tauri::AppHandle,
+    control: State<'_, crate::supervisor::SupervisorControl>,
+) {
+    control.start();
     if let Some(setup) = app.get_webview_window("setup") {
         let _ = setup.hide();
     }

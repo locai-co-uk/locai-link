@@ -193,17 +193,22 @@ else
     log "WARN: no icons source at $ICONS_SRC — menu entries will show a placeholder icon"
 fi
 
-# --- Launch Locai Link -----------------------------------------------
-# The app opens the setup wizard on first run (no registered device): sign-in,
-# models, permissions incl. the "start at login" toggle, Finish. Backgrounded so
-# this script returns. On Finish the app activates the services per the toggle.
-
-log "launching Locai Link…"
-# WebKit's DMABUF renderer breaks on many Wayland setups (Nvidia, some
-# Intel); GDK_BACKEND=x11 sidesteps it. Also set in the unit.
-WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=x11 \
-    nohup "$INSTALL_ROOT/locai-link" >/dev/null 2>&1 &
-disown
+# --- Launch Locai Link (via the service) ------------------------------
+# Install + start the single unit NOW so systemd owns the one process and
+# `Restart=` keeps it alive. This is the ONLY launch path — no nohup — so there's
+# never a second, un-managed instance to fight over (that orphaned the
+# supervisor before). The app opens the setup wizard on first run (no registered
+# device); the supervisor idles until Finish registers + re-arms it. The setup
+# wizard's "start at login" toggle controls `enable` (autostart) on Finish; the
+# unit is already running regardless.
+log "installing + starting locai-link-companion.service…"
+mkdir -p "$HOME/.config/systemd/user"
+install -m 0644 "$INSTALL_ROOT/systemd/locai-link-companion.service" \
+    "$HOME/.config/systemd/user/locai-link-companion.service"
+systemctl --user daemon-reload
+# LEGACY: pre-merge separate agent unit (the merged binary supervises now).
+systemctl --user disable --now locai-link-agent.service 2>/dev/null || true
+systemctl --user start locai-link-companion.service
 
 cat <<EOF
 

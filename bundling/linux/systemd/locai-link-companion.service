@@ -34,8 +34,8 @@ Environment=GDK_BACKEND=x11
 ExecStart=%h/.local/share/locai/locai-link
 Restart=on-failure
 RestartSec=5s
-StandardOutput=append:%h/.local/share/locai/logs/companion.stdout.log
-StandardError=append:%h/.local/share/locai/logs/companion.stderr.log
+StandardOutput=append:%h/.local/share/locai/logs/link.stdout.log
+StandardError=append:%h/.local/share/locai/logs/link.stderr.log
 
 [Install]
 WantedBy=graphical-session.target

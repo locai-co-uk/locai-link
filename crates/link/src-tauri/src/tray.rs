@@ -153,13 +153,12 @@ pub fn run() {
     let supervise_control = control.clone();
 
     tauri::Builder::default()
-        // Must be the first plugin registered. A second launch (Dock/Launchpad,
-        // or a stale /Applications copy) reaches the running instance here and
-        // then exits, so no duplicate tray icon; surface Preferences so the
-        // relaunch isn't a silent no-op.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            focus_primary_window(app);
-        }))
+        // No single-instance guard: the OS service unit is the one launcher
+        // (systemd `locai-link-companion.service` / the launchd agent), so only
+        // one instance ever runs. A guard here previously reaped the service
+        // instance when install.sh's own launch already held the lock, orphaning
+        // the supervisor. The `.desktop` / Dock relaunch just re-`start`s the
+        // unit, which is idempotent.
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // Onboarding sign-in session (JWT held Rust-side, never crosses IPC).
@@ -303,36 +302,19 @@ fn device_registered() -> bool {
 
 /// Route a re-launch (single-instance) to the window that matters: the setup
 /// wizard while unregistered, Preferences once onboarding is done.
-fn focus_primary_window(app: &AppHandle) {
-    // If the setup window is still up (onboarding in progress), a second launch
-    // is the companion service starting on Finish — keep the user on the wizard,
-    // don't pop Preferences even though the device just registered.
-    if let Some(setup) = app.get_webview_window("setup") {
-        if setup.is_visible().unwrap_or(false) {
-            let _ = setup.set_focus();
-            return;
-        }
-    }
-    if device_registered() {
-        show_preferences_window(app);
-    } else {
-        show_setup_window(app);
-    }
-}
-
 /// Show + focus the first-run setup window; macOS flips to Regular so it gets a
 /// Dock icon + focus during onboarding (mirrors the Preferences window).
 fn show_setup_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("setup") else {
-        eprintln!("[companion] setup window not found");
+        eprintln!("[link] setup window not found");
         return;
     };
     if let Err(e) = window.show() {
-        eprintln!("[companion] setup window.show failed: {e}");
+        eprintln!("[link] setup window.show failed: {e}");
         return;
     }
     if let Err(e) = window.set_focus() {
-        eprintln!("[companion] setup window.set_focus failed: {e}");
+        eprintln!("[link] setup window.set_focus failed: {e}");
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -341,15 +323,15 @@ fn show_setup_window(app: &AppHandle) {
 /// Show + focus the Preferences window; un-hides if the user closed it earlier.
 pub(crate) fn show_preferences_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
-        eprintln!("[companion] preferences window not found");
+        eprintln!("[link] preferences window not found");
         return;
     };
     if let Err(e) = window.show() {
-        eprintln!("[companion] window.show failed: {e}");
+        eprintln!("[link] window.show failed: {e}");
         return;
     }
     if let Err(e) = window.set_focus() {
-        eprintln!("[companion] window.set_focus failed: {e}");
+        eprintln!("[link] window.set_focus failed: {e}");
     }
     // macOS: switch to Regular while visible so we get Dock + Cmd-Tab + focus.
     // Flipped back to Accessory in on_window_event when the window hides.
@@ -582,7 +564,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match id {
         MENU_ID_CONTROL => {
             if let Err(e) = app.opener().open_url(CONTROL_URL, None::<&str>) {
-                eprintln!("[companion] failed to open {CONTROL_URL}: {e}");
+                eprintln!("[link] failed to open {CONTROL_URL}: {e}");
             }
         }
         MENU_ID_PREFERENCES => {
@@ -594,7 +576,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             // if it isn't listening yet (cold open), the emit is a harmless no-op
             // and the section is still reachable by scrolling.
             if let Err(e) = app.emit(EVENT_SHOW_DOWNLOADS, ()) {
-                eprintln!("[companion] emit {EVENT_SHOW_DOWNLOADS} failed: {e}");
+                eprintln!("[link] emit {EVENT_SHOW_DOWNLOADS} failed: {e}");
             }
         }
         MENU_ID_UPDATE => {
@@ -619,7 +601,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             let app_handle = app.clone();
             thread::spawn(move || {
                 if let Err(e) = trigger_update(DEFAULT_UPDATE_URL) {
-                    eprintln!("[companion] trigger_update failed: {e}");
+                    eprintln!("[link] trigger_update failed: {e}");
                     // Failed before the agent went down — release so a retry works.
                     if let Ok(mut g) = shared.lock() {
                         g.update_in_flight = false;
@@ -651,12 +633,12 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         MENU_ID_WORKSPACE => {
             if let Err(e) = app.opener().open_url(WORKSPACE_URL, None::<&str>) {
-                eprintln!("[companion] failed to open {WORKSPACE_URL}: {e}");
+                eprintln!("[link] failed to open {WORKSPACE_URL}: {e}");
             }
         }
         // Disabled items — shouldn't fire, ignore if they do.
         MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER => {}
-        other => eprintln!("[companion] unhandled menu id: {other}"),
+        other => eprintln!("[link] unhandled menu id: {other}"),
     }
 }
 
@@ -672,7 +654,7 @@ fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
         let mut guard = match shared.lock() {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("[companion] handles mutex poisoned: {e}");
+                eprintln!("[link] handles mutex poisoned: {e}");
                 return;
             }
         };
@@ -681,7 +663,7 @@ fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
             return;
         }
         let Some(model) = guard.models.iter_mut().find(|m| m.id == pipeline_id) else {
-            eprintln!("[companion] click on unknown pipeline: {pipeline_id}");
+            eprintln!("[link] click on unknown pipeline: {pipeline_id}");
             return;
         };
         let action = if model.is_serving {
@@ -697,7 +679,7 @@ fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
     thread::spawn(move || {
         let result = toggle_serving(DEFAULT_MODEL_ACTION_BASE, &pipeline_id, action);
         if let Err(e) = &result {
-            eprintln!("[companion] toggle_serving({pipeline_id}, {action:?}) failed: {e}");
+            eprintln!("[link] toggle_serving({pipeline_id}, {action:?}) failed: {e}");
         }
         // Release the slot. On failure, revert the optimistic flip so the next
         // poll doesn't see a torn state; on success the poll reconciles anyway.
@@ -796,7 +778,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             if let Ok(img) = Image::from_bytes(bytes) {
                 // Atomic swap keeps the template flag in sync with the new image.
                 if let Err(e) = tray.set_icon_with_as_template(Some(img), TRAY_ICON_IS_TEMPLATE) {
-                    eprintln!("[companion] tray.set_icon failed: {e}");
+                    eprintln!("[link] tray.set_icon failed: {e}");
                 }
             }
             current_tray = next_tray;
@@ -828,7 +810,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             _ => format!("{brand} · Offline"),
         };
         if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
-            eprintln!("[companion] tray.set_tooltip failed: {e}");
+            eprintln!("[link] tray.set_tooltip failed: {e}");
         }
 
         // Treat transient /models Down/Malformed as "keep last-known empty"
@@ -865,7 +847,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             ) {
                 Ok((new_menu, new_status_item)) => {
                     if let Err(e) = tray.set_menu(Some(new_menu)) {
-                        eprintln!("[companion] tray.set_menu failed: {e}");
+                        eprintln!("[link] tray.set_menu failed: {e}");
                     }
                     if let Ok(mut h) = handles.lock() {
                         h.status_item = new_status_item;
@@ -874,7 +856,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                     current_digest = new_digest;
                     current_status_text = status_text.clone();
                 }
-                Err(e) => eprintln!("[companion] build_tray_menu failed: {e}"),
+                Err(e) => eprintln!("[link] build_tray_menu failed: {e}"),
             }
         } else if let Ok(mut h) = handles.lock() {
             h.models = new_models;

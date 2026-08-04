@@ -43,7 +43,6 @@ ui = [
     "dep:tauri",
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-dialog",
-    "dep:tauri-plugin-single-instance",
 ]
 
 [dependencies]
@@ -57,9 +56,6 @@ tauri-plugin-opener = { version = "2", optional = true }
 # the correct (main) thread and event loop — rfd's sync GTK dialog doesn't
 # display reliably from inside a Tauri app on Linux.
 tauri-plugin-dialog = { version = "2", optional = true }
-# Single-instance guard: a second launch focuses the running instance instead
-# of spawning a duplicate tray icon.
-tauri-plugin-single-instance = { version = "2", optional = true }
 # --- shared across both builds ---
 serde = { workspace = true }
 serde_json = { workspace = true }

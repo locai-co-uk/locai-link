@@ -259,7 +259,7 @@ pub async fn request_model_deploy(
             if let Err(e) =
                 mark_deployment_pending(DEFAULT_PENDING_URL, &model_id, model_name.as_deref())
             {
-                eprintln!("[companion] mark_deployment_pending({model_id}) failed: {e}");
+                eprintln!("[link] mark_deployment_pending({model_id}) failed: {e}");
             }
         }
         Ok(outcome)

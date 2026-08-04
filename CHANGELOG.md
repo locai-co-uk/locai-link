@@ -16,6 +16,18 @@ sections below the summary. -->
   single background service. Headless installs run the supervisor alone; desktop
   installs add the tray and setup in the same process. Fewer moving parts to
   install, supervise, and update; upgrades migrate away the old second service.
+- Fixed: selecting two models that are the same file no longer fails one of
+  them. Concurrent deploys that target the same download now serialize instead
+  of racing, so both succeed.
+
+### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
+
+- Two `DEPLOY_MODEL` commands resolving to the same GGUF filename (e.g. two
+  catalog aliases deployed together at onboarding) both streamed into the same
+  `<name>.partial` and raced the rename — the loser hit `FileNotFoundError`.
+- A per-`model_name` download lock now serializes same-file deploys; the waiter
+  then hits the existing `target_path.exists()` cache guard and skips the
+  re-download. Distinct filenames are unaffected.
 
 ### Changed: merge the Setup Assistant into the companion (`crates/link`, `bundling/`, `src/link/app/updater.py`)
 
