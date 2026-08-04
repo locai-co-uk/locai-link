@@ -78,12 +78,12 @@ resolve_paths() {
         MERGED_BIN="$repo_root/crates/target/release/locai-link"
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
-        ICONS_SRC="$repo_root/crates/companion/src-tauri/icons"
+        ICONS_SRC="$repo_root/crates/link/src-tauri/icons"
         BOOT_JSON="$repo_root/bundling/pkg/boot.json"
         return
     fi
 
-    err "couldn't locate build artefacts. Either extract a release tarball and run its install.sh, or from a repo checkout run \`uv run python bundling/build.py --plugins language_model audio_transcriber\` + \`cargo tauri build --no-bundle\` in crates/companion first."
+    err "couldn't locate build artefacts. Either extract a release tarball and run its install.sh, or from a repo checkout run \`uv run python bundling/build.py --plugins language_model audio_transcriber\` + \`cargo tauri build --no-bundle\` in crates/link first."
 }
 
 resolve_paths

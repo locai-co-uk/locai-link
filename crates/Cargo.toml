@@ -9,7 +9,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "companion/src-tauri",
+    "link/src-tauri",
 ]
 
 [workspace.package]

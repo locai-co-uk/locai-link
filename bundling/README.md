@@ -90,7 +90,7 @@ dist/locai-link/                       ← the install_root (this is what gets t
 ```
 
 The `locai-link` binary (supervisor + tray) is built separately with
-`cargo tauri build --no-bundle` (source under `../crates/companion/`) and staged
+`cargo tauri build --no-bundle` (source under `../crates/link/`) and staged
 alongside this PyInstaller runtime tree by the packers (`linux/pack.sh`,
 `release.yml`).
 

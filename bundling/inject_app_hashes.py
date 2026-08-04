@@ -25,7 +25,7 @@ from pathlib import Path
 # stable hash across non-reproducible builds. Keep in sync with the crates that
 # actually feed each Tauri binary.
 APP_SOURCES: dict[str, list[str]] = {
-    "companion": ["crates/companion", "crates/Cargo.lock", "crates/Cargo.toml"],
+    "companion": ["crates/link", "crates/Cargo.lock", "crates/Cargo.toml"],
 }
 
 # Build/output dirs to skip when walking source trees (huge + not source).

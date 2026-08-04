@@ -17,7 +17,7 @@ sections below the summary. -->
   installs add the tray and setup in the same process. Fewer moving parts to
   install, supervise, and update; upgrades migrate away the old second service.
 
-### Changed: merge the Setup Assistant into the companion (`crates/companion`, `bundling/`, `src/link/app/updater.py`)
+### Changed: merge the Setup Assistant into the companion (`crates/link`, `bundling/`, `src/link/app/updater.py`)
 
 - The onboarding wizard is now a second window (`setup.html`) of the companion
   app; the tray/preferences window is `index.html`. First run (no registered
@@ -30,7 +30,7 @@ sections below the summary. -->
   remove any pre-merge Setup Assistant left on disk (search `LEGACY-SA-CLEANUP`;
   remove once no pre-merge install remains).
 
-### Changed: fold the launcher into one feature-flagged binary (`crates/companion`, `bundling/`, `.github/workflows/`)
+### Changed: fold the launcher into one feature-flagged binary (`crates/link`, `bundling/`, `.github/workflows/`)
 
 - The standalone launcher crate is gone; its supervisor loop moved into the
   companion crate behind a `ui` cargo feature. `--no-default-features` builds the
@@ -44,6 +44,15 @@ sections below the summary. -->
   terminal `locai run` dispatch to the headless supervisor from the same binary.
 - Packaging and CI build both variants: the desktop app end-to-end and the
   headless supervisor via `--no-default-features`.
+
+### Internal: consolidate the crate workspace (no behaviour change) (`crates/`)
+
+- The `locai-link-shared` crate is folded into the binary crate as a `shared`
+  module — with the launcher and Setup Assistant gone it had a single consumer.
+- The crate is renamed `companion` → `link`: directory `crates/link/`, package
+  `locai-link`, lib `link_lib`. External identifiers are unchanged — the binary
+  stays `locai-link`, the service unit `locai-link-companion.service`, and the
+  bundle id `uk.co.locai.link.companion` — so there is no migration or wire change.
 
 - The companion now shows an "Updating…" state during an app update: the
   runtime and model controls are locked while the update applies and the app

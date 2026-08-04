@@ -290,7 +290,7 @@ CURRENT_LINK = "current"
 PREVIOUS_LINK = "previous"
 # Windows-without-Developer-Mode fallback for the symlink. The build process
 # writes one or the other depending on what the OS allows; the Rust supervisor
-# (in ``crates/companion``) accepts either shape.
+# (in ``crates/link``) accepts either shape.
 CURRENT_POINTER_FILE = "CURRENT"
 PREVIOUS_POINTER_FILE = "PREVIOUS"
 MANIFEST_NAME = "manifest.json"
@@ -384,10 +384,10 @@ class BootConfig:
     Carried here for completeness; the actual bootstrap consumption (used when
     a host installer ships only the supervisor binary + boot.json and the
     bundle is downloaded on first launch) lives in the Rust supervisor under
-    ``crates/companion/src-tauri/src/supervisor/``. Field shape (name,
+    ``crates/link/src-tauri/src/supervisor/``. Field shape (name,
     optional/required) must match the Rust ``BootConfig`` in
-    ``crates/companion/src-tauri/src/supervisor/boot.rs`` and its
-    mirror in ``crates/companion/src-tauri/src/shared/install.rs`` — kept in lockstep because a
+    ``crates/link/src-tauri/src/supervisor/boot.rs`` and its
+    mirror in ``crates/link/src-tauri/src/shared/install.rs`` — kept in lockstep because a
     host installer that writes fields the Python side drops is a schema
     drift bug.
     """

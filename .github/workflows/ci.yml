@@ -263,11 +263,11 @@ jobs:
 
       - name: Cargo check
         working-directory: crates
-        run: cargo check -p locai-link-companion --no-default-features
+        run: cargo check -p locai-link --no-default-features
 
       - name: Cargo test
         working-directory: crates
-        run: cargo test -p locai-link-companion --no-default-features --lib
+        run: cargo test -p locai-link --no-default-features --lib
 
   # 3b. Rust crate check + unit tests — macOS + Windows. Gated on the Linux
   # Rust check, so the platform-gated autostart/{macos,windows}.rs modules
@@ -301,11 +301,11 @@ jobs:
 
       - name: Cargo check
         working-directory: crates
-        run: cargo check -p locai-link-companion --no-default-features
+        run: cargo check -p locai-link --no-default-features
 
       - name: Cargo test
         working-directory: crates
-        run: cargo test -p locai-link-companion --no-default-features --lib
+        run: cargo test -p locai-link --no-default-features --lib
 
   # 3c. Tauri app build (the single desktop app: tray + first-run setup)
   #
@@ -348,7 +348,7 @@ jobs:
           node-version: "20"
 
       - name: Build companion (no bundle)
-        working-directory: crates/companion
+        working-directory: crates/link
         run: |
           npm ci
           npm run tauri build -- --no-bundle
@@ -358,7 +358,7 @@ jobs:
       # just the path-gated bundle workflow.
       - name: Check headless supervisor build
         working-directory: crates
-        run: cargo check -p locai-link-companion --no-default-features
+        run: cargo check -p locai-link --no-default-features
 
   # 4a. Integration Tests (Plugins — downloads models and binaries) — Linux gate.
   # `needs: unit-test-linux` so we don't download models on any OS until the

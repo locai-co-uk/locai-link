@@ -1,7 +1,7 @@
 {
-  "name": "companion",
+  "name": "locai-link-ui",
   "version": "0.1.0",
-  "description": "Locai Link menu-bar companion frontend (bare Svelte + Vite).",
+  "description": "Locai Link desktop frontend: tray/preferences + first-run setup (bare Svelte + Vite).",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 [package]
-name = "locai-link-companion"
+name = "locai-link"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Locai Link menu-bar companion — tray icon + status + Models flyout."
+description = "Locai Link — supervisor + (with the `ui` feature) tray, setup, and preferences."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,7 +15,7 @@ description = "Locai Link menu-bar companion — tray icon + status + Models fly
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "companion_lib"
+name = "link_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 # The single shipped binary (supervisor + optional ui). Was the launcher's name;

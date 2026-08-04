@@ -17,9 +17,9 @@ fn main() -> std::process::ExitCode {
         .nth(1)
         .is_some_and(|a| !a.to_string_lossy().starts_with('-'));
     if is_cli {
-        return companion_lib::supervisor::run_supervisor();
+        return link_lib::supervisor::run_supervisor();
     }
-    companion_lib::run();
+    link_lib::run();
     std::process::ExitCode::SUCCESS
 }
 
@@ -27,5 +27,5 @@ fn main() -> std::process::ExitCode {
 // runtime child, exit-42 respawn, rollback, bootstrap).
 #[cfg(not(feature = "ui"))]
 fn main() -> std::process::ExitCode {
-    companion_lib::supervisor::run_supervisor()
+    link_lib::supervisor::run_supervisor()
 }

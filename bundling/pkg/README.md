@@ -35,7 +35,7 @@ bundling/pkg/
   directory only holds the *scripts* and *resources* that describe
   the wizard.
 - **The `Locai Link.app` bundle.** Built by Tauri
-  (`crates/companion/`) — the tray app that also hosts first-run setup —
+  (`crates/link/`) — the tray app that also hosts first-run setup —
   and copied into the payload by the release workflow.
 - **A working build pipeline.** The `pkgbuild` + `productbuild` +
   notarisation invocations live in the release CI once the Installer

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Schema of `boot.json`. Mirrors
-/// `companion/src-tauri/src/supervisor/boot.rs::BootConfig` — field optionality
-/// must match the supervisor exactly.
+/// `crate::supervisor::boot::BootConfig` — field optionality must match the
+/// supervisor exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     pub host_app: String,

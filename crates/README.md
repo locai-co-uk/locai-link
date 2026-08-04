@@ -16,7 +16,7 @@ Rust workspace housing the single native binary shipped with Locai Link:
 build against `rustc 1.95+`. Use the npm-shipped prebuilt instead:
 
 ```sh
-cd crates/companion
+cd crates/link
 npm install                  # once
 npx @tauri-apps/cli dev      # open the dev window
 npx @tauri-apps/cli build    # build the .app

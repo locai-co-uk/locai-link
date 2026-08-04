@@ -18,7 +18,7 @@ COMPANION_LABEL = f"{REVERSE_DNS}.companion"
 
 # --- Loopback --------------------------------------------------------------
 # Agent health/models/update server. The Rust companion polls this host:port; the
-# loopback drift guard pins both to crates/companion/src-tauri/src/shared/health.rs.
+# loopback drift guard pins both to crates/link/src-tauri/src/shared/health.rs.
 HEALTH_HOST = "127.0.0.1"
 HEALTH_PORT = 20505
 
@@ -27,10 +27,10 @@ HEALTH_PORT = 20505
 DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
 
 # --- macOS install layout ----------------------------------------------------
-# Packaged install root; also hardcoded in crates/companion/src-tauri/src/shared/endpoints.rs, the
+# Packaged install root; also hardcoded in crates/link/src-tauri/src/shared/endpoints.rs, the
 # pkg scripts, and the plists (drift-guarded).
 MACOS_INSTALL_ROOT = "/Library/Locai"
 # Mutable runtime state under the install root. The companion writes its running
-# version marker here (crates/companion); the updater's drift check reads it.
+# version marker here (crates/link); the updater's drift check reads it.
 STATE_SUBDIR = "state"
 COMPANION_RUNNING_VERSION_MARKER = "companion-running-version"

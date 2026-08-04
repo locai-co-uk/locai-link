@@ -56,7 +56,7 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
     # The binary name is the crate's [[bin]] name. Derive it from Cargo.toml so a
     # rename fails here instead of silently shipping a plist that points at a
     # binary the build no longer produces.
-    binary = _cargo_bin_name("companion")
+    binary = _cargo_bin_name("link")
     assert binary == "locai-link"
     prog = _load_plist("uk.co.locai.link.companion.plist")["ProgramArguments"]
     assert prog[0] == str(dests[0] / "Contents" / "MacOS" / binary)
@@ -194,16 +194,17 @@ def test_postinstall_makes_install_root_copy_swappable():
 
 
 def _fake_companion_tree(root: Path, *, version: str, svelte: str) -> None:
-    """Minimal source layout inject_app_hashes walks for the companion."""
-    tauri = root / "crates" / "companion" / "src-tauri"
+    """Minimal source layout inject_app_hashes walks for the app (crates/link)."""
+    tauri = root / "crates" / "link" / "src-tauri"
     tauri.mkdir(parents=True)
     (tauri / "tauri.conf.json").write_text(f'{{"version": "{version}"}}\n', encoding="utf-8")
-    src = root / "crates" / "companion" / "src"
+    src = root / "crates" / "link" / "src"
     src.mkdir(parents=True)
     (src / "App.svelte").write_text(svelte, encoding="utf-8")
-    shared = root / "crates" / "shared"
+    # The folded-in platform/Control helpers now live under the crate.
+    shared = tauri / "src" / "shared"
     shared.mkdir(parents=True)
-    (shared / "lib.rs").write_text("// shared\n", encoding="utf-8")
+    (shared / "mod.rs").write_text("// shared\n", encoding="utf-8")
     (root / "crates" / "Cargo.lock").write_text("# lock\n", encoding="utf-8")
     (root / "crates" / "Cargo.toml").write_text("# workspace\n", encoding="utf-8")
 
@@ -256,6 +257,6 @@ def test_uninstaller_bundle_ids_match_tauri_apps():
         conf = REPO_ROOT / "crates" / crate / "src-tauri" / "tauri.conf.json"
         return str(json.loads(conf.read_text(encoding="utf-8"))["identifier"])
 
-    assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("companion")
+    assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("link")
     # Legacy id, hardcoded for upgrade cleanup now the SA crate is removed.
     assert _sh_var("LEGACY_SA_BUNDLE_ID") == "uk.co.locai.link.setup-assistant"

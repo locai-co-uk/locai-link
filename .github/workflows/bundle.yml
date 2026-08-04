@@ -11,7 +11,7 @@ on:
     paths:
       - "bundling/**"
       - "!bundling/pkg/**"
-      - "crates/companion/**"
+      - "crates/link/**"
       - "crates/Cargo.toml"
       - "plugins/*/install.py"
       - "plugins/*/pyproject.toml"
@@ -57,7 +57,7 @@ jobs:
 
       - name: Test supervisor (headless)
         shell: bash
-        run: cargo test --manifest-path crates/companion/src-tauri/Cargo.toml --release --no-default-features
+        run: cargo test --manifest-path crates/link/src-tauri/Cargo.toml --release --no-default-features
 
       - name: Sync project + dev deps
         shell: bash
@@ -111,7 +111,7 @@ jobs:
 
       - name: Test supervisor (headless)
         shell: bash
-        run: cargo test --manifest-path crates/companion/src-tauri/Cargo.toml --release --no-default-features
+        run: cargo test --manifest-path crates/link/src-tauri/Cargo.toml --release --no-default-features
 
       - name: Sync project + dev deps
         shell: bash

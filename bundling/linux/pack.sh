@@ -9,7 +9,7 @@
 #
 # Prereqs (run these first in the repo root):
 #     uv run python bundling/build.py --plugins <plugin-set>
-#     ( cd crates/companion && npm run tauri build -- --no-bundle )
+#     ( cd crates/link && npm run tauri build -- --no-bundle )
 #
 # Plugin selection is read from dist/locai-link/manifest.json (written by
 # build.py) — the tarball is labelled for whatever plugins the bundle has;
@@ -70,7 +70,7 @@ BOOT_JSON="$REPO_ROOT/bundling/pkg/boot.json"
 MANIFEST="$BUNDLE_DIR/current/manifest.json"
 
 [[ -f "$MANIFEST" ]]             || err "manifest.json not at $MANIFEST — run \`uv run python bundling/build.py --plugins …\` first."
-[[ -f "$TAURI_DIR/locai-link" ]] || err "locai-link binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/companion."
+[[ -f "$TAURI_DIR/locai-link" ]] || err "locai-link binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/link."
 [[ -f "$BOOT_JSON" ]]            || err "boot.json not at $BOOT_JSON."
 
 # --- Derive the asset name from manifest.json ------------------------
@@ -130,7 +130,7 @@ install -m 0644 "$SCRIPT_DIR/systemd/"*.service         "$ROOT/systemd/"
 install -m 0644 "$SCRIPT_DIR/applications/"*.desktop    "$ROOT/applications/"
 # Icons come from the companion crate. The install.sh reshuffles these into
 # hicolor sizes at install time.
-ICONS_SRC="$REPO_ROOT/crates/companion/src-tauri/icons"
+ICONS_SRC="$REPO_ROOT/crates/link/src-tauri/icons"
 for name in 32x32.png 128x128.png 128x128@2x.png; do
     [[ -f "$ICONS_SRC/$name" ]] && install -m 0644 "$ICONS_SRC/$name" "$ROOT/icons/$name"
 done

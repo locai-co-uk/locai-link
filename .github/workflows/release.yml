@@ -294,14 +294,14 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_bytes().decode())['project']['version'])")"
-          conf=crates/companion/src-tauri/tauri.conf.json
+          conf=crates/link/src-tauri/tauri.conf.json
           python3 -c "import json,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d['version']=sys.argv[2]; p.write_text(json.dumps(d,indent=2)+chr(10))" "$conf" "$VERSION"
           echo "stamped UI app version to $VERSION"
 
       - name: Build companion binary (Linux)
         if: runner.os == 'Linux'
         shell: bash
-        working-directory: crates/companion
+        working-directory: crates/link
         run: |
           set -euo pipefail
           npm ci
@@ -316,7 +316,7 @@ jobs:
         # crates/target/release/bundle/macos/.
         if: runner.os == 'macOS'
         shell: bash
-        working-directory: crates/companion
+        working-directory: crates/link
         run: |
           set -euo pipefail
           npm ci
@@ -324,7 +324,7 @@ jobs:
 
       - name: Codesign companion .app (macOS)
         # allow-jit is the only relaxation the WebKit view needs
-        # (crates/companion/src-tauri/entitlements.plist). If the app needs
+        # (crates/link/src-tauri/entitlements.plist). If the app needs
         # different entitlements later (e.g. Login Items via SMAppService),
         # extend that file.
         if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
@@ -341,7 +341,7 @@ jobs:
           echo "Signing $COMPANION_APP"
           uv run python bundling/sign_macos.py \
             --bundle "$COMPANION_APP" \
-            --entitlements crates/companion/src-tauri/entitlements.plist \
+            --entitlements crates/link/src-tauri/entitlements.plist \
             --skip-notarise
           echo "COMPANION_APP_PATH=$COMPANION_APP" >> "$GITHUB_ENV"
 
