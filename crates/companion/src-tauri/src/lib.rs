@@ -10,6 +10,9 @@
 
 pub mod supervisor;
 
+// Folded-in platform/Control helpers (was the `locai-link-shared` crate).
+mod shared;
+
 #[cfg(feature = "ui")]
 mod preferences;
 #[cfg(feature = "ui")]

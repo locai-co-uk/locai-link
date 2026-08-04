@@ -1,15 +1,14 @@
 # crates/
 
-Rust workspace housing every native binary shipped with Locai Link:
+Rust workspace housing the single native binary shipped with Locai Link:
 
-- **`shared/`** — small helpers (agent-health polling, `boot.json`
-  reading, version lookup) consumed by `companion`.
 - **`companion/`** — the single `locai-link` binary. Headless
   (`--no-default-features`) it's the supervisor at `<install_root>/locai-link`:
   resolves `current`, execs the versioned runtime, owns Pattern B first-install.
   The default `ui` feature adds the Tauri 2 + Svelte desktop app in-process (the
   menu-bar tray + Preferences via `index.html`, the first-run setup wizard via
-  `setup.html`).
+  `setup.html`). Platform/Control helpers (autostart, `boot.json` reading,
+  install-state, health polling) live in its `src/shared/` module.
 
 ## Running the Tauri apps
 
@@ -27,7 +26,7 @@ The Rust side compiles cleanly via plain `cargo`:
 
 ```sh
 cd crates
-cargo build --workspace      # shared, companion
+cargo build --workspace      # the locai-link binary
 cargo test --workspace       # all tests
 ```
 

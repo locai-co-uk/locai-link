@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use locai_link_shared::{
+use crate::shared::{
     agent_health, cancel_deployment as shared_cancel_deployment, installed_version,
     list_available_models as shared_list_available_models, list_models, mark_deployment_pending,
     read_identity, read_session_identity, request_deploy as shared_request_deploy,
@@ -22,18 +22,18 @@ use tauri_plugin_opener::OpenerExt;
 
 /// Install root — single source in the shared crate.
 pub(crate) fn install_root() -> String {
-    locai_link_shared::install_root()
+    crate::shared::install_root()
 }
 
 fn runtime_log_file() -> String {
     format!("{}/logs/agent.stdout.log", install_root())
 }
 
-const CONTROL_BASE_URL: &str = locai_link_shared::CONTROL_URL;
+const CONTROL_BASE_URL: &str = crate::shared::CONTROL_URL;
 
 /// LaunchAgent label; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/`).
 #[cfg(target_os = "macos")]
-const COMPANION_LABEL: &str = locai_link_shared::COMPANION_APP_ID;
+const COMPANION_LABEL: &str = crate::shared::COMPANION_APP_ID;
 
 // --- Command outputs ---------------------------------------------------------
 

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use locai_link_shared::{
+use crate::shared::{
     agent_health, list_models, toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
     ModelInfo, ModelsStatus, ServingAction, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
     DEFAULT_MODEL_ACTION_BASE, DEFAULT_UPDATE_URL,
@@ -43,10 +43,10 @@ const TRAY_ICON_IS_TEMPLATE: bool = false;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-const CONTROL_URL: &str = locai_link_shared::CONTROL_URL;
+const CONTROL_URL: &str = crate::shared::CONTROL_URL;
 
 // TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
-const WORKSPACE_URL: &str = locai_link_shared::WORKSPACE_URL;
+const WORKSPACE_URL: &str = crate::shared::WORKSPACE_URL;
 
 const MENU_ID_STATUS: &str = "status";
 const MENU_ID_CONTROL: &str = "control";
@@ -298,8 +298,7 @@ pub fn run() {
 /// Whether a device identity has been registered — the signal that onboarding
 /// is complete. Drives first-run window selection.
 fn device_registered() -> bool {
-    locai_link_shared::read_identity(&std::path::PathBuf::from(preferences::install_root()))
-        .is_some()
+    crate::shared::read_identity(&std::path::PathBuf::from(preferences::install_root())).is_some()
 }
 
 /// Route a re-launch (single-instance) to the window that matters: the setup

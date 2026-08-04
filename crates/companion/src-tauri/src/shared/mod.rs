@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Shared helpers used by the launcher, Setup Assistant, and menu-bar app.
+//! Platform + Control helpers (autostart, boot.json, install-state, health).
+//! Internal library surface: not every item is used in every feature build
+//! (most is `ui`-only), so `allow` the unused-in-this-config lints crate-wide
+//! for this module — mirrors its prior life as a separate library crate.
+#![allow(dead_code, unused_imports)]
 
 pub mod autostart;
 pub mod catalog;

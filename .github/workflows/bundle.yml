@@ -12,7 +12,6 @@ on:
       - "bundling/**"
       - "!bundling/pkg/**"
       - "crates/companion/**"
-      - "crates/shared/**"
       - "crates/Cargo.toml"
       - "plugins/*/install.py"
       - "plugins/*/pyproject.toml"

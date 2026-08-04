@@ -231,18 +231,16 @@ jobs:
         run: |
           uv run pytest tests/ -v
 
-  # 3a. Rust crate check + unit tests (shared crate only) — Linux gate.
+  # 3a. Rust check + unit tests (headless build) — Linux gate.
   #
-  # Scoped to `locai-link-shared` deliberately: `companion` is a Tauri
-  # app that needs webkit2gtk / gtk3 / libsoup on Linux runners to
-  # `cargo check`. Adding those OS deps here doubles the job surface for
-  # near-zero incremental value — the Rust logic worth guarding lives in
-  # `shared` (autostart, health probing, install-state reading). The
-  # Tauri app is built end-to-end in the `tauri-build` job below
-  # (Linux, --no-bundle), which is where
-  # their compile + frontend breakage is caught.
+  # Headless (`--no-default-features`) links no Tauri, so it `cargo check`s
+  # without webkit2gtk / gtk3 / libsoup — cheap on a plain runner, and it
+  # exercises the supervisor + folded platform/Control logic (autostart,
+  # health probing, install-state reading). The full Tauri app is built
+  # end-to-end in the `tauri-build` job below (Linux, --no-bundle), where
+  # its compile + frontend breakage is caught.
   rust-check-linux:
-    name: Rust Check (shared) on ubuntu-latest
+    name: Rust Check (headless) on ubuntu-latest
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -265,18 +263,18 @@ jobs:
 
       - name: Cargo check
         working-directory: crates
-        run: cargo check -p locai-link-shared
+        run: cargo check -p locai-link-companion --no-default-features
 
       - name: Cargo test
         working-directory: crates
-        run: cargo test -p locai-link-shared --lib
+        run: cargo test -p locai-link-companion --no-default-features --lib
 
   # 3b. Rust crate check + unit tests — macOS + Windows. Gated on the Linux
   # Rust check, so the platform-gated autostart/{macos,windows}.rs modules
   # (via #[cfg(target_os = ...)]) still get compiled on their real OS, but only
   # if the shared logic already passed on Linux.
   rust-check-cross:
-    name: Rust Check (shared) on ${{ matrix.os }}
+    name: Rust Check (headless) on ${{ matrix.os }}
     needs: [changes, rust-check-linux]
     # macOS/Windows compile check for the cfg-gated autostart modules — only
     # when Rust changed (cross-compiling these targets from Linux is blocked by
@@ -303,11 +301,11 @@ jobs:
 
       - name: Cargo check
         working-directory: crates
-        run: cargo check -p locai-link-shared
+        run: cargo check -p locai-link-companion --no-default-features
 
       - name: Cargo test
         working-directory: crates
-        run: cargo test -p locai-link-shared --lib
+        run: cargo test -p locai-link-companion --no-default-features --lib
 
   # 3c. Tauri app build (the single desktop app: tray + first-run setup)
   #

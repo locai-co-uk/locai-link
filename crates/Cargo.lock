@@ -1988,7 +1988,6 @@ name = "locai-link-companion"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "locai-link-shared",
  "mockito",
  "serde",
  "serde_json",
@@ -1999,16 +1998,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "locai-link-shared"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
  "tempfile",
  "ureq",
 ]

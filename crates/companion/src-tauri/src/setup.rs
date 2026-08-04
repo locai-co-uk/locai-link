@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
-use locai_link_shared::{
+use crate::shared::{
     deregister_device, installed_version, read_boot_json, read_identity, read_session_identity,
     BootConfig,
 };
@@ -27,9 +27,9 @@ const CONTROL_API_URL: &str = match option_env!("LOCAI_CONTROL_API_URL") {
 
 /// LaunchAgent labels; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/*.plist`).
 #[cfg(target_os = "macos")]
-const AGENT_LABEL: &str = locai_link_shared::AGENT_APP_ID;
+const AGENT_LABEL: &str = crate::shared::AGENT_APP_ID;
 #[cfg(target_os = "macos")]
-const COMPANION_LABEL: &str = locai_link_shared::COMPANION_APP_ID;
+const COMPANION_LABEL: &str = crate::shared::COMPANION_APP_ID;
 
 /// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -103,7 +103,7 @@ pub struct CheckInstallResult {
 }
 
 fn resolve_install_root() -> String {
-    locai_link_shared::install_root()
+    crate::shared::install_root()
 }
 
 /// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
@@ -716,7 +716,7 @@ pub fn mark_deployment_pending(
         pipeline_id: &pipeline_id,
         model_name: model_name.as_deref(),
     };
-    let url = locai_link_shared::DEFAULT_PENDING_URL;
+    let url = crate::shared::DEFAULT_PENDING_URL;
     let payload = serde_json::to_value(&body).unwrap();
 
     // `install_launchagents` returns as soon as fork() succeeds, but the
@@ -748,7 +748,7 @@ pub async fn wait_for_agent_ready() -> Result<(), String> {
     // 15 s of polling on the main thread froze the setup window; hop onto the
     // blocking pool so the WebView stays responsive during the wait.
     tauri::async_runtime::spawn_blocking(|| {
-        let url = locai_link_shared::DEFAULT_HEALTH_URL;
+        let url = crate::shared::DEFAULT_HEALTH_URL;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         #[allow(unused_assignments)]
         let mut last_err = String::from("agent never came up");

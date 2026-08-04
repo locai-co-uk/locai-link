@@ -1,17 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-# Cargo workspace root. Members are the shared helper crate (agent-status
-# polling, boot.json reading, version lookup) and the single locai-link binary
-# (supervisor + optional ui).
+# Cargo workspace root. One member: the single locai-link binary (supervisor +
+# optional ui). `src-tauri/` houses the Rust backend; the Svelte frontend lives
+# alongside it under `src/`. The former standalone launcher and shared helper
+# crate are both folded in.
 
 [workspace]
 resolver = "2"
 members = [
-    "shared",
-    # The single Locai Link binary: supervisor + (with the `ui` feature) the tray
-    # + first-run setup. `src-tauri/` houses the Rust backend; the Svelte frontend
-    # lives alongside it under `src/`. The former standalone launcher is folded in.
     "companion/src-tauri",
 ]
 

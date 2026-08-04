@@ -387,7 +387,7 @@ class BootConfig:
     ``crates/companion/src-tauri/src/supervisor/``. Field shape (name,
     optional/required) must match the Rust ``BootConfig`` in
     ``crates/companion/src-tauri/src/supervisor/boot.rs`` and its
-    mirror in ``crates/shared/src/lib.rs`` — kept in lockstep because a
+    mirror in ``crates/companion/src-tauri/src/shared/install.rs`` — kept in lockstep because a
     host installer that writes fields the Python side drops is a schema
     drift bug.
     """

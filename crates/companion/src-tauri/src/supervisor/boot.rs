@@ -218,7 +218,7 @@ mod tests {
             asset_repo: "locai-co-uk/locai-link".into(),
             asset_url: Some("https://example.test/release.tar.gz".into()),
         };
-        let shared = locai_link_shared::install::BootConfig {
+        let shared = crate::shared::install::BootConfig {
             host_app: "SafeChat".into(),
             plugin_set: vec!["llm".into(), "stt".into()],
             channel: "beta".into(),
