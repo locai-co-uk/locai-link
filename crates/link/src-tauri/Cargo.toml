@@ -66,3 +66,8 @@ sha2 = "0.10"
 tar = "0.4"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 
+# SIGTERM the runtime child for graceful shutdown (Unix only; Windows uses the
+# std Child::kill terminate path).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

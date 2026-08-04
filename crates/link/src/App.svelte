@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Preferences window for the Locai Link companion. Tray "Preferences…"
+  // Preferences window for the Locai Link app. Tray "Preferences…"
   // un-hides + focuses it; the window's close button hides it (see
   // `on_window_event` in src-tauri/src/lib.rs) so the tray stays running.
   //

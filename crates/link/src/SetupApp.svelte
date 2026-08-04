@@ -463,7 +463,7 @@
       total: selected.length,
     };
     // Pre-register each selected model "queued 0%" with the local runtime so the
-    // companion's Models panel shows all rows from t=0 (the runtime deploys
+    // app's Models panel shows all rows from t=0 (the runtime deploys
     // serially otherwise). Best-effort loopback POST; the runtime registers the
     // model itself once the download starts.
     await Promise.allSettled(
@@ -533,7 +533,7 @@
     }
   }
 
-  async function openCompanionPrefs() {
+  async function openPreferences() {
     splashAction = { kind: "working", message: "Opening Preferences…" };
     try {
       // Explicit "Open Preferences" (already-set-up splash): reveal prefs and
@@ -696,7 +696,7 @@
             </div>
           {/if}
           <div class="chooser__actions">
-            <button class="btn btn--primary btn--wide" onclick={openCompanionPrefs}>
+            <button class="btn btn--primary btn--wide" onclick={openPreferences}>
               Preferences
             </button>
             <button class="btn btn--ghost btn--wide" onclick={startReRegister}>

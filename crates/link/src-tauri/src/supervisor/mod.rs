@@ -76,6 +76,11 @@ struct ControlState {
     restart: bool,
     /// A child is currently alive (read by the tray).
     running: bool,
+    /// Monotonic count of exit-42 (restart-for-update) respawns the supervisor
+    /// has handled. The UI's OTA lock reads this as the authoritative "the
+    /// update applied and the runtime is restarting" signal, instead of a
+    /// wall-clock timeout (INFRA-466 item 1).
+    update_restart_epoch: u64,
 }
 
 impl SupervisorControl {
@@ -109,6 +114,21 @@ impl SupervisorControl {
     fn set_running(&self, v: bool) {
         self.inner.lock().expect("control poisoned").running = v;
     }
+    /// Bump the restart-for-update counter (supervisor saw the runtime exit 42).
+    fn note_update_restart(&self) {
+        self.inner
+            .lock()
+            .expect("control poisoned")
+            .update_restart_epoch += 1;
+    }
+    /// The authoritative OTA signal for the UI: how many exit-42 respawns have
+    /// happened. The lock records this at trigger time and clears once it advances.
+    pub fn update_restart_epoch(&self) -> u64 {
+        self.inner
+            .lock()
+            .expect("control poisoned")
+            .update_restart_epoch
+    }
 }
 
 enum Outcome {
@@ -122,14 +142,43 @@ fn next_backoff(b: Duration) -> Duration {
     (b * 2).min(Duration::from_secs(30))
 }
 
+/// Stop the runtime child gracefully. On Unix, SIGTERM first so the runtime runs
+/// its shutdown (stop pipelines, publish "offline", stop llama-swap/llama-server)
+/// then wait ~5s and SIGKILL as a fallback — a bare SIGKILL orphaned those engine
+/// subprocesses. Windows has no SIGTERM, so it uses the std terminate.
+#[cfg(unix)]
+fn terminate_child(child: &mut std::process::Child) {
+    // SAFETY: `child.id()` is this supervisor's own live child; SIGTERM is valid.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    // Poll for graceful exit up to ~5s (50 × 100ms), then force-kill.
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Desktop in-process supervision: keep the runtime child alive on a background
 /// thread, honouring Start/Stop/Restart from `control`. Reuses the same resolve
 /// / bootstrap / rollback helpers as the headless `run()`; unlike `run()` the
-/// wait is interruptible so a Stop can kill the child. Runs forever.
-///
-/// TODO(P3): graceful shutdown — SIGTERM + wait + SIGKILL fallback so the Python
-/// runtime cleans up its engine subprocesses (llama-swap/llama-server) instead
-/// of being SIGKILLed and orphaning them.
+/// wait is interruptible so a Stop can kill the child. Stop/Restart go through
+/// `terminate_child` (SIGTERM + grace + SIGKILL) so the runtime cleans up its
+/// engine subprocesses instead of being SIGKILLed and orphaning them. Runs forever.
 pub fn supervise_forever(control: SupervisorControl) {
     let install_root = match find_install_root() {
         Ok(r) => r,
@@ -218,8 +267,7 @@ pub fn supervise_forever(control: SupervisorControl) {
         // Interruptible wait: poll for exit while honouring Stop/Restart.
         let outcome = loop {
             if !control.want_running() || control.take_restart() {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_child(&mut child);
                 break Outcome::Interrupted;
             }
             match child.try_wait() {
@@ -237,7 +285,12 @@ pub fn supervise_forever(control: SupervisorControl) {
             // Stop -> idle next iteration; Restart -> respawn immediately.
             Outcome::Interrupted => backoff = Duration::from_secs(1),
             // OTA: re-resolve `current` (an update may have flipped it) + respawn.
-            Outcome::Exited(Some(EXIT_RESTART_FOR_UPDATE)) => backoff = Duration::from_secs(1),
+            // Bump the update-restart epoch — the UI's OTA lock clears on this
+            // authoritative signal rather than a wall-clock timeout.
+            Outcome::Exited(Some(EXIT_RESTART_FOR_UPDATE)) => {
+                control.note_update_restart();
+                backoff = Duration::from_secs(1);
+            }
             // Deliberate stop: the runtime's contract is 42=respawn, 1=crash,
             // 0=stay stopped (see src/link/main.py). Honour it — respawning a
             // 0-exit would resurrect a Control-/user-initiated shutdown. The
@@ -535,8 +588,19 @@ fn resolve_current_version(install_root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::root_from_exe_dir;
+    use super::{root_from_exe_dir, SupervisorControl};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn update_restart_epoch_advances_on_note() {
+        // The UI's OTA lock (INFRA-466 item 1) clears when this epoch advances,
+        // so note_update_restart must monotonically increment it.
+        let c = SupervisorControl::default();
+        assert_eq!(c.update_restart_epoch(), 0);
+        c.note_update_restart();
+        c.note_update_restart();
+        assert_eq!(c.update_restart_epoch(), 2);
+    }
 
     #[test]
     fn root_from_macos_bundle_walks_out_of_the_app() {

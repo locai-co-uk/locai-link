@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Locai Link menu-bar companion — tray-only Tauri app that polls the local
+//! Locai Link menu-bar app — tray-only Tauri app that polls the local
 //! agent's `/healthz` and `/models` and reflects state in the tray icon,
 //! header text, and Models submenu.
 
@@ -11,7 +11,7 @@ use crate::{preferences, setup, supervisor};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::shared::{
     agent_health, list_models, toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
@@ -129,18 +129,15 @@ pub(crate) struct MenuHandles {
     in_flight: std::collections::HashSet<String>,
     /// Blocks repeat "Update" clicks while a swap is in flight, and drives the
     /// Preferences "updating, will restart" lock. Held from the trigger until
-    /// poll_forever sees the update finish (or on POST failure); resets
-    /// naturally when the companion relaunches on the new build.
+    /// the supervisor reports an exit-42 restart-for-update (authoritative) or
+    /// the trigger POST fails.
     pub(crate) update_in_flight: bool,
-    /// When `update_in_flight` was set, so poll_forever can expire a stuck lock
-    /// if the update fails before the runtime restarts (no Down transition).
-    pub(crate) update_started_at: Option<Instant>,
+    /// The supervisor's `update_restart_epoch` captured when the update was
+    /// triggered. The lock clears once that epoch advances — i.e. the supervisor
+    /// actually restarted the runtime for the update. Replaces the old
+    /// wall-clock timeout (INFRA-466 item 1).
+    pub(crate) update_restart_epoch_at_trigger: Option<u64>,
 }
-
-/// Cap on how long the OTA lock can stay set while the agent is still up. If an
-/// update is flagged but never restarts the runtime (e.g. it fails before the
-/// re-exec), release the lock so Preferences doesn't stay disabled forever.
-const UPDATE_LOCK_EXPIRY: Duration = Duration::from_secs(300);
 
 pub(crate) type SharedHandles = Arc<Mutex<MenuHandles>>;
 
@@ -219,7 +216,7 @@ pub fn run() {
         })
         .setup(move |app| {
             // Publish our running build version so the runtime's post-OTA drift
-            // check can tell whether the companion actually relaunched onto the
+            // check can tell whether the app actually relaunched onto the
             // new build. macOS-only: the drift check is Darwin-only, and
             // install_root() is empty on Windows, which would otherwise write
             // ./state/companion-running-version into the process working directory.
@@ -277,7 +274,7 @@ pub fn run() {
                 models: Vec::new(),
                 in_flight: std::collections::HashSet::new(),
                 update_in_flight: false,
-                update_started_at: None,
+                update_restart_epoch_at_trigger: None,
             }));
             app.manage(handles.clone());
             let app_handle = app.handle().clone();
@@ -593,7 +590,10 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     return;
                 }
                 guard.update_in_flight = true;
-                guard.update_started_at = Some(Instant::now());
+                guard.update_restart_epoch_at_trigger = Some(
+                    app.state::<supervisor::SupervisorControl>()
+                        .update_restart_epoch(),
+                );
             }
             // Off the menu-event thread: the loopback POST shouldn't block the
             // tray. The next poll picks up the "Updating" state; poll_forever
@@ -605,7 +605,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     // Failed before the agent went down — release so a retry works.
                     if let Ok(mut g) = shared.lock() {
                         g.update_in_flight = false;
-                        g.update_started_at = None;
+                        g.update_restart_epoch_at_trigger = None;
                     }
                     // Otherwise the click looks like it did nothing — tell the user.
                     let dialog_handle = app_handle.clone();
@@ -621,7 +621,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             });
         }
         MENU_ID_QUIT => {
-            // The companion is tied to the runtime, so quitting stops Link too —
+            // The app is tied to the runtime, so quitting stops Link too —
             // no "keep running" choice. Signal the supervisor to stop the child,
             // then quit; the service manager reaps anything left in the unit.
             app.state::<supervisor::SupervisorControl>().stop();
@@ -743,22 +743,19 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         if !updating {
             update_down_polls = 0;
         }
-        // Release the click guard once an in-progress update resolves (agent
-        // returned, or the timeout gave up) so the menu item works again.
-        if was_updating && !updating {
-            if let Ok(mut h) = handles.lock() {
-                h.update_in_flight = false;
-                h.update_started_at = None;
-            }
-        }
-        // Time-based backstop, independent of health: release a stuck lock past
-        // the cap even if the runtime never came back up (or we missed it).
+        // Release the OTA lock on an authoritative signal — never a wall-clock
+        // timeout (INFRA-466 item 1). Primary: the supervisor bumped its
+        // update_restart_epoch past what we captured at trigger, i.e. it saw the
+        // runtime exit 42 and restarted it for the update. Secondary: the health
+        // Up->Down->Up inference above resolved. Both are signals, not a cap.
         if let Ok(mut h) = handles.lock() {
-            if h.update_started_at
-                .is_some_and(|t| t.elapsed() > UPDATE_LOCK_EXPIRY)
-            {
+            let epoch = app
+                .state::<supervisor::SupervisorControl>()
+                .update_restart_epoch();
+            let epoch_advanced = h.update_restart_epoch_at_trigger.is_some_and(|e| epoch > e);
+            if epoch_advanced || (was_updating && !updating) {
                 h.update_in_flight = false;
-                h.update_started_at = None;
+                h.update_restart_epoch_at_trigger = None;
             }
         }
         prev_up_with_update = is_up && has_update;

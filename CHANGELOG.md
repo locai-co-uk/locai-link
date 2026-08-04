@@ -29,6 +29,24 @@ sections below the summary. -->
   then hits the existing `target_path.exists()` cache guard and skips the
   re-download. Distinct filenames are unaffected.
 
+### Changed: OTA lock clears on an authoritative signal, not a timeout (`crates/link`)
+
+- The "updating…" lock that disables Preferences during an OTA no longer relies
+  on a 5-minute wall-clock expiry. Now that the supervisor and UI share a
+  process, the supervisor exposes an `update_restart_epoch` it bumps when it
+  sees the runtime exit 42 (restart-for-update); the lock clears the moment that
+  epoch advances past what was captured at trigger. The health `Up→Down→Up`
+  resolution stays as a secondary signal; a trigger POST failure still releases
+  immediately. (INFRA-466 item 1.)
+
+### Changed: graceful runtime shutdown on Stop/Restart (`crates/link`)
+
+- When the tray/Preferences stop or restart the runtime, the supervisor now
+  SIGTERMs the child (Unix), waits ~5s, then SIGKILLs as a fallback — so the
+  runtime runs its shutdown (stop pipelines, publish offline, stop
+  llama-swap/llama-server) instead of being SIGKILLed and orphaning its engine
+  subprocesses. Windows uses the standard terminate.
+
 ### Changed: merge the Setup Assistant into the companion (`crates/link`, `bundling/`, `src/link/app/updater.py`)
 
 - The onboarding wizard is now a second window (`setup.html`) of the companion

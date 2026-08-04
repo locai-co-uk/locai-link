@@ -94,7 +94,7 @@ pub fn stop_now(app_id: &str) -> io::Result<()> {
     }
     // Fire-and-forget: launchctl reports non-zero for "already
     // unloaded" which isn't a real failure from the caller's
-    // perspective. The caller (companion Quit) just wants best-effort
+    // perspective. The caller (app Quit) just wants best-effort
     // "stop everything now".
     let _ = Command::new("launchctl")
         .args(["unload"])

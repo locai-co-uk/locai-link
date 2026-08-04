@@ -106,7 +106,7 @@ fn resolve_install_root() -> String {
     crate::shared::install_root()
 }
 
-/// Install root, keyed on host OS. Mirrored in the companion's `install_root`.
+/// Install root, keyed on host OS. Mirrored in the app's `install_root`.
 #[tauri::command]
 pub fn get_install_root() -> String {
     resolve_install_root()
@@ -930,7 +930,7 @@ pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<
         .output();
     let _ = std::fs::remove_file(dest_dir.join("uk.co.locai.link.agent.plist"));
 
-    // The single unit: the companion plist runs the merged `locai-link` binary,
+    // The single unit: the app plist runs the merged `locai-link` binary,
     // which supervises the runtime child + shows the tray.
     let plist_name = "uk.co.locai.link.companion.plist";
     let src = source_dir.join(plist_name);
@@ -1208,7 +1208,7 @@ fn best_effort_deregister() {
 
 /// Fire the uninstaller (setup splash or Preferences danger zone).
 /// `systemd-run --user --collect` on Linux so the script survives the runtime +
-/// companion being killed mid-run.
+/// app being killed mid-run.
 #[tauri::command]
 #[cfg(target_os = "linux")]
 pub fn launch_uninstaller(install_root: String) -> Result<(), String> {

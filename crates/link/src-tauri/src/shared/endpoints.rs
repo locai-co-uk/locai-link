@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Cross-app endpoints and paths: the external service URLs, the companion
+//! Cross-app endpoints and paths: the external service URLs, the app
 //! <-> Setup Assistant IPC port, and the platform install root. Centralised so
 //! the two Tauri apps don't each hardcode (and drift on) their own copies.
 

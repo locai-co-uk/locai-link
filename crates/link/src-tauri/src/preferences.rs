@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Preferences window backend — Tauri commands invoked by the companion's
+//! Preferences window backend — Tauri commands invoked by the app's
 //! Svelte UI. Uninstall lives in the Setup Assistant, not here.
 
 use std::path::PathBuf;
@@ -93,7 +93,7 @@ pub struct StatusPoll {
     update_available: bool,
     latest_version: Option<String>,
     /// An OTA swap is applying: the UI locks and shows "updating, will restart"
-    /// until the companion relaunches on the new build.
+    /// until the app relaunches on the new build.
     update_in_flight: bool,
 }
 
@@ -163,28 +163,34 @@ pub async fn poll_status(
 /// Sets `update_in_flight` so Preferences locks into the "updating" state; a
 /// POST failure clears it (the tray path does the same).
 #[tauri::command]
-pub fn install_update(handles: tauri::State<'_, crate::tray::SharedHandles>) -> Result<(), String> {
+pub fn install_update(
+    handles: tauri::State<'_, crate::tray::SharedHandles>,
+    control: tauri::State<'_, crate::supervisor::SupervisorControl>,
+) -> Result<(), String> {
     // Atomic check-and-set: reject a second trigger while one is in flight, so a
     // double-click can't fire two updates.
     {
         let mut h = handles
             .lock()
-            .map_err(|_| "companion state lock poisoned".to_string())?;
+            .map_err(|_| "link state lock poisoned".to_string())?;
         if h.update_in_flight {
             return Err("An update is already in progress.".to_string());
         }
         h.update_in_flight = true;
-        h.update_started_at = Some(std::time::Instant::now());
+        // Capture the supervisor's restart-for-update epoch; poll_forever clears
+        // the lock once it advances (the runtime restarted for the update).
+        h.update_restart_epoch_at_trigger = Some(control.update_restart_epoch());
     }
     let res = trigger_update(DEFAULT_UPDATE_URL);
     // The POST is to the local loopback agent and returns 202 before any
     // shutdown, so an error is unambiguous (the update never started): safe to
     // clear the lock and allow a retry. If it succeeds but the update later
-    // fails without restarting the agent, poll_forever's expiry releases it.
+    // fails without restarting the agent, the supervisor's restart signal (or
+    // the health Up->Down->Up resolution) releases it.
     if res.is_err() {
         if let Ok(mut h) = handles.lock() {
             h.update_in_flight = false;
-            h.update_started_at = None;
+            h.update_restart_epoch_at_trigger = None;
         }
     }
     res
@@ -440,7 +446,7 @@ fn read_session_config_device() -> Option<DeviceInfo> {
 /// when it can't be resolved. Delegates to the shared resolver so it honours
 /// BOTH the `current` symlink and the `CURRENT` text pointer — a bare
 /// `read_link` here silently returned `None` on text-pointer installs, so the
-/// companion showed no version where the runtime/SA (which use the shared
+/// app showed no version where the runtime/SA (which use the shared
 /// resolver) showed it.
 fn resolve_current_version() -> Option<String> {
     installed_version(&PathBuf::from(install_root())).map(|v| v.version)

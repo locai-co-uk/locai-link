@@ -1988,6 +1988,7 @@ name = "locai-link"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "libc",
  "mockito",
  "serde",
  "serde_json",
