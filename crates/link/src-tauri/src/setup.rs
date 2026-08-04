@@ -25,11 +25,10 @@ const CONTROL_API_URL: &str = match option_env!("LOCAI_CONTROL_API_URL") {
     None => "https://api.locai.co.uk/api/v1",
 };
 
-/// LaunchAgent labels; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/*.plist`).
+/// Legacy agent LaunchAgent label — still referenced to boot out + remove the
+/// pre-merge unit on upgrade. Value single-sourced in shared.
 #[cfg(target_os = "macos")]
 const AGENT_LABEL: &str = crate::shared::AGENT_APP_ID;
-#[cfg(target_os = "macos")]
-const COMPANION_LABEL: &str = crate::shared::COMPANION_APP_ID;
 
 /// Generous because the backend hits Firestore synchronously on both paths.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -886,11 +885,13 @@ fn lookup_context_path(context: &serde_json::Value, path: &str) -> Option<String
     }
 }
 
-// --- LaunchAgent bootstrap (macOS) -------------------------------------------
+// --- LaunchAgent plist install (macOS) ---------------------------------------
 
-/// Copy staged LaunchAgent plists into `~/Library/LaunchAgents/`, then bootstrap
-/// + kickstart both. `run_at_login` only affects the plist's RunAtLoad — both
-/// agents are always kickstarted now so the user sees the setup pay off immediately.
+/// Install the LaunchAgent plist into `~/Library/LaunchAgents/` and set its
+/// `RunAtLoad` from the toggle. It does NOT bootstrap/kickstart: the pkg
+/// postinstall already bootstrapped the agent so launchd owns the one running
+/// instance, and kickstarting here would restart the wizard mid-onboarding.
+/// `RunAtLoad` takes effect at next login; `finish_setup` re-arms the supervisor.
 #[tauri::command]
 #[cfg(target_os = "macos")]
 pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<(), String> {
@@ -963,57 +964,13 @@ pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<
         }
     }
 
-    let domain = format!("gui/{uid}");
-    let service = format!("{domain}/{COMPANION_LABEL}");
-
-    // bootout-then-bootstrap so a re-install picks up the fresh plist.
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &service])
-        .output();
-
-    let bootstrap_out = std::process::Command::new("launchctl")
-        .args(["bootstrap", &domain, dst.to_str().unwrap_or("")])
-        .output()
-        .map_err(|e| format!("launchctl bootstrap: {e}"))?;
-    if !bootstrap_out.status.success() {
-        eprintln!(
-            "[install_launchagents] bootstrap {service} failed ({:?}): {} {}",
-            bootstrap_out.status.code(),
-            String::from_utf8_lossy(&bootstrap_out.stdout).trim(),
-            String::from_utf8_lossy(&bootstrap_out.stderr).trim(),
-        );
-    }
-
-    // -k restarts if running, starts fresh otherwise. Load-bearing step.
-    let kickstart_out = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", &service])
-        .output()
-        .map_err(|e| format!("launchctl kickstart: {e}"))?;
-    if !kickstart_out.status.success() {
-        eprintln!(
-            "[install_launchagents] kickstart {service} exited {:?}: {} {}",
-            kickstart_out.status.code(),
-            String::from_utf8_lossy(&kickstart_out.stdout).trim(),
-            String::from_utf8_lossy(&kickstart_out.stderr).trim(),
-        );
-        // Fallback ONLY on kickstart failure (an unconditional `open -a` would
-        // spawn a second tray from the /Applications copy).
-        for path in [
-            "/Library/Locai/Locai Link.app",
-            "/Applications/Locai Link.app",
-        ] {
-            if std::path::Path::new(path).exists() {
-                let _ = std::process::Command::new("open")
-                    .args(["-a", path])
-                    .output();
-                break;
-            }
-        }
-        return Err(format!(
-            "kickstart {service} exited {:?}",
-            kickstart_out.status.code()
-        ));
-    }
+    // The launch + launchd ownership is the pkg postinstall's job now: it
+    // bootstraps the LaunchAgent so launchd owns the one instance from install
+    // (parity with the Linux service, now that the tauri single-instance guard is
+    // gone). Finish must NOT bootstrap/kickstart its own running process —
+    // `kickstart -k` would restart the wizard mid-onboarding (suicide). Setting
+    // RunAtLoad above is enough; it takes effect at next login. `finish_setup`
+    // re-arms the supervisor via `control.start()`.
     Ok(())
 }
 

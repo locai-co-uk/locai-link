@@ -539,20 +539,6 @@ pub(crate) fn current_uid() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-#[cfg(target_os = "macos")]
-fn launchctl(args: &[&str]) -> Result<(), String> {
-    let status = std::process::Command::new("launchctl")
-        .args(args)
-        .status()
-        .map_err(|e| format!("launchctl {args:?}: {e}"))?;
-    if !status.success() {
-        // launchctl returns non-zero for harmless cases (kill on already-dead
-        // service, etc.); bubble the code — callers can special-case.
-        return Err(format!("launchctl {args:?} exited with {}", status));
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
 fn systemctl(args: &[&str]) -> Result<(), String> {
     let out = std::process::Command::new("systemctl")
