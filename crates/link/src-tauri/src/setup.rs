@@ -1229,9 +1229,16 @@ pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
     best_effort_deregister();
     // AppleScript's `quoted form of` safely escapes the shell argument; `&`
     // concatenation keeps the path inside AppleScript's own string escaping.
+    //
+    // Run DETACHED (nohup + background, output to a temp log) so the script
+    // survives the app being killed mid-run. The uninstaller kills the main app
+    // in one of its early steps; run synchronously it would tear down its own
+    // osascript subtree (it is a child of the app) and never reach the file
+    // removal, leaving the install behind. This mirrors the Linux path, which
+    // detaches via `systemd-run --collect` for the same reason.
     let escaped_path = script.replace('\\', "\\\\").replace('"', "\\\"");
     let apple_script = format!(
-        "do shell script \"/bin/bash \" & quoted form of \"{escaped_path}\" with administrator privileges"
+        "do shell script \"nohup /bin/bash \" & quoted form of \"{escaped_path}\" & \" >/tmp/locai-uninstall.log 2>&1 &\" with administrator privileges"
     );
     let out = std::process::Command::new("osascript")
         .args(["-e", &apple_script])

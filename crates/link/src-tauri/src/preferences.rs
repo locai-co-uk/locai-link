@@ -26,7 +26,7 @@ pub(crate) fn install_root() -> String {
 }
 
 fn runtime_log_file() -> String {
-    format!("{}/logs/agent.stdout.log", install_root())
+    format!("{}/logs/link.stdout.log", install_root())
 }
 
 const CONTROL_BASE_URL: &str = crate::shared::CONTROL_URL;

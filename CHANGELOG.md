@@ -30,6 +30,10 @@ sections below the summary. -->
   download. The tray now updates safely on macOS.
 - Fixed: Preferences no longer flashes "Stopped" for a moment when reopened; it
   shows the last-known state until the next status check.
+- Fixed: the Logs "Open" button in Preferences now reveals the current log file
+  (it pointed at an old filename and opened nothing).
+- Fixed: uninstalling on macOS now removes the install completely; the
+  uninstaller could stop halfway when it shut the app down, leaving files behind.
 
 ### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
 
@@ -39,6 +43,20 @@ sections below the summary. -->
 - A per-`model_name` download lock now serializes same-file deploys; the waiter
   then hits the existing `target_path.exists()` cache guard and skips the
   re-download. Distinct filenames are unaffected.
+
+### Fixed: macOS uninstaller runs detached so it always completes (`crates/link/src-tauri/src/setup.rs`)
+
+- The uninstaller kills the main app partway through, but on macOS it ran as a
+  synchronous child of that app (via `osascript`), so killing the app tore down
+  the uninstaller's own process subtree before it reached the file removal,
+  leaving `/Library/Locai`, the `/Applications` copy, and the CLI symlink
+  behind. It now runs detached (`nohup ... &`, output to `/tmp/locai-uninstall.log`),
+  matching the Linux path's `systemd-run --collect`.
+
+### Fixed: Logs "Open" points at the current log file (`crates/link/src-tauri/src/preferences.rs`)
+
+- `runtime_log_file()` still referenced `agent.stdout.log`; the logs were renamed
+  to `link.*.log`, so `open -R` targeted a nonexistent file and revealed nothing.
 
 ### Fixed: tray menu/icon updates now run on the main thread (`crates/link/src-tauri/src/tray.rs`)
 
