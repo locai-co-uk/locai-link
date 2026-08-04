@@ -208,7 +208,20 @@
 
   async function load() {
     try {
-      prefs = await invoke<PrefsState>("get_prefs_state");
+      const prev = prefs;
+      const next = await invoke<PrefsState>("get_prefs_state");
+      // Seed the live-status fields from the last poll. get_prefs_state's
+      // cold-start probe often reports Down, so re-showing the window (load
+      // runs on every `visibilitychange`) would flash "Stopped" for one tick
+      // before refreshStatus reconfirms. Carry the last-known values over once
+      // we've polled; the next poll (within POLL_INTERVAL_MS) overwrites them.
+      if (prev && hasPolled) {
+        next.agent.status = prev.agent.status;
+        next.agent.uptime_seconds = prev.agent.uptime_seconds;
+        next.agent.version = prev.agent.version;
+        next.network = prev.network;
+      }
+      prefs = next;
       loadError = null;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -593,7 +606,9 @@
         });
         await invoke<void>("exit_app");
       } catch (e) {
-        uninstallError = e instanceof Error ? e.message : String(e);
+        const msg = e instanceof Error ? e.message : String(e);
+        // Dismissing the admin prompt isn't a failure — nothing was removed.
+        if (msg !== "cancelled") uninstallError = msg;
       }
     });
   }

@@ -580,10 +580,13 @@
       // exiting. Quit the app; the uninstaller tears down the rest.
       await invoke<void>("exit_app");
     } catch (e) {
-      splashAction = {
-        kind: "error",
-        message: `Uninstall failed: ${e instanceof Error ? e.message : String(e)}`,
-      };
+      const msg = e instanceof Error ? e.message : String(e);
+      // Dismissing the admin prompt isn't a failure — return to the splash.
+      if (msg === "cancelled") {
+        splashAction = { kind: "idle" };
+      } else {
+        splashAction = { kind: "error", message: `Uninstall failed: ${msg}` };
+      }
     }
   }
 

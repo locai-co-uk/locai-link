@@ -767,19 +767,6 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         } else {
             TrayState::from(&health)
         };
-        if next_tray != current_tray {
-            let bytes = match next_tray {
-                TrayState::Up => TRAY_ICON_UP,
-                TrayState::Down => TRAY_ICON_DOWN,
-            };
-            if let Ok(img) = Image::from_bytes(bytes) {
-                // Atomic swap keeps the template flag in sync with the new image.
-                if let Err(e) = tray.set_icon_with_as_template(Some(img), TRAY_ICON_IS_TEMPLATE) {
-                    eprintln!("[link] tray.set_icon failed: {e}");
-                }
-            }
-            current_tray = next_tray;
-        }
 
         // Onboarding still running: minimal tray + "REGISTERING" header until a
         // device identity exists (cheap file check each tick).
@@ -806,9 +793,6 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             (HealthStatus::Up(_), _) => brand.clone(),
             _ => format!("{brand} · Offline"),
         };
-        if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
-            eprintln!("[link] tray.set_tooltip failed: {e}");
-        }
 
         // Treat transient /models Down/Malformed as "keep last-known empty"
         // rather than clearing — avoids flapping when /models is briefly out
@@ -833,30 +817,70 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         );
         let text_changed = status_text != current_status_text;
 
-        if new_digest != current_digest || text_changed {
-            match build_tray_menu(
-                &app,
-                &new_models,
-                &new_deployments,
-                &status_text,
-                update_latest.as_deref(),
-                registered,
-            ) {
-                Ok((new_menu, new_status_item)) => {
-                    if let Err(e) = tray.set_menu(Some(new_menu)) {
-                        eprintln!("[link] tray.set_menu failed: {e}");
+        // Every NSStatusItem / muda mutation MUST run on the main thread — this
+        // loop is a background thread, and touching the menu/icon off-main races
+        // AppKit (it read a half-written icon and panicked in muda, crashing the
+        // tray). Decide what changed here, then apply it all in one main-thread hop.
+        let icon_bytes: Option<&'static [u8]> =
+            (next_tray != current_tray).then(|| match next_tray {
+                TrayState::Up => TRAY_ICON_UP,
+                TrayState::Down => TRAY_ICON_DOWN,
+            });
+        let rebuild_menu = new_digest != current_digest || text_changed;
+        let tray_main = tray.clone();
+        let app_main = app.clone();
+        let handles_main = handles.clone();
+        let menu_models = new_models.clone();
+        let menu_deployments = new_deployments;
+        let menu_status = status_text.clone();
+        let menu_update = update_latest;
+        let _ = app.run_on_main_thread(move || {
+            if let Some(bytes) = icon_bytes {
+                if let Ok(img) = Image::from_bytes(bytes) {
+                    // Atomic swap keeps the template flag in sync with the new image.
+                    if let Err(e) =
+                        tray_main.set_icon_with_as_template(Some(img), TRAY_ICON_IS_TEMPLATE)
+                    {
+                        eprintln!("[link] tray.set_icon failed: {e}");
                     }
-                    if let Ok(mut h) = handles.lock() {
-                        h.status_item = new_status_item;
-                        h.models = new_models.clone();
-                    }
-                    current_digest = new_digest;
-                    current_status_text = status_text.clone();
                 }
-                Err(e) => eprintln!("[link] build_tray_menu failed: {e}"),
             }
-        } else if let Ok(mut h) = handles.lock() {
-            h.models = new_models;
+            if let Err(e) = tray_main.set_tooltip(Some(&tooltip)) {
+                eprintln!("[link] tray.set_tooltip failed: {e}");
+            }
+            if rebuild_menu {
+                match build_tray_menu(
+                    &app_main,
+                    &menu_models,
+                    &menu_deployments,
+                    &menu_status,
+                    menu_update.as_deref(),
+                    registered,
+                ) {
+                    Ok((new_menu, new_status_item)) => {
+                        if let Err(e) = tray_main.set_menu(Some(new_menu)) {
+                            eprintln!("[link] tray.set_menu failed: {e}");
+                        }
+                        if let Ok(mut h) = handles_main.lock() {
+                            h.status_item = new_status_item;
+                            h.models = menu_models;
+                        }
+                    }
+                    Err(e) => eprintln!("[link] build_tray_menu failed: {e}"),
+                }
+            } else if let Ok(mut h) = handles_main.lock() {
+                h.models = menu_models;
+            }
+        });
+
+        // Optimistic local trackers: this loop drives the state and the hop above
+        // applies it, so advance them now rather than awaiting the main thread.
+        if icon_bytes.is_some() {
+            current_tray = next_tray;
+        }
+        if rebuild_menu {
+            current_digest = new_digest;
+            current_status_text = status_text;
         }
 
         thread::sleep(POLL_INTERVAL);

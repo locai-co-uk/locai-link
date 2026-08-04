@@ -1207,9 +1207,25 @@ pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
-    // Deregister first: it needs the session api_key the uninstaller wipes. If
-    // the spawn below fails, the device is deregistered but still installed
-    // (recoverable on retry).
+    // Acquire admin auth up-front with a no-op command. If the user dismisses
+    // the dialog, nothing has happened yet — no deregister, no removal — so a
+    // cancel is a true no-op. We report a "cancelled" sentinel the UI treats as
+    // benign (not a failure). macOS caches the granted credential for the
+    // security session, so the uninstaller run below reuses it without a second
+    // prompt.
+    let auth = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "do shell script \"true\" with administrator privileges",
+        ])
+        .output()
+        .map_err(|e| format!("osascript: {e}"))?;
+    if !auth.status.success() {
+        return Err(uninstall_err(&auth.stderr, "admin authorization failed"));
+    }
+    // Auth granted — now it's safe to deregister (it needs the session api_key
+    // the uninstaller wipes) and run the uninstaller. If the run below somehow
+    // fails, the device is deregistered but still installed (recoverable on retry).
     best_effort_deregister();
     // AppleScript's `quoted form of` safely escapes the shell argument; `&`
     // concatenation keeps the path inside AppleScript's own string escaping.
@@ -1222,12 +1238,21 @@ pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
         .output()
         .map_err(|e| format!("osascript: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
-            "uninstall.sh failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(uninstall_err(&out.stderr, "uninstall.sh failed"));
     }
     Ok(())
+}
+
+/// Map an osascript failure to a UI error string. A dismissed admin dialog
+/// (AppleScript "User canceled", error -128) becomes the `"cancelled"` sentinel
+/// the frontend treats as a benign no-op; anything else keeps `context` + stderr.
+#[cfg(target_os = "macos")]
+fn uninstall_err(stderr: &[u8], context: &str) -> String {
+    let msg = String::from_utf8_lossy(stderr);
+    if msg.contains("User canceled") || msg.contains("-128") {
+        return "cancelled".to_string();
+    }
+    format!("{context}: {}", msg.trim())
 }
 
 #[tauri::command]

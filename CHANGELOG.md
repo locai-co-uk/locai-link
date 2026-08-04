@@ -19,6 +19,17 @@ sections below the summary. -->
 - Fixed: selecting two models that are the same file no longer fails one of
   them. Concurrent deploys that target the same download now serialize instead
   of racing, so both succeed.
+- Fixed: clicking Update when no installable release is available no longer
+  leaves Preferences stuck on "Updating". The update is now declined
+  immediately with a clear message instead of hanging.
+- Fixed: dismissing the admin prompt when uninstalling no longer shows a false
+  "uninstall failed" error, and no longer deregisters the device — cancelling is
+  now a clean no-op that leaves everything installed.
+- Fixed: the menu-bar app could vanish (and silently relaunch) when its menu
+  updated — e.g. starting/stopping a model, or a large model finishing its
+  download. The tray now updates safely on macOS.
+- Fixed: Preferences no longer flashes "Stopped" for a moment when reopened; it
+  shows the last-known state until the next status check.
 
 ### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
 
@@ -28,6 +39,49 @@ sections below the summary. -->
 - A per-`model_name` download lock now serializes same-file deploys; the waiter
   then hits the existing `target_path.exists()` cache guard and skips the
   re-download. Distinct filenames are unaffected.
+
+### Fixed: tray menu/icon updates now run on the main thread (`crates/link/src-tauri/src/tray.rs`)
+
+- The tray poll loop runs on a background thread but mutated the macOS status
+  item directly (`set_icon`/`set_menu`/`set_tooltip`) and built `muda` menu
+  objects off-main. AppKit is main-thread-only, so this raced: `muda`
+  occasionally read a half-initialised icon (width 0) and panicked in its
+  unguarded `to_png().write_header().unwrap()`, killing the tray (launchd then
+  relaunched it). A menu rebuild is forced by any serving-state change or a
+  progress-row tick, so a long model download made it near-certain to hit.
+- The loop now computes state off-main, then applies the icon/tooltip/menu in a
+  single `run_on_main_thread` hop. No behaviour change beyond thread-safety.
+
+### Fixed: Preferences seeds the last-known status on reopen (`crates/link/src/App.svelte`)
+
+- `load()` runs on every window show and overwrote the live status with
+  `get_prefs_state`'s cold-start probe (often Down), flashing "Stopped" for one
+  tick. It now carries the last-polled status/uptime/version/network over until
+  the next poll (≤ `POLL_INTERVAL_MS`) reconfirms.
+
+### Fixed: a declined OTA no longer wedges the UI on "Updating" (`src/link/infra/health_server.py`, `src/link/app/runtime.py`)
+
+- When the runtime declined an update (frozen install, no published per-platform
+  asset), it did so only after the `/update` POST had already returned `202`, and
+  it stayed up — so the companion saw neither the `Up→Down→Up` health transition
+  nor an `update_restart_epoch` bump, and the "updating…" lock never cleared.
+- The `/update` endpoint now runs the same pre-flight synchronously and returns
+  `409` when there is no installable asset, so the trigger fails fast and the UI
+  releases the lock (as it already does on any trigger-POST failure). The
+  pre-flight is shared with the `UPDATE_AGENT` handler so accept/decline is
+  decided one way.
+
+### Fixed: cancelling an uninstall is a clean no-op (`crates/link/src-tauri/src/setup.rs`, `App.svelte`, `SetupApp.svelte`)
+
+- The macOS uninstaller deregistered the device before showing the admin
+  prompt, then reported the dismissed dialog (`User canceled`, error `-128`) as
+  `uninstall.sh failed: …`. Cancelling therefore both left a false error in
+  Preferences and deregistered a still-installed device.
+- Admin auth is now acquired up-front with a no-op command; a dismissed dialog
+  returns a `cancelled` sentinel before any deregister or removal, and the
+  frontends treat it as a benign no-op (no error, wizard returns to the splash).
+  The credential macOS caches for the session is reused for the uninstaller run,
+  so there is no second prompt.
 
 ### Changed: OTA lock clears on an authoritative signal, not a timeout (`crates/link`)
 

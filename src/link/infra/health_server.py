@@ -55,6 +55,7 @@ class HealthState:
         version: str | None,
         models_provider: Callable[[], list[dict[str, Any]]] | None = None,
         command_handler: Callable[[dict[str, Any]], None] | None = None,
+        update_preflight: Callable[[], bool] | None = None,
     ) -> None:
         self.version = version or "unknown"
         self._boot_time = time.monotonic()
@@ -63,6 +64,7 @@ class HealthState:
 
         self._models_provider = models_provider
         self._command_handler = command_handler
+        self._update_preflight = update_preflight
 
         self.transport_type: str | None = None
         self.transport_endpoint: str | None = None
@@ -141,6 +143,22 @@ class HealthState:
         """
         assert self._command_handler is not None, "dispatch called without a wired handler"
         self._command_handler(command)
+
+    def can_update(self) -> bool:
+        """Whether an OTA can actually proceed right now.
+
+        Lets the `/update` endpoint decline synchronously (409) when there is no
+        installable asset, so a companion-initiated update clears its "updating"
+        lock instead of hanging: the runtime would otherwise accept the POST
+        (202), then decline the command with no signal the UI can observe. True
+        when no preflight is wired (can't tell → allow) or the preflight raises
+        (never block an update on a flaky check; the handler declines safely)."""
+        if self._update_preflight is None:
+            return True
+        try:
+            return self._update_preflight()
+        except Exception:
+            return True
 
     def set_serving(self, model_id: str | None) -> None:
         """Mark the agent as serving ``model_id``, or idle when ``None``."""
@@ -261,6 +279,12 @@ def _make_handler(state: HealthState) -> type[BaseHTTPRequestHandler]:
                 # download → verify → flip → re-exec + rollback path.
                 if not state.has_command_handler():
                     self.send_error(503, "Command handler not wired")
+                    return
+                if not state.can_update():
+                    # Decline synchronously so the companion clears its "updating"
+                    # lock. Accepting (202) then declining the command leaves the
+                    # runtime up with no down/respawn signal, wedging the UI.
+                    self.send_error(409, "No installable update asset available yet")
                     return
                 try:
                     state.dispatch({"id": f"loopback-{uuid.uuid4().hex[:8]}", "type": "UPDATE_AGENT"})
