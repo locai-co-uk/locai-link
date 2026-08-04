@@ -11,7 +11,7 @@ on:
     paths:
       - "bundling/**"
       - "!bundling/pkg/**"
-      - "crates/launcher/**"
+      - "crates/companion/**"
       - "crates/shared/**"
       - "crates/Cargo.toml"
       - "plugins/*/install.py"
@@ -53,12 +53,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Rust toolchain (for launcher)
+      - name: Install Rust toolchain (for supervisor)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test launcher
+      - name: Test supervisor (headless)
         shell: bash
-        run: cargo test --manifest-path crates/launcher/Cargo.toml --release
+        run: cargo test --manifest-path crates/companion/src-tauri/Cargo.toml --release --no-default-features
 
       - name: Sync project + dev deps
         shell: bash
@@ -107,12 +107,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install Rust toolchain (for launcher)
+      - name: Install Rust toolchain (for supervisor)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test launcher
+      - name: Test supervisor (headless)
         shell: bash
-        run: cargo test --manifest-path crates/launcher/Cargo.toml --release
+        run: cargo test --manifest-path crates/companion/src-tauri/Cargo.toml --release --no-default-features
 
       - name: Sync project + dev deps
         shell: bash

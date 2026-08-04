@@ -17,8 +17,7 @@
 #
 # Output layout (inside the tarball):
 #     locai-link-<code>-linux-x86_64-<version>/
-#     ├── bundle/                       (contents of dist/locai-link/)
-#     ├── companion                     (Tauri release binary: tray + setup)
+#     ├── bundle/                       (dist/locai-link/ + the locai-link binary)
 #     ├── boot.json
 #     ├── systemd/*.service
 #     ├── applications/*.desktop
@@ -70,10 +69,9 @@ TAURI_DIR="$REPO_ROOT/crates/target/release"
 BOOT_JSON="$REPO_ROOT/bundling/pkg/boot.json"
 MANIFEST="$BUNDLE_DIR/current/manifest.json"
 
-[[ -f "$BUNDLE_DIR/locai-link" ]]          || err "runtime bundle not at $BUNDLE_DIR — run \`uv run python bundling/build.py --plugins …\` first."
-[[ -f "$MANIFEST" ]]                       || err "manifest.json not at $MANIFEST — did build.py finish?"
-[[ -f "$TAURI_DIR/locai-link-companion" ]] || err "companion binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/companion."
-[[ -f "$BOOT_JSON" ]]                      || err "boot.json not at $BOOT_JSON."
+[[ -f "$MANIFEST" ]]             || err "manifest.json not at $MANIFEST — run \`uv run python bundling/build.py --plugins …\` first."
+[[ -f "$TAURI_DIR/locai-link" ]] || err "locai-link binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/companion."
+[[ -f "$BOOT_JSON" ]]            || err "boot.json not at $BOOT_JSON."
 
 # --- Derive the asset name from manifest.json ------------------------
 # manifest.json is the single source of truth for bundle contents (build.py
@@ -108,12 +106,13 @@ trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/$NAME"
 mkdir -p "$ROOT"
 
-# 1. Runtime bundle (launcher + versions/ + current + manifest etc.)
+# 1. Runtime bundle (versions/ + current + manifest) from build.py.
 mkdir -p "$ROOT/bundle"
 cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
 
-# 2. Tauri release binary (tray + first-run setup).
-install -m 0755 "$TAURI_DIR/locai-link-companion" "$ROOT/companion"
+# 2. The single `locai-link` binary (supervisor + tray) lives at the install
+# root; stage it inside bundle/ so install.sh's `cp -a bundle/.` lays it down.
+install -m 0755 "$TAURI_DIR/locai-link" "$ROOT/bundle/locai-link"
 
 # 2b. App content hashes for whole-app OTA — written to the tarball's
 # manifest so swap_bundle re-swaps a UI app only when its source changed.

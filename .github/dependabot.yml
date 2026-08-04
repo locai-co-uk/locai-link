@@ -37,7 +37,7 @@ updates:
       - "dependencies"
       - "ci"
 
-  # ── Rust (Tauri apps + shared crate + launcher) ─────────────
+  # ── Rust (locai-link binary + shared crate) ─────────────────
   - package-ecosystem: "cargo"
     directory: "/crates"
     schedule:

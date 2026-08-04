@@ -152,13 +152,13 @@ jobs:
           STAGING="$RUNNER_TEMP/pkg-staging"
           rm -rf "$STAGING"
           mkdir -p "$STAGING/versions/1.0.0" "$STAGING/LaunchAgents"
-          printf '#!/bin/sh\nexit 0\n' > "$STAGING/locai-link"
-          chmod 755 "$STAGING/locai-link"
           printf '#!/bin/sh\nexit 0\n' > "$STAGING/versions/1.0.0/locai-link-runtime"
           chmod 755 "$STAGING/versions/1.0.0/locai-link-runtime"
           uv run python bundling/_ota_lifecycle.py manifest "$STAGING/versions/1.0.0/manifest.json" 1.0.0 c-v1
           ln -s versions/1.0.0 "$STAGING/current"
-          uv run python bundling/_ota_lifecycle.py app "$STAGING/Locai Link.app" 1.0.0 "Locai Link" companion-v1
+          # The merged binary lives inside the .app (Contents/MacOS/locai-link);
+          # there is no standalone launcher in the payload.
+          uv run python bundling/_ota_lifecycle.py app "$STAGING/Locai Link.app" 1.0.0 locai-link companion-v1
           echo '{"channel":"prod"}' > "$STAGING/boot.json"
           cp bundling/pkg/uninstall.sh "$STAGING/uninstall.sh"
           chmod 755 "$STAGING/uninstall.sh"
@@ -185,7 +185,7 @@ jobs:
           set -euo pipefail
           me="$USER"
           owner() { stat -f '%Su' "$1"; }
-          [ -f /Library/Locai/locai-link ] || { echo "::error::launcher missing"; exit 1; }
+          [ -f "/Library/Locai/Locai Link.app/Contents/MacOS/locai-link" ] || { echo "::error::merged binary missing from .app"; exit 1; }
           [ "$(owner /Library/Locai)" = "$me" ] || { echo "::error::install root not user-owned"; exit 1; }
           app="/Library/Locai/Locai Link.app"
           [ "$(owner "$app")" = "$me" ] || { echo "::error::companion not user-owned — OTA can't swap it"; exit 1; }
@@ -212,7 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           STAGING="$RUNNER_TEMP/pkg-staging"
-          uv run python bundling/_ota_lifecycle.py app "$STAGING/Locai Link.app" 1.1.0 "Locai Link" companion-v2
+          uv run python bundling/_ota_lifecycle.py app "$STAGING/Locai Link.app" 1.1.0 locai-link companion-v2
           sudo cp -R "$STAGING/." /Library/Locai/
           sudo SUDO_USER="$USER" bash bundling/pkg/scripts/postinstall / / / /
 
@@ -243,19 +243,20 @@ jobs:
         run: |
           set -euo pipefail
           sudo mkdir -p /Library/Locai
-          sudo touch /Library/Locai/locai-link
-          sudo chmod 755 /Library/Locai/locai-link
+          # The merged binary lives inside the .app (no standalone launcher).
+          sudo mkdir -p "/Library/Locai/Locai Link.app/Contents/MacOS"
+          sudo touch "/Library/Locai/Locai Link.app/Contents/MacOS/locai-link"
+          sudo chmod 755 "/Library/Locai/Locai Link.app/Contents/MacOS/locai-link"
           echo '{"channel":"prod"}' | sudo tee /Library/Locai/boot.json >/dev/null
           sudo cp bundling/pkg/uninstall.sh /Library/Locai/uninstall.sh
           sudo chmod 755 /Library/Locai/uninstall.sh
           sudo mkdir -p "/Library/Locai/Setup Assistant.app/Contents"
-          sudo mkdir -p "/Library/Locai/Locai Link.app/Contents"
           sudo mkdir -p "/Library/Locai/LaunchAgents"
           sudo mkdir -p "/Library/Locai/logs" "/Library/Locai/state" "/Library/Locai/versions"
           sudo mkdir -p "/Applications/Locai Link.app/Contents"
           sudo mkdir -p "/Applications/Locai Setup Assistant.app/Contents"
           sudo mkdir -p /usr/local/bin
-          sudo ln -sf /Library/Locai/locai-link /usr/local/bin/locai
+          sudo ln -sf "/Library/Locai/Locai Link.app/Contents/MacOS/locai-link" /usr/local/bin/locai
           mkdir -p "$HOME/Library/LaunchAgents"
           touch "$HOME/Library/LaunchAgents/uk.co.locai.link.agent.plist"
           touch "$HOME/Library/LaunchAgents/uk.co.locai.link.companion.plist"
@@ -341,13 +342,7 @@ jobs:
           cat > "$STAGE/bundle/manifest.json" <<'EOF'
           {"version":"0.0.0-smoke","asset_name":"smoke","plugins":[]}
           EOF
-          cat > "$STAGE/companion" <<'EOF'
-          #!/bin/bash
-          exit 0
-          EOF
-          chmod 755 "$STAGE/companion"
           echo '{"channel":"prod"}' > "$STAGE/boot.json"
-          cp bundling/linux/systemd/locai-link-agent.service     "$STAGE/systemd/"
           cp bundling/linux/systemd/locai-link-companion.service "$STAGE/systemd/"
           cp bundling/linux/applications/locai-link.desktop "$STAGE/applications/"
           python3 - <<'PY' "$STAGE/icons"
@@ -394,10 +389,8 @@ jobs:
             fi
           }
           check_present "$LOCAI_INSTALL_ROOT/locai-link"
-          check_present "$LOCAI_INSTALL_ROOT/companion"
           check_present "$LOCAI_INSTALL_ROOT/boot.json"
           check_present "$LOCAI_INSTALL_ROOT/uninstall.sh"
-          check_present "$LOCAI_INSTALL_ROOT/systemd/locai-link-agent.service"
           check_present "$LOCAI_INSTALL_ROOT/systemd/locai-link-companion.service"
           check_present "$HOME/.local/share/applications/locai-link.desktop"
           check_present "$HOME/.local/share/icons/hicolor/32x32/apps/locai-link.png"

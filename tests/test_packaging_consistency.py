@@ -39,11 +39,12 @@ def _load_plist(name: str) -> dict[str, Any]:
     return plistlib.loads((LAUNCH_AGENTS / name).read_bytes())
 
 
-def _cargo_package_name(crate: str) -> str:
-    """The Tauri app binary is named after the crate's cargo package (not the
-    productName), so this is the source of truth for what the plist must launch."""
+def _cargo_bin_name(crate: str) -> str:
+    """The launched binary is the crate's `[[bin]]` name (the merged app declares
+    `locai-link` explicitly), so this is the source of truth for what the plist
+    must launch."""
     cargo = REPO_ROOT / "crates" / crate / "src-tauri" / "Cargo.toml"
-    return tomllib.loads(cargo.read_text())["package"]["name"]
+    return tomllib.loads(cargo.read_text())["bin"][0]["name"]
 
 
 def test_companion_launchagent_matches_updater_destination(monkeypatch):
@@ -52,19 +53,13 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
     dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)  # pyright: ignore[reportArgumentType]
     assert dests == [MACOS_INSTALL_ROOT / "Locai Link.app"]
 
-    # The binary name comes from the cargo package, not productName. Derive it
-    # from Cargo.toml so a crate rename fails here instead of silently shipping a
-    # plist that points at a binary the build no longer produces.
-    binary = _cargo_package_name("companion")
+    # The binary name is the crate's [[bin]] name. Derive it from Cargo.toml so a
+    # rename fails here instead of silently shipping a plist that points at a
+    # binary the build no longer produces.
+    binary = _cargo_bin_name("companion")
+    assert binary == "locai-link"
     prog = _load_plist("uk.co.locai.link.companion.plist")["ProgramArguments"]
     assert prog[0] == str(dests[0] / "Contents" / "MacOS" / binary)
-
-
-def test_agent_launchagent_points_at_launcher():
-    """The runtime LaunchAgent runs the launcher, which follows `current`."""
-    plist = _load_plist("uk.co.locai.link.agent.plist")
-    assert plist["ProgramArguments"][0] == str(MACOS_INSTALL_ROOT / "locai-link")
-    assert plist["WorkingDirectory"] == str(MACOS_INSTALL_ROOT)
 
 
 def test_launchagent_plists_are_well_formed():

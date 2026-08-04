@@ -12,6 +12,10 @@ sections below the summary. -->
   window of Locai Link instead of a separate Setup Assistant, so there is a
   single app, one bundle to install, and one thing to update. Upgrades and
   uninstalls automatically remove the old Setup Assistant.
+- The launcher and the desktop app are now one `locai-link` binary managed by a
+  single background service. Headless installs run the supervisor alone; desktop
+  installs add the tray and setup in the same process. Fewer moving parts to
+  install, supervise, and update; upgrades migrate away the old second service.
 
 ### Changed: merge the Setup Assistant into the companion (`crates/companion`, `bundling/`, `src/link/app/updater.py`)
 
@@ -26,7 +30,20 @@ sections below the summary. -->
   remove any pre-merge Setup Assistant left on disk (search `LEGACY-SA-CLEANUP`;
   remove once no pre-merge install remains).
 
-## [1.2.2]
+### Changed: fold the launcher into one feature-flagged binary (`crates/companion`, `bundling/`, `.github/workflows/`)
+
+- The standalone launcher crate is gone; its supervisor loop moved into the
+  companion crate behind a `ui` cargo feature. `--no-default-features` builds the
+  headless supervisor; the default build adds the tray, setup, and preferences
+  and drives the supervisor on a background thread.
+- One background service per OS instead of two: the runtime and the tray share a
+  single unit (`locai-link-companion.service` on Linux,
+  `uk.co.locai.link.companion` on macOS). Install and OTA disable and remove the
+  old second unit.
+- macOS ships the single binary inside the `.app`; the `locai` CLI symlink and a
+  terminal `locai run` dispatch to the headless supervisor from the same binary.
+- Packaging and CI build both variants: the desktop app end-to-end and the
+  headless supervisor via `--no-default-features`.
 
 - The companion now shows an "Updating…" state during an app update: the
   runtime and model controls are locked while the update applies and the app

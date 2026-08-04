@@ -21,7 +21,7 @@ above based on ``sys.frozen`` (dispatch wiring not yet in this commit).
 Bundled-install layout this module operates on::
 
     <install_root>/
-    ├── locai-link               (launcher; not our concern — see launcher/)
+    ├── locai-link               (supervisor binary; not our concern here)
     ├── versions/<v>/locai-link-runtime
     ├── current -> versions/<v>  (symlink OR a ``CURRENT`` text file)
     ├── previous -> versions/<v> (same shape as current)
@@ -289,8 +289,8 @@ STAGING_DIR = "staging"
 CURRENT_LINK = "current"
 PREVIOUS_LINK = "previous"
 # Windows-without-Developer-Mode fallback for the symlink. The build process
-# writes one or the other depending on what the OS allows; the Rust launcher
-# (under ``launcher/``) accepts either shape.
+# writes one or the other depending on what the OS allows; the Rust supervisor
+# (in ``crates/companion``) accepts either shape.
 CURRENT_POINTER_FILE = "CURRENT"
 PREVIOUS_POINTER_FILE = "PREVIOUS"
 MANIFEST_NAME = "manifest.json"
@@ -382,10 +382,11 @@ class BootConfig:
     """Mirror of ``boot.json`` written by host installers for the fetch-on-first-launch path.
 
     Carried here for completeness; the actual bootstrap consumption (used when
-    a host installer ships only the launcher + boot.json and the bundle is
-    downloaded on first launch) lives in the Rust launcher under
-    ``crates/launcher/``. Field shape (name, optional/required) must match
-    the Rust ``BootConfig`` in ``crates/launcher/src/boot.rs`` and its
+    a host installer ships only the supervisor binary + boot.json and the
+    bundle is downloaded on first launch) lives in the Rust supervisor under
+    ``crates/companion/src-tauri/src/supervisor/``. Field shape (name,
+    optional/required) must match the Rust ``BootConfig`` in
+    ``crates/companion/src-tauri/src/supervisor/boot.rs`` and its
     mirror in ``crates/shared/src/lib.rs`` — kept in lockstep because a
     host installer that writes fields the Python side drops is a schema
     drift bug.
@@ -1420,7 +1421,7 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
 
     uid = _macos_console_uid() or _current_uid()
     plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
-    correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link-companion")
+    correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link")
     try:
         if not plist.exists():
             return False  # fresh installs get the plist from the Setup Assistant
@@ -1436,7 +1437,7 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
         logger.info(f"self-heal: repaired companion LaunchAgent program path -> {correct}")
         # A companion started via `open -a` isn't launchd-managed, so bootout won't
         # stop it; kill it so the relaunch below doesn't leave two trays.
-        subprocess.run(["pkill", "-f", "locai-link-companion"], check=False, timeout=10)
+        subprocess.run(["pkill", "-f", "Locai Link.app/Contents/MacOS/locai-link"], check=False, timeout=10)
         _restart_companion_macos(force_reload=True)
         return True
     except Exception as e:  # noqa: BLE001 - self-heal must never crash the agent

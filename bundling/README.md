@@ -89,9 +89,10 @@ dist/locai-link/                       ← the install_root (this is what gets t
         └── configs/…
 ```
 
-The launcher source lives in `../launcher/` and is compiled with
-`cargo build --release` before the PyInstaller step. Both binaries end up
-inside the same `dist/locai-link/` install_root.
+The `locai-link` binary (supervisor + tray) is built separately with
+`cargo tauri build --no-bundle` (source under `../crates/companion/`) and staged
+alongside this PyInstaller runtime tree by the packers (`linux/pack.sh`,
+`release.yml`).
 
 Tarballing the whole `dist/locai-link/` directory and extracting it onto a
 target machine gives a valid Pattern-A first install — `current` already

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-# Cargo workspace root. Members are the launcher (existing), the shared
-# helper crate (agent-status polling, boot.json reading, version lookup),
-# and the two Tauri apps that drive the installer UX.
+# Cargo workspace root. Members are the shared helper crate (agent-status
+# polling, boot.json reading, version lookup) and the single locai-link binary
+# (supervisor + optional ui).
 
 [workspace]
 resolver = "2"
@@ -28,7 +28,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
 
-# Release profile applies to the whole workspace. The launcher targets a
+# Release profile applies to the whole workspace. The headless build targets a
 # small static binary; tuning here keeps the Tauri builds small too.
 [profile.release]
 opt-level = "z"

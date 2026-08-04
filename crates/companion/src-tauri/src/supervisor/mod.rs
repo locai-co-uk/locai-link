@@ -457,16 +457,35 @@ fn make_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
 }
 
-/// Locate the install_root: the directory containing this launcher binary.
+/// Locate the install_root from this binary's location.
+///
+/// Flat layouts (Linux/Windows, dev builds) sit at `<root>/locai-link`, so the
+/// root is the binary's parent. On macOS the binary ships inside the app bundle
+/// at `<root>/Locai Link.app/Contents/MacOS/locai-link`, so the root is three
+/// levels up from the `MacOS` dir. Deriving from the running exe (not a
+/// hardcoded path) keeps custom `LOCAI_INSTALL_ROOT` installs working.
 fn find_install_root() -> Result<PathBuf, String> {
     let exe = env::current_exe().map_err(|e| format!("could not determine launcher path: {e}"))?;
-    // Resolve symlinks so a `locai-link` symlink on PATH still finds the
-    // real install_root.
+    // Resolve symlinks so a `locai-link` symlink on PATH (or the macOS
+    // `/usr/local/bin/locai` symlink) still finds the real install_root.
     let resolved = fs::canonicalize(&exe).unwrap_or(exe);
-    resolved
+    let dir = resolved
         .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| format!("launcher has no parent dir: {}", resolved.display()))
+        .ok_or_else(|| format!("launcher has no parent dir: {}", resolved.display()))?;
+    Ok(root_from_exe_dir(dir))
+}
+
+/// Map the directory containing the binary to the install_root. `Contents/MacOS`
+/// only occurs in the macOS `.app` bundle, so the check is safe everywhere:
+/// flat layouts fall through to `dir`.
+fn root_from_exe_dir(dir: &Path) -> PathBuf {
+    if dir.ends_with("Contents/MacOS") {
+        // dir/../../.. : MacOS -> Contents -> Locai Link.app -> <root>
+        if let Some(root) = dir.ancestors().nth(3) {
+            return root.to_path_buf();
+        }
+    }
+    dir.to_path_buf()
 }
 
 /// Read the `current` pointer. Two shapes:
@@ -487,4 +506,25 @@ fn resolve_current_version(install_root: &Path) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_from_exe_dir;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn root_from_macos_bundle_walks_out_of_the_app() {
+        let dir = Path::new("/Library/Locai/Locai Link.app/Contents/MacOS");
+        assert_eq!(root_from_exe_dir(dir), PathBuf::from("/Library/Locai"));
+    }
+
+    #[test]
+    fn root_from_flat_layout_is_the_parent_dir() {
+        let dir = Path::new("/home/u/.local/share/locai");
+        assert_eq!(
+            root_from_exe_dir(dir),
+            PathBuf::from("/home/u/.local/share/locai")
+        );
+    }
 }

@@ -355,6 +355,13 @@ jobs:
           npm ci
           npm run tauri build -- --no-bundle
 
+      # The same binary also builds headless (supervisor loop only, no tray).
+      # Cheap check on the main gate so a headless-only break fails PR CI, not
+      # just the path-gated bundle workflow.
+      - name: Check headless supervisor build
+        working-directory: crates
+        run: cargo check -p locai-link-companion --no-default-features
+
   # 4a. Integration Tests (Plugins — downloads models and binaries) — Linux gate.
   # `needs: unit-test-linux` so we don't download models on any OS until the
   # fast unit tests pass. The macOS/Windows integration legs below then wait on

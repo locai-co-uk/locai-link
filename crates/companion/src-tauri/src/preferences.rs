@@ -31,9 +31,7 @@ fn runtime_log_file() -> String {
 
 const CONTROL_BASE_URL: &str = locai_link_shared::CONTROL_URL;
 
-/// LaunchAgent labels; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/`).
-#[cfg(target_os = "macos")]
-const AGENT_LABEL: &str = locai_link_shared::AGENT_APP_ID;
+/// LaunchAgent label; value single-sourced in shared (must match `bundling/pkg/LaunchAgents/`).
 #[cfg(target_os = "macos")]
 const COMPANION_LABEL: &str = locai_link_shared::COMPANION_APP_ID;
 
@@ -273,24 +271,18 @@ pub async fn request_model_deploy(
 #[tauri::command]
 #[cfg(target_os = "macos")]
 pub fn set_run_at_login(enabled: bool) -> Result<(), String> {
-    let plist = user_launchagent_plist(AGENT_LABEL)?;
-    let companion_plist = user_launchagent_plist(COMPANION_LABEL)?;
-    // Runtime + companion move in lockstep.
-    plistbuddy_set_run_at_load(&plist, enabled)?;
-    plistbuddy_set_run_at_load(&companion_plist, enabled)?;
-    Ok(())
+    // One unit now: RunAtLoad on the single LaunchAgent plist.
+    let plist = user_launchagent_plist(COMPANION_LABEL)?;
+    plistbuddy_set_run_at_load(&plist, enabled)
 }
 
 #[tauri::command]
 #[cfg(target_os = "linux")]
 pub fn set_run_at_login(enabled: bool) -> Result<(), String> {
-    // enable/disable governs next-login behaviour only; the running
-    // instance is untouched — matches user expectations for this toggle.
-    for unit in ["locai-link-agent.service", "locai-link-companion.service"] {
-        let verb = if enabled { "enable" } else { "disable" };
-        systemctl(&["--user", verb, unit])?;
-    }
-    Ok(())
+    // enable/disable governs next-login behaviour only; the running instance is
+    // untouched. One unit now.
+    let verb = if enabled { "enable" } else { "disable" };
+    systemctl(&["--user", verb, "locai-link-companion.service"])
 }
 
 #[tauri::command]
@@ -458,7 +450,7 @@ fn resolve_current_version() -> Option<String> {
 /// parse/IO error — missing plist means "no auto-start".
 #[cfg(target_os = "macos")]
 fn read_run_at_login() -> bool {
-    let Ok(plist) = user_launchagent_plist(AGENT_LABEL) else {
+    let Ok(plist) = user_launchagent_plist(COMPANION_LABEL) else {
         return false;
     };
     let Ok(output) = std::process::Command::new("/usr/libexec/PlistBuddy")
@@ -478,7 +470,7 @@ fn read_run_at_login() -> bool {
 #[cfg(target_os = "linux")]
 fn read_run_at_login() -> bool {
     let Ok(output) = std::process::Command::new("systemctl")
-        .args(["--user", "is-enabled", "locai-link-agent.service"])
+        .args(["--user", "is-enabled", "locai-link-companion.service"])
         .output()
     else {
         return false;

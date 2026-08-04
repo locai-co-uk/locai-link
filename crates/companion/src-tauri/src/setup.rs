@@ -908,113 +908,97 @@ pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<
     std::fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
 
-    // Must match bundling/pkg/LaunchAgents/.
-    let agents: [(&str, &str); 2] = [
-        ("uk.co.locai.link.agent.plist", AGENT_LABEL),
-        ("uk.co.locai.link.companion.plist", COMPANION_LABEL),
-    ];
-
     // A signed .pkg shouldn't attach com.apple.quarantine, but some macOS
     // versions / MDM paths do — and launchctl-driven launches sit silently
     // blocked when it's present. `xattr -dr` is a no-op when the attr is absent.
-    let companion_app_paths = [
+    for path in [
         "/Applications/Locai Link.app",
         "/Library/Locai/Locai Link.app",
-    ];
-    for path in companion_app_paths {
+    ] {
         let _ = std::process::Command::new("xattr")
             .args(["-dr", "com.apple.quarantine", path])
             .output();
     }
 
-    // Collect per-service kickstart failures so the caller sees a real Err
-    // rather than a silent-success + missing tray icon.
-    let mut kickstart_failures: Vec<String> = Vec::new();
+    let uid = crate::preferences::current_uid()?;
 
-    for (plist_name, label) in agents {
-        let src = source_dir.join(plist_name);
-        let dst = dest_dir.join(plist_name);
-        std::fs::copy(&src, &dst)
-            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    // LEGACY-SA-CLEANUP: pre-merge shipped a separate agent LaunchAgent that ran
+    // the runtime; the merged binary supervises it in-process now. Boot out +
+    // remove the old agent unit on upgrade.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &format!("gui/{uid}/{AGENT_LABEL}")])
+        .output();
+    let _ = std::fs::remove_file(dest_dir.join("uk.co.locai.link.agent.plist"));
 
-        // macOS 12+ rejects plists that aren't 0644 with "Bootstrap failed: 5".
-        // fs::copy carries source mode through — force canonical.
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&dst)
-                .map_err(|e| format!("stat {}: {e}", dst.display()))?
-                .permissions();
-            perms.set_mode(0o644);
-            std::fs::set_permissions(&dst, perms)
-                .map_err(|e| format!("chmod 644 {}: {e}", dst.display()))?;
-        }
+    // The single unit: the companion plist runs the merged `locai-link` binary,
+    // which supervises the runtime child + shows the tray.
+    let plist_name = "uk.co.locai.link.companion.plist";
+    let src = source_dir.join(plist_name);
+    let dst = dest_dir.join(plist_name);
+    std::fs::copy(&src, &dst)
+        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
 
-        // Source plists ship with RunAtLoad=true; only touch when opted out.
-        if !run_at_login {
-            let status = std::process::Command::new("/usr/libexec/PlistBuddy")
-                .args(["-c", "Set :RunAtLoad false", dst.to_str().unwrap_or("")])
-                .status()
-                .map_err(|e| format!("PlistBuddy: {e}"))?;
-            if !status.success() {
-                return Err(format!(
-                    "PlistBuddy failed to set RunAtLoad=false on {}",
-                    dst.display()
-                ));
-            }
-        }
+    // macOS 12+ rejects plists that aren't 0644 with "Bootstrap failed: 5".
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dst)
+            .map_err(|e| format!("stat {}: {e}", dst.display()))?
+            .permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&dst, perms)
+            .map_err(|e| format!("chmod 644 {}: {e}", dst.display()))?;
+    }
 
-        let uid = crate::preferences::current_uid()?;
-        let domain = format!("gui/{uid}");
-        let service = format!("{domain}/{label}");
-
-        // bootout-then-bootstrap so a re-install actually picks up the fresh
-        // plist — bootstrap alone fails with "service already loaded" and
-        // leaves the old ProgramArguments / RunAtLoad in effect.
-        let _ = std::process::Command::new("launchctl")
-            .args(["bootout", &service])
-            .output();
-
-        let bootstrap_out = std::process::Command::new("launchctl")
-            .args(["bootstrap", &domain, dst.to_str().unwrap_or("")])
-            .output()
-            .map_err(|e| format!("launchctl bootstrap: {e}"))?;
-        if !bootstrap_out.status.success() {
-            // Log but keep going — kickstart may still succeed on a raced bootstrap.
-            eprintln!(
-                "[install_launchagents] bootstrap {service} failed ({:?}): {} {}",
-                bootstrap_out.status.code(),
-                String::from_utf8_lossy(&bootstrap_out.stdout).trim(),
-                String::from_utf8_lossy(&bootstrap_out.stderr).trim(),
-            );
-        }
-
-        // -k restarts if running, starts fresh otherwise. Kickstart is the
-        // load-bearing step — if this fails the service is definitely not
-        // running, so record it and surface at the end.
-        let kickstart_out = std::process::Command::new("launchctl")
-            .args(["kickstart", "-k", &service])
-            .output()
-            .map_err(|e| format!("launchctl kickstart: {e}"))?;
-        if !kickstart_out.status.success() {
-            let msg = format!(
-                "kickstart {service} exited {:?}: {} {}",
-                kickstart_out.status.code(),
-                String::from_utf8_lossy(&kickstart_out.stdout).trim(),
-                String::from_utf8_lossy(&kickstart_out.stderr).trim(),
-            );
-            eprintln!("[install_launchagents] {msg}");
-            kickstart_failures.push(msg);
+    // Source plist ships with RunAtLoad=true; only touch when opted out.
+    if !run_at_login {
+        let status = std::process::Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Set :RunAtLoad false", dst.to_str().unwrap_or("")])
+            .status()
+            .map_err(|e| format!("PlistBuddy: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "PlistBuddy failed to set RunAtLoad=false on {}",
+                dst.display()
+            ));
         }
     }
 
-    // Fallback ONLY when kickstart didn't bring the service up. An unconditional
-    // `open -a` starts a SECOND instance: it opens the /Applications copy while
-    // launchd already runs the /Library/Locai copy (same bundle id, different
-    // path), so LaunchServices spawns another tray. Gate it on kickstart failure.
-    if !kickstart_failures.is_empty() {
+    let domain = format!("gui/{uid}");
+    let service = format!("{domain}/{COMPANION_LABEL}");
+
+    // bootout-then-bootstrap so a re-install picks up the fresh plist.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &service])
+        .output();
+
+    let bootstrap_out = std::process::Command::new("launchctl")
+        .args(["bootstrap", &domain, dst.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| format!("launchctl bootstrap: {e}"))?;
+    if !bootstrap_out.status.success() {
+        eprintln!(
+            "[install_launchagents] bootstrap {service} failed ({:?}): {} {}",
+            bootstrap_out.status.code(),
+            String::from_utf8_lossy(&bootstrap_out.stdout).trim(),
+            String::from_utf8_lossy(&bootstrap_out.stderr).trim(),
+        );
+    }
+
+    // -k restarts if running, starts fresh otherwise. Load-bearing step.
+    let kickstart_out = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &service])
+        .output()
+        .map_err(|e| format!("launchctl kickstart: {e}"))?;
+    if !kickstart_out.status.success() {
+        eprintln!(
+            "[install_launchagents] kickstart {service} exited {:?}: {} {}",
+            kickstart_out.status.code(),
+            String::from_utf8_lossy(&kickstart_out.stdout).trim(),
+            String::from_utf8_lossy(&kickstart_out.stderr).trim(),
+        );
+        // Fallback ONLY on kickstart failure (an unconditional `open -a` would
+        // spawn a second tray from the /Applications copy).
         for path in [
-            // Prefer the OTA-updated install-root copy over the pkg-managed
-            // /Applications copy, matching updater.py::_restart_companion_macos.
             "/Library/Locai/Locai Link.app",
             "/Applications/Locai Link.app",
         ] {
@@ -1025,7 +1009,10 @@ pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<
                 break;
             }
         }
-        return Err(kickstart_failures.join("\n"));
+        return Err(format!(
+            "kickstart {service} exited {:?}",
+            kickstart_out.status.code()
+        ));
     }
     Ok(())
 }
@@ -1053,13 +1040,22 @@ pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<
     std::fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("create {}: {e}", dest_dir.display()))?;
 
-    let units: [&str; 2] = ["locai-link-agent.service", "locai-link-companion.service"];
+    // LEGACY-SA-CLEANUP: pre-merge shipped a separate agent unit that ran the
+    // runtime; the merged binary supervises it in-process now. Stop + remove it
+    // on upgrade.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", "locai-link-agent.service"])
+        .output();
+    let _ = std::fs::remove_file(dest_dir.join("locai-link-agent.service"));
 
-    for unit in units {
-        let src = source_dir.join(unit);
-        let dst = dest_dir.join(unit);
-        std::fs::copy(&src, &dst)
-            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    // The single unit runs the merged `locai-link` binary (supervises the
+    // runtime child + shows the tray).
+    let unit = "locai-link-companion.service";
+    let src = source_dir.join(unit);
+    let dst = dest_dir.join(unit);
+    std::fs::copy(&src, &dst)
+        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    {
         // systemd rejects non-0644 units; fs::copy carries source mode through.
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&dst)
@@ -1081,37 +1077,27 @@ pub fn install_launchagents(install_root: String, run_at_login: bool) -> Result<
         ));
     }
 
-    let mut start_failures: Vec<String> = Vec::new();
+    // disable first so unchecking the toggle on re-run has a clean transition.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "disable", unit])
+        .output();
 
-    for unit in units {
-        // disable first so unchecking the toggle on re-run has a clean transition.
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "disable", unit])
-            .output();
-
-        let args: &[&str] = if run_at_login {
-            &["--user", "enable", "--now", unit]
-        } else {
-            &["--user", "start", unit]
-        };
-        let out = std::process::Command::new("systemctl")
-            .args(args)
-            .output()
-            .map_err(|e| format!("systemctl {args:?}: {e}"))?;
-        if !out.status.success() {
-            let msg = format!(
-                "systemctl {args:?} exited {:?}: {} {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stdout).trim(),
-                String::from_utf8_lossy(&out.stderr).trim(),
-            );
-            eprintln!("[install_launchagents] {msg}");
-            start_failures.push(msg);
-        }
-    }
-
-    if !start_failures.is_empty() {
-        return Err(start_failures.join("\n"));
+    let args: &[&str] = if run_at_login {
+        &["--user", "enable", "--now", unit]
+    } else {
+        &["--user", "start", unit]
+    };
+    let out = std::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .map_err(|e| format!("systemctl {args:?}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl {args:?} exited {:?}: {} {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        ));
     }
 
     Ok(())
@@ -1129,6 +1115,7 @@ pub fn install_launchagents(_install_root: String, _run_at_login: bool) -> Resul
 #[tauri::command]
 pub fn re_register(
     state: State<'_, SignInState>,
+    control: State<'_, crate::supervisor::SupervisorControl>,
     install_root: String,
     old_device_id: String,
 ) -> Result<(), String> {
@@ -1150,30 +1137,13 @@ pub fn re_register(
         }
     }
 
-    // 2. Stop runtime + companion so they release state files before delete.
-    //    `stop` preserves the enable state, so the toggle survives.
-    #[cfg(target_os = "linux")]
-    {
-        for unit in ["locai-link-agent.service", "locai-link-companion.service"] {
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "stop", unit])
-                .output();
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        for label in [AGENT_LABEL, COMPANION_LABEL] {
-            let _ = std::process::Command::new("launchctl")
-                .args([
-                    "bootout",
-                    &format!(
-                        "gui/{}/{label}",
-                        crate::preferences::current_uid().unwrap_or_default()
-                    ),
-                ])
-                .output();
-        }
-    }
+    // 2. Stop the runtime child (via the in-process supervisor) so it releases
+    //    its state files before the wipe. We do NOT stop the app's own unit —
+    //    that would kill this window mid-re-register; the tray/supervisor stay
+    //    up and the re-run wizard restarts the runtime on Finish.
+    control.stop();
+    // Give the supervise loop a beat to actually kill the child before we wipe.
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     // 3. Nuke session files + downloaded models + pipeline state. Keep the
     //    rest so the fresh wizard doesn't re-install what's already on disk.

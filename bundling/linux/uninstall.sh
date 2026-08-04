@@ -33,11 +33,13 @@ fi
 # `disable --now` stops and prevents auto-start in one call. Failures are
 # non-fatal — just ensure nothing's running before we delete the binary.
 systemctl --user disable --now locai-link-companion.service 2>/dev/null || true
+# LEGACY: pre-merge separate agent unit (the merged binary supervises now).
 systemctl --user disable --now locai-link-agent.service     2>/dev/null || true
 
 # Belt-and-braces: kill anything still running under our binary paths.
+pkill -f "$INSTALL_ROOT/locai-link"      2>/dev/null || true
+# LEGACY: pre-merge separate companion binary + standalone setup-assistant.
 pkill -f "$INSTALL_ROOT/companion"       2>/dev/null || true
-# LEGACY-SA-CLEANUP: pre-merge standalone onboarding binary.
 pkill -f "$INSTALL_ROOT/setup-assistant" 2>/dev/null || true
 
 # --- 2. Remove unit files + drop-ins ---------------------------------

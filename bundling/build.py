@@ -44,11 +44,6 @@ from prefetch import PREFETCHERS, _platform_tag
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
-CRATES_DIR = REPO_ROOT / "crates"
-LAUNCHER_DIR = CRATES_DIR / "launcher"
-# Cargo workspace target — `cargo build` from any member crate writes here.
-CARGO_TARGET_DIR = CRATES_DIR / "target"
-LAUNCHER_BINARY_NAME = "locai-link.exe" if sys.platform == "win32" else "locai-link"
 
 # Bundleable plugins — the keys of PLUGIN_CODES, in their canonical order.
 # Anything outside this set is a config error at parse time; bundling a
@@ -120,34 +115,6 @@ def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
     logger.info(f"Running: LOCAI_BUNDLE_PLUGINS={env['LOCAI_BUNDLE_PLUGINS']} {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd=REPO_ROOT, env=env)
     return dist_dir / "locai-link"
-
-
-def build_launcher() -> Path:
-    """Compile the Rust launcher and return the path to the built binary.
-
-    The launcher is the stable public entry point — it lives at
-    ``<install_root>/locai-link`` and exec's whichever runtime version
-    ``current`` points at. See ../OTA-BUNDLE.md §6.5.
-    """
-    if not _have("cargo"):
-        raise SystemExit("cargo is required to build the launcher. Install Rust via https://rustup.rs/")
-    if not LAUNCHER_DIR.is_dir():
-        raise SystemExit(f"Launcher source missing at {LAUNCHER_DIR}")
-    logger.info("Building launcher (cargo build --release)")
-    subprocess.run(["cargo", "build", "--release", "-p", "locai-link-launcher"], cwd=CRATES_DIR, check=True)
-    built = CARGO_TARGET_DIR / "release" / LAUNCHER_BINARY_NAME
-    if not built.is_file():
-        raise SystemExit(f"Launcher build did not produce {built}")
-    return built
-
-
-def install_launcher(install_root: Path, launcher_binary: Path) -> Path:
-    """Copy the launcher binary into the install_root at its public name."""
-    target = install_root / LAUNCHER_BINARY_NAME
-    shutil.copy2(launcher_binary, target)
-    # copy2 preserves perms but make sure it's executable.
-    target.chmod(0o755)
-    return target
 
 
 def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
@@ -237,10 +204,10 @@ def main() -> None:
     logger.info(f"== Plugins: {', '.join(plugins)} ==")
     logger.info(f"== Asset name: {asset_name} ==")
 
-    # Build the launcher first — if cargo/Rust isn't installed, fail fast
-    # before the lengthy PyInstaller step.
-    launcher_binary = build_launcher()
-
+    # build.py now produces only the runtime bundle (versions/ + current +
+    # manifest). The single `locai-link` binary is the Tauri app build (the
+    # supervisor + tray), staged into the install root by bundling (pack.sh /
+    # the pkg staging), so there is no separate launcher to compile here.
     run_prefetch(plugins, tag)
     ensure_plugins_installed(plugins)
     bundle_dir = run_pyinstaller(plugins)
@@ -251,16 +218,12 @@ def main() -> None:
     manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT)
 
     install_root = bundle_dir
-    launcher_path = install_launcher(install_root, launcher_binary)
-    logger.info(f"Launcher installed: {launcher_path}")
     logger.info(f"Manifest written: {manifest_path}")
-    logger.info(f"Install root: {install_root}")
+    logger.info(f"Runtime bundle root: {install_root}")
     logger.info(f"  Versioned bundle: {versioned_dir}")
-    logger.info(f"Test with: {launcher_path} --help")
     logger.info(
-        f"Package the WHOLE install_root as: "
-        f"{asset_name}-{tag}-v{version}.tar.gz (.zip on Windows). "
-        "Extraction gives a valid Pattern-A first install."
+        "Stage the `locai-link` app binary (cargo tauri build) into this root, "
+        f"then package as {asset_name}-{tag}-v{version}.tar.gz (.zip on Windows)."
     )
 
 

@@ -157,7 +157,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Rust toolchain (for launcher)
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Sync deps
@@ -432,13 +432,12 @@ jobs:
           python3 bundling/inject_app_hashes.py \
             --manifest "$STAGING/current/manifest.json" --repo-root .
 
-          # LaunchAgent plists — bundled but NOT bootstrapped at
-          # install time. The app registers them on Finish (always) and
+          # LaunchAgent plist — bundled but NOT bootstrapped at
+          # install time. The app registers it on Finish (always) and
           # toggles RunAtLoad based on the "Start at login" checkbox on the
-          # setup wizard's Permissions step.
+          # setup wizard's Permissions step. One unit: the merged binary
+          # supervises the runtime in-process.
           mkdir -p "$STAGING/LaunchAgents"
-          cp bundling/pkg/LaunchAgents/uk.co.locai.link.agent.plist \
-             "$STAGING/LaunchAgents/uk.co.locai.link.agent.plist"
           cp bundling/pkg/LaunchAgents/uk.co.locai.link.companion.plist \
              "$STAGING/LaunchAgents/uk.co.locai.link.companion.plist"
 

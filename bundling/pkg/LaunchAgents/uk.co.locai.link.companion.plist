@@ -26,7 +26,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Library/Locai/Locai Link.app/Contents/MacOS/locai-link-companion</string>
+        <string>/Library/Locai/Locai Link.app/Contents/MacOS/locai-link</string>
     </array>
 
     <key>RunAtLoad</key>

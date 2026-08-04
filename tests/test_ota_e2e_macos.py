@@ -38,7 +38,7 @@ pytestmark = [
 COMPANION_APP = "Locai Link.app"
 # Tauri names the binary after the cargo package, not the productName; the plist
 # and updater target this (INFRA-374 fix).
-COMPANION_EXEC = "locai-link-companion"
+COMPANION_EXEC = "locai-link"
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ def test_swapped_companion_is_exactly_the_launchd_target(tmp_path):
         (repo_root / "bundling" / "pkg" / "LaunchAgents" / "uk.co.locai.link.companion.plist").read_bytes()
     )
     launched = Path(plist["ProgramArguments"][0])
-    rel = launched.relative_to("/Library/Locai")  # e.g. "Locai Link.app/Contents/MacOS/locai-link-companion"
+    rel = launched.relative_to("/Library/Locai")  # e.g. "Locai Link.app/Contents/MacOS/locai-link"
 
     install_root = tmp_path / "Library" / "Locai"
     install_root.mkdir(parents=True)

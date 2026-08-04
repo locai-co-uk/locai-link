@@ -5,13 +5,15 @@
 # Runs after the .pkg payload has been copied to /Library/Locai.
 #
 # Payload provides:
-#     /Library/Locai/locai-link            (the launcher binary)
 #     /Library/Locai/boot.json             (production channel config)
-#     /Library/Locai/Locai Link.app        (the Tauri app: tray + first-run setup)
+#     /Library/Locai/Locai Link.app        (the app: supervisor + tray + first-run setup)
+#
+# The single `locai-link` binary lives inside the .app
+# (Contents/MacOS/locai-link) — there is no separate launcher.
 #
 # This script:
-#     1. Ensures the launcher is executable and owned correctly.
-#     2. Symlinks /usr/local/bin/locai to the launcher so users can
+#     1. Ensures the .app is present and the state tree is user-owned.
+#     2. Symlinks /usr/local/bin/locai to the .app binary so users can
 #        invoke "locai …" from a terminal without a PATH edit.
 #     3. Removes any legacy Setup Assistant.app (pre-merge installs shipped a
 #        separate onboarding app; onboarding is now a window of the main app).
@@ -31,10 +33,11 @@
 set -euo pipefail
 
 INSTALL_ROOT="/Library/Locai"
-LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
 COMPANION_APP="${INSTALL_ROOT}/Locai Link.app"
 COMPANION_SYMLINK="/Applications/Locai Link.app"
+# The merged binary (supervisor + tray) lives inside the .app.
+MERGED_BIN="${COMPANION_APP}/Contents/MacOS/locai-link"
 UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
 # Legacy onboarding app from pre-merge installs — removed on upgrade.
 LEGACY_SA="${INSTALL_ROOT}/Setup Assistant.app"
@@ -44,20 +47,18 @@ log() {
     echo "[postinstall] $*"
 }
 
-# --- 1. Executable + ownership ---------------------------------------
-if [[ ! -f "$LAUNCHER" ]]; then
-    log "ERROR: launcher not found at $LAUNCHER"
+# --- 1. App present + ownership --------------------------------------
+if [[ ! -d "$COMPANION_APP" ]]; then
+    log "ERROR: app not found at $COMPANION_APP"
     exit 1
 fi
-chmod 755 "$LAUNCHER"
-# Root-owned: the launcher never needs write access. Only the binary is
-# locked down; the rest of INSTALL_ROOT stays writeable so the OTA updater
-# (running as the user via the LaunchAgent) can drop new versions, flip the
-# `current` pointer, and manage state.
-chown root:wheel "$LAUNCHER"
+# The .app binary keeps the perms + signature from the build; nothing to
+# chmod here. The whole .app is chowned to the user in section 4 so the OTA
+# (running as the user via the LaunchAgent) can swap it.
+#
 # Give the invoking user ownership of the install root + the subtrees the
 # runtime + OTA touch. Prefer $SUDO_USER (pkg installs run as root via sudo),
-# else fall back to the console user detected for the SA handoff.
+# else fall back to the console user.
 INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
 # LaunchAgents write to $INSTALL_ROOT/logs/*.log — create it here so the
 # first launchctl kickstart doesn't fail on a fresh install.
@@ -70,14 +71,15 @@ if [[ "$INSTALL_USER" != "root" ]]; then
         chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
     done
 fi
-log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
+log "app installed at $COMPANION_APP (writeable state → $INSTALL_USER)"
 
 # --- 2. /usr/local/bin/locai symlink ---------------------------------
-# /usr/local/bin isn't guaranteed writable everywhere. mkdir -p is safe; ln
-# -sf overwrites an existing symlink from a previous install.
+# Points at the .app binary so `locai …` works from a terminal without a PATH
+# edit. /usr/local/bin isn't guaranteed writable everywhere. mkdir -p is safe;
+# ln -sf overwrites an existing symlink from a previous install.
 mkdir -p "$(dirname "$CLI_SYMLINK")"
-ln -sf "$LAUNCHER" "$CLI_SYMLINK"
-log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
+ln -sf "$MERGED_BIN" "$CLI_SYMLINK"
+log "CLI symlink: $CLI_SYMLINK -> $MERGED_BIN"
 
 # --- 3. Uninstaller script -------------------------------------------
 # pkgbuild doesn't guarantee copied files are executable. Force 755 so both
