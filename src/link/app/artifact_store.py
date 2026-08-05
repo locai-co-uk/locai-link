@@ -1,0 +1,298 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Client for the Link artifact store: engines, tools, and framework sidecars.
+
+The store is a dumb, path-addressed, immutable public CDN. The device computes
+an artifact's URL from its own hardware detection, GETs it over HTTPS, and
+verifies the sha256 recorded in a signed manifest. Models are NOT served here:
+they flow through Control per-device, so this client only ever touches engines
+and tooling, never customer-entitled data.
+
+Layout on the store::
+
+    index/manifest.v1.json                         # the only mutable object
+    {capability}/{name}/{version}/{platform-arch}/{file}
+    engines/llama-cpp/b10289/linux-x64/llama-cpp-b10289-linux-x64.tar.gz
+
+The manifest maps capability -> name -> version -> platform-arch -> a variant
+record ({path, sha256, size}). ``path`` is relative to the store base, so a
+device resolves a full URL from its own detection with no server round-trip
+beyond reading the manifest.
+
+Base URL comes from ``LOCAI_ARTIFACT_BASE`` when set (point it at a local mock
+store for testing), else the production CDN. The bundled/desktop build still
+ships engines inline; this path is for the headless install, which fetches them
+on demand at first use.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import http.client
+import json
+import logging
+import os
+import platform
+import shutil
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Production CDN host, so device URLs never carry the bucket name. Overridable
+# via env for a local mock store (and for the -dev/staging siblings).
+DEFAULT_BASE = "https://artifacts.locai.co.uk"
+_BASE_ENV = "LOCAI_ARTIFACT_BASE"
+MANIFEST_PATH = "index/manifest.v1.json"
+
+CAPABILITY_ENGINES = "engines"
+
+_DOWNLOAD_TIMEOUT = 60  # seconds per attempt
+_MANIFEST_TIMEOUT = 15
+_MAX_MANIFEST_BYTES = 8 * 1024 * 1024  # a manifest is small; cap defensively
+_HASH_CHUNK = 1024 * 1024
+
+
+class ArtifactStoreError(Exception):
+    """Base for artifact-store failures."""
+
+
+class ManifestError(ArtifactStoreError):
+    """Manifest missing, unreadable, or the wrong schema."""
+
+
+class VariantNotFound(ArtifactStoreError):
+    """No artifact for the requested capability/name/version/platform-arch."""
+
+
+class VerificationError(ArtifactStoreError):
+    """Downloaded bytes did not match the manifest sha256."""
+
+
+def base_url() -> str:
+    """Store base URL, ``LOCAI_ARTIFACT_BASE`` override winning. No trailing slash."""
+    return (os.environ.get(_BASE_ENV) or DEFAULT_BASE).rstrip("/")
+
+
+def platform_arch() -> str:
+    """This device's ``<platform>-<arch>`` token, matching the store layout
+    (``linux-x64``, ``linux-arm64``, ``darwin-arm64``, ``darwin-x64``,
+    ``windows-x64``). Raises for an unmapped platform/arch so a wrong guess never
+    resolves to a bogus URL."""
+    if sys.platform.startswith("linux"):
+        system = "linux"
+    elif sys.platform == "darwin":
+        system = "darwin"
+    elif sys.platform in ("win32", "cygwin"):
+        system = "windows"
+    else:
+        raise ArtifactStoreError(f"unsupported platform: {sys.platform}")
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64", "x64"):
+        arch = "x64"
+    elif machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    else:
+        raise ArtifactStoreError(f"unsupported architecture: {machine}")
+    return f"{system}-{arch}"
+
+
+@dataclass(frozen=True)
+class Variant:
+    """One resolved artifact: where to GET it, and what it must hash to."""
+
+    path: str  # relative to the store base
+    sha256: str
+    size: int | None = None
+
+    def url(self, base: str | None = None) -> str:
+        return f"{base or base_url()}/{self.path.lstrip('/')}"
+
+
+class Manifest:
+    """Parsed ``index/manifest.v1.json``. Nesting mirrors the store layout:
+    capability -> name -> version -> platform-arch -> variant."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        schema = data.get("schema")
+        if schema != 1:
+            raise ManifestError(f"unsupported manifest schema: {schema!r} (want 1)")
+        self._data = data
+
+    def default_version(self, capability: str, name: str) -> str:
+        """The store's current default version for an engine, so the device need
+        not pin versions itself. Set by the publish job."""
+        try:
+            return self._data["defaults"][capability][name]
+        except (KeyError, TypeError):
+            raise VariantNotFound(f"no default version for {capability}/{name} in manifest") from None
+
+    def variant(self, capability: str, name: str, version: str | None = None, arch: str | None = None) -> Variant:
+        version = version or self.default_version(capability, name)
+        arch = arch or platform_arch()
+        try:
+            rec = self._data[capability][name][version][arch]
+        except (KeyError, TypeError):
+            raise VariantNotFound(f"{capability}/{name}/{version}/{arch} not in manifest") from None
+        path = rec.get("path")
+        sha = rec.get("sha256")
+        if not path or not sha:
+            raise ManifestError(f"manifest entry for {capability}/{name}/{version}/{arch} missing path/sha256")
+        return Variant(path=path, sha256=sha, size=rec.get("size"))
+
+
+def _http_get(url: str, timeout: int, max_bytes: int | None = None) -> bytes:
+    """GET ``url`` into memory, retrying transient failures. Cross-host CDNs drop
+    connections; 4xx fails fast, 5xx/network retries. Optional size cap."""
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - fixed https/file base
+                data = resp.read(max_bytes + 1) if max_bytes else resp.read()
+            if max_bytes and len(data) > max_bytes:
+                raise ArtifactStoreError(f"response from {url} exceeds {max_bytes} bytes")
+            return data
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == attempts:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
+            if attempt == attempts:
+                raise
+        time.sleep(2 * attempt)
+    raise ArtifactStoreError(f"unreachable retry exit for {url}")  # pragma: no cover
+
+
+def fetch_manifest(base: str | None = None) -> Manifest:
+    """Download + parse the store manifest."""
+    url = f"{base or base_url()}/{MANIFEST_PATH}"
+    try:
+        raw = _http_get(url, _MANIFEST_TIMEOUT, max_bytes=_MAX_MANIFEST_BYTES)
+        return Manifest(json.loads(raw))
+    except ArtifactStoreError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise ManifestError(f"could not fetch manifest from {url}: {e}") from e
+
+
+def _download_to(url: str, dest: Path) -> None:
+    """Stream ``url`` to ``dest`` via a .partial sidecar, retrying transient errors."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_suffix(dest.suffix + ".partial")
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as resp, open(partial, "wb") as fh:  # noqa: S310
+                shutil.copyfileobj(resp, fh)
+            os.replace(partial, dest)
+            return
+        except urllib.error.HTTPError as e:
+            partial.unlink(missing_ok=True)
+            if e.code < 500 or attempt == attempts:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
+            partial.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+        time.sleep(2 * attempt)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(_HASH_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _extract(archive: Path, dest_dir: Path) -> None:
+    """Extract a .tar.gz or .zip flat into ``dest_dir``. Engine archives carry the
+    server binary plus the shared libraries it links, so every regular file lands
+    beside the binary; symlinks (versioned .so/.dylib names) are recreated."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = archive.name.lower()
+    if name.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive, "r:gz") as tf:
+            for m in tf.getmembers():
+                if m.isfile():
+                    src = tf.extractfile(m)
+                    if src is not None:
+                        out = dest_dir / Path(m.name).name
+                        out.write_bytes(src.read())
+                        out.chmod(0o755)
+            for m in tf.getmembers():
+                if m.issym():
+                    link = dest_dir / Path(m.name).name
+                    if not link.exists():
+                        try:
+                            link.symlink_to(Path(m.linkname).name)
+                        except OSError:
+                            pass
+    elif name.endswith(".zip"):
+        with zipfile.ZipFile(archive, "r") as zf:
+            for member in zf.namelist():
+                if member.endswith("/"):
+                    continue
+                out = dest_dir / Path(member).name
+                out.write_bytes(zf.read(member))
+                if not sys.platform.startswith("win"):
+                    out.chmod(0o755)
+    else:
+        raise ArtifactStoreError(f"unknown archive type: {archive.name}")
+
+
+def fetch_variant(variant: Variant, cache_dir: Path, *, base: str | None = None) -> Path:
+    """Download ``variant`` to ``cache_dir``, verify its sha256 against the
+    manifest, and return the archive path. Raises VerificationError on mismatch
+    (the file is discarded). Idempotent: a cached archive that already matches the
+    hash is not re-downloaded."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive = cache_dir / Path(variant.path).name
+    if archive.exists() and _sha256_file(archive) == variant.sha256:
+        logger.info(f"artifact {archive.name} already present and verified")
+        return archive
+    url = variant.url(base)
+    logger.info(f"fetching artifact {url}")
+    _download_to(url, archive)
+    actual = _sha256_file(archive)
+    if actual != variant.sha256:
+        archive.unlink(missing_ok=True)
+        raise VerificationError(f"sha256 mismatch for {variant.path}: got {actual}, want {variant.sha256}")
+    return archive
+
+
+def ensure_engine(
+    name: str,
+    version: str | None = None,
+    dest_dir: Path | None = None,
+    *,
+    manifest: Manifest | None = None,
+    base: str | None = None,
+    arch: str | None = None,
+) -> Path:
+    """Ensure engine ``name`` is present + verified under ``dest_dir``, fetching it
+    from the store on demand. ``version`` defaults to the manifest's per-engine
+    default, so a headless device need not pin versions. Returns ``dest_dir``.
+    Idempotent: skips the network when a matching, verified archive is already
+    installed. The lazy first-use entry point for a no-bundled-engines install."""
+    if dest_dir is None:
+        raise ValueError("dest_dir is required")
+    manifest = manifest or fetch_manifest(base)
+    variant = manifest.variant(CAPABILITY_ENGINES, name, version, arch)
+    marker = dest_dir / ".artifact-sha256"
+    if dest_dir.is_dir() and marker.exists() and marker.read_text(encoding="utf-8").strip() == variant.sha256:
+        return dest_dir  # already installed at this exact artifact
+    cache_dir = dest_dir.parent / f".{dest_dir.name}-cache"
+    archive = fetch_variant(variant, cache_dir, base=base)
+    _extract(archive, dest_dir)
+    marker.write_text(variant.sha256, encoding="utf-8")
+    archive.unlink(missing_ok=True)
+    logger.info(f"engine {name}@{version} ready at {dest_dir}")
+    return dest_dir
