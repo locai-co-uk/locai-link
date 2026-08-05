@@ -137,6 +137,11 @@ impl From<&HealthStatus> for TrayState {
 pub(crate) struct MenuHandles {
     status_item: MenuItem<Wry>,
     models: Vec<ModelInfo>,
+    // Row handles for in-place updates (serving checkmark, labels, progress),
+    // so value changes don't need a full set_menu rebuild.
+    models_submenu: Option<Submenu<Wry>>,
+    model_items: Vec<(String, CheckMenuItem<Wry>)>,
+    deploy_items: Vec<(String, MenuItem<Wry>)>,
     in_flight: std::collections::HashSet<String>,
     /// Blocks repeat "Update" clicks while a swap is in flight, and drives the
     /// Preferences "updating, will restart" lock. Held from the trigger until
@@ -262,7 +267,7 @@ pub fn run() {
             } else {
                 status_text_registering()
             };
-            let (menu, status_item) = build_tray_menu(
+            let built = build_tray_menu(
                 app.handle(),
                 &[],
                 &[],
@@ -276,14 +281,17 @@ pub fn run() {
                 .icon(icon)
                 .icon_as_template(TRAY_ICON_IS_TEMPLATE)
                 .tooltip("Locai Link")
-                .menu(&menu)
+                .menu(&built.menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(handle_menu_event)
                 .build(app)?;
 
             let handles: SharedHandles = Arc::new(Mutex::new(MenuHandles {
-                status_item,
+                status_item: built.status,
                 models: Vec::new(),
+                models_submenu: built.submenu,
+                model_items: built.model_items,
+                deploy_items: built.deploy_items,
                 in_flight: std::collections::HashSet::new(),
                 update_in_flight: false,
                 update_restart_epoch_at_trigger: None,
@@ -350,8 +358,49 @@ pub(crate) fn show_preferences_window(app: &AppHandle) {
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
 }
 
-/// Assemble the tray menu; returns a handle to the status header so the
-/// poll loop can `set_text` it every tick. Rebuilt only when the models list changes.
+/// Handles the poll loop keeps so it can update the tray in place (set_checked /
+/// set_text) for value changes, instead of replacing the whole menu — a full
+/// `set_menu` while a window is foreground miniaturizes it on macOS.
+struct BuiltTray {
+    menu: Menu<Wry>,
+    status: MenuItem<Wry>,
+    submenu: Option<Submenu<Wry>>,
+    model_items: Vec<(String, CheckMenuItem<Wry>)>,
+    deploy_items: Vec<(String, MenuItem<Wry>)>,
+}
+
+/// Identity-only signature of the menu structure: which model + deployment rows
+/// exist, whether the update row shows, and the registration gate. Excludes
+/// values updated in place (serving state, labels, progress) so a serving toggle
+/// or a progress tick doesn't force a full `set_menu` rebuild.
+type StructureSig = (Vec<String>, Vec<String>, bool, bool);
+
+fn structure_sig(
+    models: &[ModelInfo],
+    deployments: &[DeploymentProgress],
+    update: Option<&str>,
+    registered: bool,
+) -> StructureSig {
+    let mut m: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    m.sort();
+    let mut d: Vec<String> = deployments.iter().map(|d| d.pipeline_id.clone()).collect();
+    d.sort();
+    (m, d, update.is_some(), registered)
+}
+
+/// Parent label for the Models submenu ("Models - N serving").
+fn models_serving_label(models: &[ModelInfo]) -> String {
+    let n = models.iter().filter(|m| m.is_serving).count();
+    if n > 0 {
+        format!("Models - {n} serving")
+    } else {
+        "Models".to_string()
+    }
+}
+
+/// Assemble the tray menu; returns the menu plus handles (status header, models
+/// submenu, per-row items) so the poll loop can update rows in place. A full
+/// rebuild happens only when the menu structure changes.
 fn build_tray_menu(
     app: &AppHandle,
     models: &[ModelInfo],
@@ -359,7 +408,7 @@ fn build_tray_menu(
     status_text: &str,
     update: Option<&str>,
     registered: bool,
-) -> tauri::Result<(Menu<Wry>, MenuItem<Wry>)> {
+) -> tauri::Result<BuiltTray> {
     // `enabled: false` renders as grey/unclickable — informational only.
     let status = MenuItem::with_id(app, MENU_ID_STATUS, status_text, false, None::<&str>)?;
 
@@ -399,12 +448,19 @@ fn build_tray_menu(
                 &quit,
             ],
         )?;
-        return Ok((menu, status));
+        return Ok(BuiltTray {
+            menu,
+            status,
+            submenu: None,
+            model_items: Vec::new(),
+            deploy_items: Vec::new(),
+        });
     }
 
     let sep1 = PredefinedMenuItem::separator(app)?;
 
-    let models_submenu = build_models_submenu(app, models, deployments)?;
+    let (models_submenu, model_items, deploy_items) =
+        build_models_submenu(app, models, deployments)?;
 
     let sep2 = PredefinedMenuItem::separator(app)?;
     let control = MenuItem::with_id(
@@ -465,7 +521,13 @@ fn build_tray_menu(
     items.push(&quit);
 
     let menu = Menu::with_items(app, &items)?;
-    Ok((menu, status))
+    Ok(BuiltTray {
+        menu,
+        status,
+        submenu: Some(models_submenu),
+        model_items,
+        deploy_items,
+    })
 }
 
 /// Populate the Models submenu: in-flight deployments (disabled text) first,
@@ -474,15 +536,14 @@ fn build_models_submenu(
     app: &AppHandle,
     models: &[ModelInfo],
     deployments: &[DeploymentProgress],
-) -> tauri::Result<Submenu<Wry>> {
-    let serving_count = models.iter().filter(|m| m.is_serving).count();
-    // Right-aligned trailing text isn't possible in native menu items, so fold
-    // the serving summary into the parent label instead ("Models — 2 serving").
-    let submenu_label = if serving_count > 0 {
-        format!("Models - {serving_count} serving")
-    } else {
-        "Models".to_string()
-    };
+) -> tauri::Result<(
+    Submenu<Wry>,
+    Vec<(String, CheckMenuItem<Wry>)>,
+    Vec<(String, MenuItem<Wry>)>,
+)> {
+    // Native menu items can't right-align trailing text, so the serving summary
+    // folds into the parent label.
+    let submenu_label = models_serving_label(models);
 
     if models.is_empty() && deployments.is_empty() {
         let placeholder = MenuItem::with_id(
@@ -492,7 +553,9 @@ fn build_models_submenu(
             false,
             None::<&str>,
         )?;
-        return Submenu::with_id_and_items(app, "models", &submenu_label, true, &[&placeholder]);
+        let submenu =
+            Submenu::with_id_and_items(app, "models", &submenu_label, true, &[&placeholder])?;
+        return Ok((submenu, Vec::new(), Vec::new()));
     }
 
     // MenuItem and CheckMenuItem are distinct types; own them separately
@@ -530,7 +593,18 @@ fn build_models_submenu(
         .map(|i| i as &dyn IsMenuItem<Wry>)
         .collect();
     refs.extend(items.iter().map(|i| i as &dyn IsMenuItem<Wry>));
-    Submenu::with_id_and_items(app, "models", &submenu_label, true, &refs)
+    let submenu = Submenu::with_id_and_items(app, "models", &submenu_label, true, &refs)?;
+    let model_pairs = models
+        .iter()
+        .zip(&items)
+        .map(|(m, it)| (m.id.clone(), it.clone()))
+        .collect();
+    let deploy_pairs = deployments
+        .iter()
+        .zip(&deploy_items)
+        .map(|(d, it)| (d.pipeline_id.clone(), it.clone()))
+        .collect();
+    Ok((submenu, model_pairs, deploy_pairs))
 }
 
 /// Label for a model row; port suffix disambiguates mixed-port llama-swap
@@ -758,10 +832,10 @@ fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
 /// Up↔Down transitions; the full menu is rebuilt only when the digest changes.
 fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>) {
     let mut current_tray = TrayState::Up;
+    // Value digest (serving, labels, progress) drives in-place row updates;
+    // the structure sig drives the rarer full rebuild.
     let mut current_digest = MenuDigest::default();
-    // Track the mounted header text so an Up↔Down transition (which doesn't
-    // touch the models digest) still forces a rebuild — IconMenuItem::set_text
-    // on Tauri 2.11 didn't reliably repaint the disabled header row.
+    let mut current_sig: StructureSig = structure_sig(&[], &[], None, device_registered());
     let mut current_status_text = status_text_initial();
     // Update-in-progress inference: the agent's health server goes down during
     // the swap. If it was up with an update available and just dropped, treat
@@ -886,11 +960,19 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 TrayState::Up => TRAY_ICON_UP,
                 TrayState::Down => TRAY_ICON_DOWN,
             });
-        // Defer the menu rebuild while a window is open: replacing the
-        // status-item menu miniaturizes a foreground macOS window. The digest
-        // stays un-advanced so the rebuild fires on the next poll once hidden.
-        let rebuild_menu = (new_digest != current_digest || text_changed)
-            && !WINDOW_VISIBLE.load(Ordering::Relaxed);
+        // Full set_menu only on a structural change (rows added/removed) and
+        // only while no window is open (replacing the menu miniaturizes a
+        // foreground macOS window). Value changes (serving, labels, progress,
+        // header) update the existing rows in place, so they apply either way.
+        let sig = structure_sig(
+            &new_models,
+            &new_deployments,
+            update_latest.as_deref(),
+            registered,
+        );
+        let structure_changed = sig != current_sig;
+        let rebuild_menu = structure_changed && !WINDOW_VISIBLE.load(Ordering::Relaxed);
+        let values_changed = new_digest != current_digest || text_changed;
         let tray_main = tray.clone();
         let app_main = app.clone();
         let handles_main = handles.clone();
@@ -921,19 +1003,40 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                     menu_update.as_deref(),
                     registered,
                 ) {
-                    Ok((new_menu, new_status_item)) => {
-                        if let Err(e) = tray_main.set_menu(Some(new_menu)) {
+                    Ok(built) => {
+                        if let Err(e) = tray_main.set_menu(Some(built.menu)) {
                             eprintln!("[link] tray.set_menu failed: {e}");
                         }
                         if let Ok(mut h) = handles_main.lock() {
-                            h.status_item = new_status_item;
+                            h.status_item = built.status;
+                            h.models_submenu = built.submenu;
+                            h.model_items = built.model_items;
+                            h.deploy_items = built.deploy_items;
                             h.models = menu_models;
                         }
                     }
                     Err(e) => eprintln!("[link] build_tray_menu failed: {e}"),
                 }
-            } else if let Ok(mut h) = handles_main.lock() {
-                h.models = menu_models;
+            } else if values_changed {
+                // Update rows in place — no set_menu, so no window miniaturize.
+                if let Ok(mut h) = handles_main.lock() {
+                    if let Some(sm) = &h.models_submenu {
+                        let _ = sm.set_text(models_serving_label(&menu_models));
+                    }
+                    for (id, item) in &h.model_items {
+                        if let Some(m) = menu_models.iter().find(|m| &m.id == id) {
+                            let _ = item.set_checked(m.is_serving);
+                            let _ = item.set_text(model_label(m));
+                        }
+                    }
+                    for (id, item) in &h.deploy_items {
+                        if let Some(d) = menu_deployments.iter().find(|d| &d.pipeline_id == id) {
+                            let _ = item.set_text(deployment_label(d));
+                        }
+                    }
+                    let _ = h.status_item.set_text(&menu_status);
+                    h.models = menu_models;
+                }
             }
         });
 
@@ -942,7 +1045,12 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         if icon_bytes.is_some() {
             current_tray = next_tray;
         }
+        // Advance the structure sig only on an actual rebuild, so a change
+        // deferred while a window was open still rebuilds once it hides.
         if rebuild_menu {
+            current_sig = sig;
+        }
+        if rebuild_menu || values_changed {
             current_digest = new_digest;
             current_status_text = status_text;
         }
