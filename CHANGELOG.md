@@ -34,6 +34,11 @@ sections below the summary. -->
   (it pointed at an old filename and opened nothing).
 - Fixed: uninstalling on macOS now removes the install completely; the
   uninstaller could stop halfway when it shut the app down, leaving files behind.
+- Fixed: the menu-bar window no longer minimises to the Dock when the tray
+  updates (for example when a model starts serving).
+- Added: before onboarding finishes, the menu-bar menu now offers "Continue
+  Setup…" and "Uninstall Locai Link…" so closing the setup window is not a
+  dead-end.
 
 ### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
 
@@ -43,6 +48,24 @@ sections below the summary. -->
 - A per-`model_name` download lock now serializes same-file deploys; the waiter
   then hits the existing `target_path.exists()` cache guard and skips the
   re-download. Distinct filenames are unaffected.
+
+### Fixed: tray-menu rebuild is deferred while a window is open (`crates/link/src-tauri/src/tray.rs`)
+
+- Replacing the macOS status-item menu (`set_menu`) while a Preferences/setup
+  window is foreground miniaturised that window to the Dock. Any serving-state
+  change or progress tick triggers a rebuild, so it fired on, e.g., a model
+  going to "1 Serving". The poll loop now defers the menu rebuild while a window
+  is visible (tracked by `WINDOW_VISIBLE`, set from the show/hide paths) and
+  applies it once the window hides; the tray icon and tooltip still update live.
+
+### Added: pre-onboarding tray offers Continue Setup + Uninstall (`crates/link/src-tauri/src/tray.rs`)
+
+- Closing the setup window before onboarding finished left a menu-bar icon whose
+  only action was Quit, while the background agent kept running and reopened
+  setup at next login. The unregistered tray now offers "Continue Setup…" (reopen
+  the wizard) and "Uninstall Locai Link…" (deregister if needed, then remove the
+  install). Uninstall runs on a detached thread; the admin prompt is the confirm
+  gate and cancelling is a no-op.
 
 ### Fixed: macOS uninstaller runs detached so it always completes (`crates/link/src-tauri/src/setup.rs`)
 

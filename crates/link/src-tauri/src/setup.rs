@@ -1131,6 +1131,9 @@ pub fn finish_setup(
     if let Some(setup) = app.get_webview_window("setup") {
         let _ = setup.hide();
     }
+    // No window on screen now; let the tray menu rebuild resume (it is deferred
+    // while a window is visible to avoid miniaturizing it).
+    crate::tray::WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }

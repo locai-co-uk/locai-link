@@ -9,6 +9,7 @@
 // here so the bare `preferences::` / `setup::` / `supervisor::` paths work.
 use crate::{preferences, setup, supervisor};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -55,6 +56,9 @@ const MENU_ID_PREFERENCES: &str = "preferences";
 const MENU_ID_DOWNLOAD: &str = "download_models";
 const MENU_ID_QUIT: &str = "quit";
 const MENU_ID_UPDATE: &str = "update";
+// Pre-onboarding escape hatches so closing the setup window isn't a dead-end.
+const MENU_ID_CONTINUE_SETUP: &str = "continue_setup";
+const MENU_ID_UNINSTALL: &str = "uninstall";
 
 /// Emitted to the Preferences window when the user picks "Download models…" so
 /// the UI opens on the available-models section.
@@ -65,6 +69,13 @@ const MENU_ID_MODEL_PREFIX: &str = "model:";
 
 /// Menu id for the "Open a Workspace" action.
 const MENU_ID_WORKSPACE: &str = "workspace";
+
+/// True while a Preferences/setup window is on screen. Gates the tray-menu
+/// rebuild: replacing the NSStatusItem menu while a window is foreground
+/// miniaturizes that window on macOS, so we defer the rebuild until it hides
+/// (the icon + tooltip still update live meanwhile). Maintained by the window
+/// show/hide paths.
+pub(crate) static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 /// Release-channel suffix baked in from VITE_CHANNEL at compile time
 /// (defaults to "alpha" when unset — matches the SA side). "prod" or
@@ -206,6 +217,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                WINDOW_VISIBLE.store(false, Ordering::Relaxed);
                 #[cfg(target_os = "macos")]
                 {
                     let _ = window
@@ -313,6 +325,7 @@ fn show_setup_window(app: &AppHandle) {
     if let Err(e) = window.set_focus() {
         eprintln!("[link] setup window.set_focus failed: {e}");
     }
+    WINDOW_VISIBLE.store(true, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
 }
@@ -330,6 +343,7 @@ pub(crate) fn show_preferences_window(app: &AppHandle) {
     if let Err(e) = window.set_focus() {
         eprintln!("[link] window.set_focus failed: {e}");
     }
+    WINDOW_VISIBLE.store(true, Ordering::Relaxed);
     // macOS: switch to Regular while visible so we get Dock + Cmd-Tab + focus.
     // Flipped back to Accessory in on_window_event when the window hides.
     #[cfg(target_os = "macos")]
@@ -353,9 +367,38 @@ fn build_tray_menu(
     // isn't up and none of these actions apply — show a minimal menu: the
     // status header + Quit, nothing else.
     if !registered {
-        let sep = PredefinedMenuItem::separator(app)?;
+        // Onboarding not finished. Offer a way to resume (reopen the wizard) or
+        // back out cleanly (uninstall) so closing the setup window isn't a
+        // dead-end that leaves only Quit and a background agent that nags at
+        // next login.
+        let sep1 = PredefinedMenuItem::separator(app)?;
+        let continue_setup = MenuItem::with_id(
+            app,
+            MENU_ID_CONTINUE_SETUP,
+            "Continue Setup…",
+            true,
+            None::<&str>,
+        )?;
+        let uninstall = MenuItem::with_id(
+            app,
+            MENU_ID_UNINSTALL,
+            "Uninstall Locai Link…",
+            true,
+            None::<&str>,
+        )?;
+        let sep2 = PredefinedMenuItem::separator(app)?;
         let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
-        let menu = Menu::with_items(app, &[&status as &dyn IsMenuItem<Wry>, &sep, &quit])?;
+        let menu = Menu::with_items(
+            app,
+            &[
+                &status as &dyn IsMenuItem<Wry>,
+                &sep1,
+                &continue_setup,
+                &uninstall,
+                &sep2,
+                &quit,
+            ],
+        )?;
         return Ok((menu, status));
     }
 
@@ -620,6 +663,8 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 }
             });
         }
+        MENU_ID_CONTINUE_SETUP => show_setup_window(app),
+        MENU_ID_UNINSTALL => trigger_uninstall(),
         MENU_ID_QUIT => {
             // The app is tied to the runtime, so quitting stops Link too —
             // no "keep running" choice. Signal the supervisor to stop the child,
@@ -640,6 +685,21 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER => {}
         other => eprintln!("[link] unhandled menu id: {other}"),
     }
+}
+
+/// Fire the uninstaller from the pre-onboarding tray. Detached: launch_uninstaller
+/// shows a blocking admin prompt and the menu-event thread is UI-adjacent. The
+/// admin prompt is the confirm gate; cancelling it is a no-op (the "cancelled"
+/// sentinel). The (detached) uninstaller tears down the app itself on success.
+fn trigger_uninstall() {
+    thread::spawn(|| {
+        let root = preferences::install_root();
+        if let Err(e) = setup::launch_uninstaller(root) {
+            if e != "cancelled" {
+                eprintln!("[link] uninstall from tray failed: {e}");
+            }
+        }
+    });
 }
 
 /// Toggle a model's serving state. Runs the POST on a detached thread —
@@ -826,7 +886,11 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 TrayState::Up => TRAY_ICON_UP,
                 TrayState::Down => TRAY_ICON_DOWN,
             });
-        let rebuild_menu = new_digest != current_digest || text_changed;
+        // Defer the menu rebuild while a window is open: replacing the
+        // status-item menu miniaturizes a foreground macOS window. The digest
+        // stays un-advanced so the rebuild fires on the next poll once hidden.
+        let rebuild_menu = (new_digest != current_digest || text_changed)
+            && !WINDOW_VISIBLE.load(Ordering::Relaxed);
         let tray_main = tray.clone();
         let app_main = app.clone();
         let handles_main = handles.clone();
