@@ -382,7 +382,12 @@ pub fn open_install_root() -> Result<(), String> {
 #[tauri::command]
 pub fn open_control_device(app: AppHandle, device_id: Option<String>) -> Result<(), String> {
     let url = match device_id {
-        Some(id) if !id.is_empty() => format!("{CONTROL_BASE_URL}/devices/{id}"),
+        Some(id) if !id.is_empty() => {
+            format!(
+                "{CONTROL_BASE_URL}/devices/{}",
+                crate::shared::encode_segment(&id)
+            )
+        }
         _ => CONTROL_BASE_URL.to_string(),
     };
     app.opener()

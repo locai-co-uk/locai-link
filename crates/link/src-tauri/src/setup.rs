@@ -1084,10 +1084,12 @@ pub fn re_register(
     // 1. Control-side delete — best-effort; failure doesn't block the local wipe.
     if !old_device_id.is_empty() {
         if let Ok(token) = require_token(&state) {
-            // device_id is a UUID — no percent-encoding needed. Add urlencoding
-            // if Control ever accepts non-UUID ids.
-            let url =
-                format!("{CONTROL_API_URL}/devices/delete_device_by_id?device_id={old_device_id}");
+            // Percent-encode even though device_id is expected to be a UUID: it
+            // arrives from the frontend, so a stray & or # mustn't rewrite the query.
+            let url = format!(
+                "{CONTROL_API_URL}/devices/delete_device_by_id?device_id={}",
+                crate::shared::encode_segment(&old_device_id)
+            );
             match http_agent()
                 .delete(&url)
                 .set("Authorization", &format!("Bearer {token}"))
@@ -1176,8 +1178,11 @@ fn best_effort_deregister() {
 /// app being killed mid-run.
 #[tauri::command]
 #[cfg(target_os = "linux")]
-pub fn launch_uninstaller(install_root: String) -> Result<(), String> {
-    let script = format!("{install_root}/uninstall.sh");
+pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
+    // Ignore the frontend-supplied install_root and resolve canonically,
+    // mirroring the macOS path: best_effort_deregister() runs below, so an
+    // attacker-chosen script path must not become executable code here.
+    let script = format!("{}/uninstall.sh", resolve_install_root());
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }

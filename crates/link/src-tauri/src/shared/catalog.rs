@@ -111,7 +111,7 @@ pub fn read_identity(install_root: &Path) -> Option<DeviceIdentity> {
 /// Percent-encode one URL path segment. RFC 3986 unreserved bytes pass through;
 /// everything else becomes %XX, so a device_id/model_id containing /, ?, or #
 /// can't alter the route.
-fn encode_segment(s: &str) -> String {
+pub fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

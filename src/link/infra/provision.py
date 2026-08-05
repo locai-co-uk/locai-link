@@ -34,7 +34,7 @@ class ZenohProvisioner:
         return (ZENOH_DIR / binary_name).exists()
 
     @staticmethod
-    def install_router_env(backend: str = "rocksdb"):
+    def install_router_env(backend: str = "rocksdb") -> None:
         """Download the Zenoh router and a storage backend ("rocksdb" or "filesystem")."""
         logger.info(f"Provisioning Zenoh Infrastructure ({ZENOH_VERSION})...")
         logger.info(f"Selected Storage Backend: {backend}")
@@ -73,7 +73,7 @@ class ZenohProvisioner:
             logger.warning(f"Unknown backend '{backend}'. Skipping plugin download.")
 
     @staticmethod
-    def _download_component(name: str, url: str, target_dir: Path):
+    def _download_component(name: str, url: str, target_dir: Path) -> None:
         """Download and extract a component archive into ``target_dir``."""
         filename = Path(url).name
         file_path = target_dir / filename

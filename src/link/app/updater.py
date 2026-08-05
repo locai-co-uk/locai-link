@@ -873,8 +873,11 @@ def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
     if sys.platform == "darwin":
         return [install_root / "Locai Link.app"]
     if sys.platform == "win32":
-        return []  # no companion OTA on Windows yet
-    return [install_root / "companion"]
+        return []  # single-binary self-swap deferred; no separate app to swap
+    # Linux ships the UI inside the single locai-link binary (no separate app),
+    # so there's nothing to whole-app swap. Updating that binary in place is the
+    # single-binary self-swap, tracked as its own piece of work.
+    return []
 
 
 def _rm(path: Path) -> None:
@@ -1243,13 +1246,13 @@ def swap_changed_ui_apps(
         if old_apps.get(key) == new_hash:
             continue  # unchanged; don't disturb the running app
         try:
+            dests = _ui_app_destinations(key, install_root)
+            if not dests:
+                continue  # platform has no separate UI app to swap
             name = _ui_app_payload_name(key)
             src = _locate_in_payload(staging, name)
             if src is None:
                 logger.warning(f"whole-app OTA: '{key}' changed but '{name}' not in payload; skipping")
-                continue
-            dests = _ui_app_destinations(key, install_root)
-            if not dests:
                 continue
             # Verify the staged bundle BEFORE any destructive replace, so a bad
             # signature never overwrites the good installed app.

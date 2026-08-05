@@ -712,9 +712,10 @@ def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="whole-app swap targets macOS/Linux")
-def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
-    """A real tarball carrying runtime + a changed companion: swap_bundle flips
-    the runtime and replaces the companion binary."""
+def test_swap_bundle_flips_runtime_no_app_swap_linux(tmp_path, mocker, monkeypatch):
+    """A real tarball carrying runtime + a changed companion on Linux: swap_bundle
+    flips the runtime but leaves the single locai-link binary alone (no separate
+    UI app to whole-app swap; the binary self-swap is tracked separately)."""
     monkeypatch.setattr(updater.sys, "platform", "linux")
     root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
     (root / "companion").write_bytes(b"OLD-COMPANION")
@@ -759,8 +760,10 @@ def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
 
     assert updater.swap_bundle(install_root=root) is True
     assert (root / updater.CURRENT_LINK).resolve().name == new_version
-    assert (root / "companion").read_bytes() == b"NEW-COMPANION"
-    restart.assert_any_call("companion")
+    # Linux has no separate UI app to whole-app swap, so 'companion' is left as-is
+    # and no UI app is restarted.
+    assert (root / "companion").read_bytes() == b"OLD-COMPANION"
+    restart.assert_not_called()
 
 
 def test_ota_sweeps_legacy_setup_assistant_linux(tmp_path, monkeypatch):
@@ -930,7 +933,10 @@ def test_swap_changed_ui_apps_skips_unchanged(tmp_path, monkeypatch):
     assert (root / "companion").read_text() == "OLD", "unchanged app must not be touched"
 
 
-def test_swap_changed_ui_apps_replaces_changed(tmp_path, monkeypatch):
+def test_swap_changed_ui_apps_noop_on_linux(tmp_path, monkeypatch):
+    # Post-merge the Linux UI ships inside the single locai-link binary, so there
+    # is no separate app to whole-app swap (the binary self-swap is tracked
+    # separately). A changed-app hash must therefore be a no-op, not touch disk.
     monkeypatch.setattr(updater.sys, "platform", "linux")
     staging = tmp_path / "extract"
     staging.mkdir()
@@ -940,8 +946,8 @@ def test_swap_changed_ui_apps_replaces_changed(tmp_path, monkeypatch):
     (root / "companion").write_text("OLD")
 
     swapped = updater.swap_changed_ui_apps(staging, root, {"companion": "old"}, {"companion": "new"})
-    assert swapped == ["companion"]
-    assert (root / "companion").read_text() == "NEW"
+    assert swapped == []
+    assert (root / "companion").read_text() == "OLD"  # left untouched
 
 
 def test_swap_changed_ui_apps_skips_when_missing_from_payload(tmp_path, monkeypatch):

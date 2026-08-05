@@ -19,7 +19,7 @@ class ClockTick(Source):
     """Generates clock ticks (Non-Blocking)."""
 
     def __init__(self, interval=1.0):
-        """Initialises the ClockTick source (interval in seconds)."""
+        """Initialises the ClockTick source (rate in Hz; period is 1/interval)."""
         self.interval = 1.0 / float(interval)
         self.next_tick = time.time()
 
@@ -41,7 +41,7 @@ class RandomGenerator(Source):
     """Generates random numbers (Non-Blocking)."""
 
     def __init__(self, interval=1.0):
-        """Initialises the RandomGenerator source (interval in seconds)."""
+        """Initialises the RandomGenerator source (rate in Hz; period is 1/interval)."""
         self.interval = 1.0 / float(interval)
         self.next_tick = time.time()
 

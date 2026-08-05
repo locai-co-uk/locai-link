@@ -71,7 +71,7 @@ class ZenohRouter:
             root_key: str(self.working_dir),
         }
 
-    def _write_config_file(self, config: dict[str, Any], path: Path):
+    def _write_config_file(self, config: dict[str, Any], path: Path) -> None:
         """Generate the router config file at ``path``."""
         endpoints = config.get("endpoints", ["tcp/0.0.0.0:7447"])
 
@@ -181,7 +181,7 @@ def get_or_create_zenoh_session(config: TransportConfig) -> Any:
             time.sleep(1)
 
 
-def _ensure_router_running(args: dict[str, Any]):
+def _ensure_router_running(args: dict[str, Any]) -> None:
     """Ensure the Zenoh router is running, installing the service if necessary.
 
     Raises:

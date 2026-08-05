@@ -662,6 +662,11 @@ class AgentRuntime:
             # same-file deploy doesn't race the `.partial` rename; the waiter
             # then sees the cached file below and skips the re-download.
             with self._download_lock_for(cmd.model_name):
+                # A cancel (or shutdown) may have arrived while we waited for the
+                # lock; don't open a download we're about to abandon.
+                if cancel_event.is_set():
+                    self._report_cancelled(cmd, "while queued behind a same-file download")
+                    return
                 if target_path.exists():
                     logger.info(f"Model {cmd.model_name} already exists. Using cached file.")
                 elif not self._download_and_publish(cmd, cancel_event, download_url, target_path, partial_path):

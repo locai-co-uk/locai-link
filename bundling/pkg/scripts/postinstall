@@ -188,7 +188,15 @@ if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
 fi
 
 USER_UID=$(id -u "$CONSOLE_USER")
-USER_LA="/Users/$CONSOLE_USER/Library/LaunchAgents"
+# Resolve the real home via directory-service: /Users/$CONSOLE_USER is wrong for
+# directory-service, mobile, or relocated accounts, and mkdir there would fail
+# under set -e before the LaunchAgent is installed.
+USER_HOME=$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
+    log "WARN: could not resolve home directory for $CONSOLE_USER; skipping launchd bootstrap"
+    exit 0
+fi
+USER_LA="${USER_HOME}/Library/LaunchAgents"
 PLIST_SRC="${INSTALL_ROOT}/LaunchAgents/uk.co.locai.link.companion.plist"
 PLIST_DST="${USER_LA}/uk.co.locai.link.companion.plist"
 SERVICE="gui/${USER_UID}/uk.co.locai.link.companion"

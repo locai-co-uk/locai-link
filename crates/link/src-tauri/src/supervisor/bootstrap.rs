@@ -32,8 +32,14 @@ const CURRENT_SYMLINK: &str = "current";
 const CURRENT_POINTER_FILE: &str = "CURRENT";
 
 const USER_AGENT: &str = concat!("locai-link-launcher/", env!("CARGO_PKG_VERSION"));
-const HTTP_TIMEOUT_SECS: u64 = 60;
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 15;
+/// Bounds a single stalled read, not the whole transfer. The bundle is large,
+/// so a global deadline would abort a healthy download partway through.
+const HTTP_READ_TIMEOUT_SECS: u64 = 60;
 const DOWNLOAD_PROGRESS_EVERY_BYTES: u64 = 4 * 1024 * 1024;
+/// Cap on the decompressed bundle so a malformed or hostile release can't fill
+/// the install volume before the other checks fire.
+const MAX_EXTRACTED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Bootstrap exit codes, part of the host-integration contract.
 pub const EXIT_BOOTSTRAP_FAILED: u8 = 2;
@@ -308,7 +314,7 @@ fn resolve_expected_sha_with(
             },
             Err(e @ BootstrapError::NoInternet(_)) => return Err(e),
             Err(e @ BootstrapError::Operation(_)) if asset.sha256_url.is_none() => return Err(e),
-            Err(BootstrapError::Operation(_)) => {} // unreachable; try the sidecar
+            Err(BootstrapError::Operation(_)) => {} // sidecar exists; fall back to it
         }
     }
     match &asset.sha256_url {
@@ -393,6 +399,7 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
     let mut arch = Archive::new(GzDecoder::new(BufReader::new(tarball)));
     arch.set_preserve_permissions(true);
     let mut any = false;
+    let mut written: u64 = 0;
     for entry in arch
         .entries()
         .map_err(|e| format!("iterate tarball entries: {e}"))?
@@ -449,6 +456,12 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         };
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        written = written.saturating_add(entry.header().size().unwrap_or(0));
+        if written > MAX_EXTRACTED_BYTES {
+            return Err(format!(
+                "tarball rejected: extracted size exceeds {MAX_EXTRACTED_BYTES} bytes"
+            ));
         }
         entry
             .unpack(&out)
@@ -537,7 +550,8 @@ fn http_get_string(url: &str) -> Result<String, BootstrapError> {
 
 fn http_get_reader(url: &str) -> Result<HttpBody, BootstrapError> {
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .timeout_connect(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .timeout_read(std::time::Duration::from_secs(HTTP_READ_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
         .build();
     let resp = agent
@@ -561,17 +575,17 @@ fn classify_ureq_err(err: ureq::Error) -> BootstrapError {
             BootstrapError::Operation(format!("HTTP {code} from {url}"))
         }
         ureq::Error::Transport(t) => {
-            let kind_msg = format!("{:?}", t.kind());
-            let lower = kind_msg.to_ascii_lowercase();
-            let is_offline = lower.contains("dns")
-                || lower.contains("connection")
-                || lower.contains("io")
-                || lower.contains("connectionfailed");
+            // Match the kind directly so the mapping stays stable if ureq
+            // renames or adds variants (a debug-string search would drift).
+            let is_offline = matches!(
+                t.kind(),
+                ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io
+            );
             let msg = format!(
-                "transport error reaching {}: {} ({})",
+                "transport error reaching {}: {} ({:?})",
                 t.url().map(|u| u.as_str()).unwrap_or("?"),
                 t,
-                kind_msg
+                t.kind()
             );
             if is_offline {
                 BootstrapError::NoInternet(msg)

@@ -46,6 +46,11 @@ sections below the summary. -->
   the pre-built `.pkg` / `.tar.gz` releases; source is now developer-only via
   `uv`. Dropped the one-line installers, the `setup` / `install` CLI
   subcommands, and the git-based OTA.
+- Hardened (pre-release review): percent-encode device ids in Control URLs,
+  resolve the Linux uninstaller path canonically, escape autostart plist values,
+  cap OTA extraction size, split the bootstrap download timeout so large fetches
+  aren't aborted mid-transfer, resolve the macOS install home for
+  directory-service accounts, and guard the Linux install's user-service start.
 
 ### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
 

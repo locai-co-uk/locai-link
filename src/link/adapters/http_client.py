@@ -103,8 +103,9 @@ class HttpClient:
 
     def _build_url(self, endpoint: str) -> str:
         """Joins base_url and endpoint without forcing slashes."""
-        # Absolute URLs override the base entirely.
-        if endpoint.startswith("http"):
+        # Absolute URLs override the base entirely. Match the scheme prefixes so a
+        # relative path like "httpbin/status" isn't mistaken for an absolute URL.
+        if endpoint.startswith(("http://", "https://")):
             return endpoint
 
         # No endpoint: return the base as-is.

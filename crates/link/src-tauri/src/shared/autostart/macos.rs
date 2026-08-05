@@ -16,6 +16,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Escape the five XML predefined entities so a value with `&`, `<`, etc. (e.g.
+/// an install path containing `&`) can't produce a malformed plist.
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// Path to the plist file for a given app_id under the user's LaunchAgents dir.
 fn plist_path(app_id: &str) -> io::Result<PathBuf> {
     let home = std::env::var_os("HOME")
@@ -34,6 +45,8 @@ pub fn enable(app_id: &str, exec_path: &Path) -> io::Result<()> {
     let exec_str = exec_path.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "exec_path is not valid UTF-8")
     })?;
+    let app_id = xml_escape(app_id);
+    let exec_str = xml_escape(exec_str);
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

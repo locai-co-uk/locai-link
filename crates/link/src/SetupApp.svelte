@@ -263,6 +263,13 @@ SPDX-License-Identifier: BUSL-1.1
   });
 
   async function startSignIn() {
+    // "Try again" / error retry can re-enter while a poll from the previous
+    // attempt is still armed; cancel it so we don't run two poll loops (which
+    // doubles the request rate and trips Control's slow_down).
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
     signIn = { kind: "starting" };
     try {
       const start = await invoke<DeviceCodeStart>("sign_in_start");
@@ -1418,6 +1425,12 @@ SPDX-License-Identifier: BUSL-1.1
   :global(input[type="checkbox"]:checked) {
     background: var(--color-primary);
     border-color: var(--color-primary);
+  }
+  /* appearance:none drops the native focus ring; restore a visible one so
+     keyboard users can see which control has focus. */
+  :global(input[type="checkbox"]:focus-visible) {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
   /* Checkmark — a rotated border shown only when checked. The on-dark
      token stays light in both themes, so it reads on the green fill. */

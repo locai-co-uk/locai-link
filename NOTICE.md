@@ -71,6 +71,10 @@ in the `LICENSES-external/` directory and the `THIRDPARTYLICENSES` file.
 #### Plugins
 
 Plugins shipped under `plugins/` (e.g. `language_model`, `audio_transcriber`)
-download and run additional third-party engines at install time, notably
-llama.cpp (MIT) and whisper.cpp (MIT). Those engines remain governed by their
-respective upstream licenses.
+download and run additional third-party engines at install time:
+
+- llama.cpp (MIT)
+- whisper.cpp (MIT)
+- llama-swap (MIT) — Copyright (c) 2024 Benson Wong (github.com/mostlygeek/llama-swap)
+
+Those engines remain governed by their respective upstream licenses.

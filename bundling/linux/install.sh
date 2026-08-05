@@ -5,8 +5,9 @@
 # Locai Link installer for Linux (per-user, no sudo).
 #
 # Lays down the single locai-link binary + bundled runtime, boot.json, and the
-# service unit under ~/.local/share/locai/. Service activation is deferred
-# to the setup wizard on Finish (per the "Start at login" toggle).
+# service unit under ~/.local/share/locai/, then starts the companion unit so the
+# setup wizard opens. Autostart (`systemctl --user enable`) is deferred to the
+# wizard on Finish (per the "Start at login" toggle); the unit runs regardless.
 #
 # Layout after install:
 #
@@ -205,10 +206,18 @@ log "installing + starting locai-link-companion.service…"
 mkdir -p "$HOME/.config/systemd/user"
 install -m 0644 "$INSTALL_ROOT/systemd/locai-link-companion.service" \
     "$HOME/.config/systemd/user/locai-link-companion.service"
-systemctl --user daemon-reload
 # LEGACY: pre-merge separate agent unit (the merged binary supervises now).
 systemctl --user disable --now locai-link-agent.service 2>/dev/null || true
-systemctl --user start locai-link-companion.service
+# `systemctl --user` needs a user D-Bus session; over SSH without linger, or in a
+# container, it fails. Guard it so a completed install isn't reported as failed
+# under set -e — every artefact is already on disk by this point.
+if ! systemctl --user daemon-reload 2>/dev/null \
+   || ! systemctl --user start locai-link-companion.service; then
+    log "WARNING: couldn't reach the user systemd session (no D-Bus?)."
+    log "         Log in graphically, or run:"
+    log "           loginctl enable-linger \$USER"
+    log "           systemctl --user start locai-link-companion.service"
+fi
 
 cat <<EOF
 

@@ -253,7 +253,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -267,7 +267,7 @@ jobs:
 
       - name: Cargo test
         working-directory: crates
-        run: cargo test -p locai-link --no-default-features --lib
+        run: cargo test -p locai-link --no-default-features
 
   # 3b. Rust crate check + unit tests — macOS + Windows. Gated on the Linux
   # Rust check, so the platform-gated autostart/{macos,windows}.rs modules
@@ -291,7 +291,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -334,7 +334,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

@@ -322,7 +322,13 @@ SPDX-License-Identifier: BUSL-1.1
       }
       hasPolled = true;
     } catch {
-      // Ignore polling errors — next tick tries again.
+      // The host command failed: collapse to Down (as the header documents)
+      // rather than freezing the last-known state. Guard on seq so a stale
+      // failure can't clobber a newer poll's result.
+      if (seq === pollSeq && prefs) {
+        prefs.agent.status = "down";
+        hasPolled = true;
+      }
     }
   }
 
@@ -1339,6 +1345,12 @@ SPDX-License-Identifier: BUSL-1.1
   :global(input[type="checkbox"]:checked) {
     background: var(--color-primary, #00B85A);
     border-color: var(--color-primary, #00B85A);
+  }
+  /* appearance:none drops the native focus ring; restore a visible one so
+     keyboard users can see which control has focus. */
+  :global(input[type="checkbox"]:focus-visible) {
+    outline: 2px solid var(--color-primary-pressed, #00A852);
+    outline-offset: 2px;
   }
   /* Checkmark — a rotated border shown only when checked. The on-dark
      token stays light in both themes, so it reads on the green fill. */

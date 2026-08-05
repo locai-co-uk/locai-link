@@ -245,7 +245,7 @@ def self_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_update_and_reexec():
+def _apply_update_and_reexec() -> None:
     """Apply a bundled OTA: swap_bundle downloads, verifies, health-checks, and
     atomically flips ``current``, then exits 42 for the launcher to respawn. We
     never execv here because a frozen ``sys.executable`` points at the old
@@ -277,7 +277,7 @@ def _apply_update_and_reexec():
     sys.exit(42)
 
 
-def _deploy_service(cwd: Path):
+def _deploy_service(cwd: Path) -> None:
     """Install the agent as a service."""
     logger.info("Deploying Agent Service...")
 
