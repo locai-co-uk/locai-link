@@ -209,6 +209,12 @@ def main() -> None:
         metavar="NAME",
         help=f"Plugins to compile into the bundle. Bundleable: {', '.join(KNOWN_PLUGINS)}.",
     )
+    parser.add_argument(
+        "--no-engines",
+        action="store_true",
+        help="Headless build: skip engine prefetch/bake. Engines are pulled on demand "
+        "from the artifact store at first use, so the bundle ships without them.",
+    )
     args = parser.parse_args()
 
     plugins = _resolve_plugins(args)
@@ -223,7 +229,10 @@ def main() -> None:
     # manifest). The single `locai-link` binary is the Tauri app build (the
     # supervisor + tray), staged into the install root by bundling (pack.sh /
     # the pkg staging), so there is no separate launcher to compile here.
-    run_prefetch(plugins, tag)
+    if args.no_engines:
+        logger.info("== Headless build: skipping engine prefetch (engines fetched on demand) ==")
+    else:
+        run_prefetch(plugins, tag)
     ensure_plugins_installed(plugins)
     bundle_dir = run_pyinstaller(plugins)
 

@@ -7,6 +7,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -78,6 +79,18 @@ class ModelServer:
         path_bin = shutil.which(binary_name)
         if path_bin:
             return Path(path_bin)
+
+        # 3. On-demand fetch from the artifact store — only in a frozen bundle, so
+        #    a headless install (no bundled engines) fetches at first use while
+        #    dev/source runs keep the bin_dir/install.py path. Soft import: only the
+        #    bundled runtime exposes link.app.engines.
+        if getattr(sys, "frozen", False):
+            try:
+                from link.app import engines
+
+                return engines.binary_path("llama-cpp")
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"on-demand engine fetch unavailable: {e}")
 
         return None
 

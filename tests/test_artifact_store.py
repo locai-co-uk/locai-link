@@ -132,3 +132,15 @@ def test_verify_rejects_tampered(served_store, tmp_path):
     with pytest.raises(store.VerificationError):
         store.ensure_engine("llama-cpp", "b10289", dest, arch="linux-x64")
     assert not (dest / "llama-server").exists()  # nothing placed on a failed verify
+
+
+def test_headless_first_use_chain(served_store, tmp_path, monkeypatch):
+    """The full headless first-use path with NOTHING mocked: engines.binary_path
+    -> artifact_store -> served mock store -> engine binary on disk. This is what
+    the serving path hits when a headless install has no bundled engine."""
+    from link.app import engines
+
+    monkeypatch.setattr(store, "platform_arch", lambda: "linux-x64")
+    bp = engines.binary_path("llama-cpp", install_root=tmp_path)
+    assert bp == tmp_path / "engines" / "llama-cpp" / "llama-server"
+    assert bp.is_file()
