@@ -38,6 +38,11 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// HTTP_TIMEOUT surfaced as a sign-in timeout that only cleared on retry.
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// The deploy enqueue POST can wake a scaled-to-zero backend, so a cold start
+/// exceeding HTTP_TIMEOUT surfaced as a false "deploy failed" even though
+/// Control had queued the deploy and the model landed over Zenoh.
+const DEPLOY_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Google-fronted endpoints have been observed to stall on requests without an explicit UA.
 const USER_AGENT: &str = "locai-link-setup-assistant/0.1.0";
 
@@ -797,7 +802,7 @@ pub fn deploy_model(
 ) -> Result<String, String> {
     let token = require_token(&state)?;
 
-    let resp = http_agent()
+    let resp = http_agent_with_timeout(DEPLOY_TIMEOUT)
         .post(&format!(
             "{CONTROL_API_URL}/models/{model_id}/deploy/{device_id}"
         ))

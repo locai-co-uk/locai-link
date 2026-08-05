@@ -39,6 +39,13 @@ sections below the summary. -->
 - Added: before onboarding finishes, the menu-bar menu now offers "Continue
   Setup…" and "Uninstall Locai Link…" so closing the setup window is not a
   dead-end.
+- Fixed: onboarding no longer reports a false "deploy failed" when the deploy
+  request to Control is slow; the timeout now allows for a cold backend, as the
+  deploy is queued and the model still installs.
+- Removed: the source-install deployment path. Field and headless devices use
+  the pre-built `.pkg` / `.tar.gz` releases; source is now developer-only via
+  `uv`. Dropped the one-line installers, the `setup` / `install` CLI
+  subcommands, and the git-based OTA.
 
 ### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
 
@@ -48,6 +55,18 @@ sections below the summary. -->
 - A per-`model_name` download lock now serializes same-file deploys; the waiter
   then hits the existing `target_path.exists()` cache guard and skips the
   re-download. Distinct filenames are unaffected.
+
+### Removed: source-install deployment path (`main.py`, `updater.py`, `constants.py`, root installers)
+
+- Source installs are developer-only now (per the single-supervisor direction),
+  so the deployment machinery for them is gone: the `install.sh` / `install.ps1`
+  / `install.cmd` one-line installers, the `setup` and `install` CLI subcommands,
+  and the git-based OTA (`pull_and_update` and its `get_current_branch` /
+  `get_local_version` / `reinstall_plugin_binaries` helpers). `_apply_update_and_reexec`
+  is now bundle-only; a source install declines OTA and updates via `git pull`.
+- `constants.REPO_URL` / `DEFAULT_BRANCH` dropped; `REPO_SLUG` stays (the frozen
+  OTA resolves release assets from it). Obsolete installer tests removed and the
+  README / docs point at `uv` + the release artifacts.
 
 ### Fixed: tray-menu rebuild is deferred while a window is open (`crates/link/src-tauri/src/tray.rs`)
 
