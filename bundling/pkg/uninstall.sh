@@ -64,6 +64,15 @@ EOF
     exit 1
 fi
 
+# The app-driven uninstall runs this script via `launchctl submit`, a KeepAlive
+# job that re-launches it after it deletes itself. Left registered, it re-fires
+# whenever a later (re)install recreates this script and silently wipes that
+# install. Tear it down on ANY exit (including an early error) so it can never
+# re-fire. It was submitted as root, so it lives in the SYSTEM domain: `bootout
+# system/…` is the reliable teardown (legacy `remove` doesn't always reach it).
+# This script already runs as root; no-op for the direct `sudo uninstall.sh` path.
+trap 'launchctl bootout system/co.locai.link.uninstall 2>/dev/null; launchctl remove co.locai.link.uninstall 2>/dev/null || true' EXIT
+
 # --- 1. Stop + unload LaunchAgents (user domain) ---------------------
 # Per-user; `launchctl bootout gui/$UID/...` targets the console user's aqua
 # session. Best-effort; bootout on a stopped service returns non-zero.
@@ -99,6 +108,15 @@ pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
 # full path skips macOS's own /CoreServices copy.
 pkill -f "$INSTALL_ROOT/Setup Assistant.app/"       2>/dev/null || true
 pkill -f "/Locai Link.app/"                         2>/dev/null || true
+
+# Wait for the app to actually exit before the per-user wipe (section 5). pkill
+# only SIGTERMs; a still-shutting-down webview re-writes WebKit/Caches AFTER our
+# rm otherwise, leaving ~/Library artefacts behind. Bounded so a wedged process
+# can't hang the uninstall.
+for _ in $(seq 1 20); do
+    pgrep -f "/Locai Link.app/" >/dev/null 2>&1 || break
+    sleep 0.25
+done
 
 # --- 3. Unregister the .apps from LaunchServices --------------------
 # After removing a .app, LaunchServices can keep a stale entry pointing at the
@@ -175,4 +193,5 @@ fi
 pkgutil --forget "$PKG_RECEIPT" 2>/dev/null || true
 
 log "Locai Link removed"
+# The EXIT trap (top of script) removes our launchd job so it can't re-fire.
 exit 0

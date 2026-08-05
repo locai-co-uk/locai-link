@@ -47,9 +47,12 @@ def main() -> None:
     if not match:
         raise SystemExit(f"cannot parse version from asset name: {asset}")
     version = match.group(1)
-    sha_name = f"{asset}.sha256"
     tar_bytes = tar.read_bytes()
-    sha_body = f"{hashlib.sha256(tar_bytes).hexdigest()}  {asset}\n".encode()
+    # Release-wide checksums.txt (sha256sum format: "<hex>  <filename>"). This is
+    # the current release format; the per-asset .sha256 sidecar is being retired,
+    # so the local serve exercises the checksums.txt verify path only.
+    checksums_name = "checksums.txt"
+    checksums_body = f"{hashlib.sha256(tar_bytes).hexdigest()}  {asset}\n".encode()
 
     base = f"http://localhost:{args.port}"
     latest_json = json.dumps(
@@ -57,7 +60,7 @@ def main() -> None:
             "tag_name": f"v{version}",
             "assets": [
                 {"name": asset, "browser_download_url": f"{base}/{asset}"},
-                {"name": sha_name, "browser_download_url": f"{base}/{sha_name}"},
+                {"name": checksums_name, "browser_download_url": f"{base}/{checksums_name}"},
             ],
         }
     ).encode()
@@ -65,7 +68,7 @@ def main() -> None:
     routes: dict[str, tuple[bytes, str]] = {
         f"/repos/{args.repo}/releases/latest": (latest_json, "application/json"),
         f"/{asset}": (tar_bytes, "application/gzip"),
-        f"/{sha_name}": (sha_body, "text/plain"),
+        f"/{checksums_name}": (checksums_body, "text/plain"),
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):

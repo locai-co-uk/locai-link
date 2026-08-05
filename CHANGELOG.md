@@ -16,6 +16,10 @@ sections below the summary. -->
   single background service. Headless installs run the supervisor alone; desktop
   installs add the tray and setup in the same process. Fewer moving parts to
   install, supervise, and update; upgrades migrate away the old second service.
+  On macOS, an over-the-air upgrade from an older version drops to the single
+  service immediately and asks once for your password to finish the switch (fix
+  the CLI symlink and refresh the Applications copy); declining just leaves it on
+  the new version and asks again next time.
 - Fixed: selecting two models that are the same file no longer fails one of
   them. Concurrent deploys that target the same download now serialize instead
   of racing, so both succeed.

@@ -104,6 +104,9 @@ pub struct CheckInstallResult {
     /// "already set up" splash instead of the wizard.
     pub device_id: Option<String>,
     pub device_name: Option<String>,
+    /// Version staged under `pending/` by a deferred installer re-run (Linux). When
+    /// newer than `version`, the splash offers "Update" to apply it.
+    pub pending_version: Option<String>,
 }
 
 fn resolve_install_root() -> String {
@@ -137,6 +140,7 @@ pub fn check_install(install_root: String) -> CheckInstallResult {
             reason: Some(format!("Install root does not exist: {install_root}")),
             device_id: None,
             device_name: None,
+            pending_version: None,
         };
     }
 
@@ -151,6 +155,12 @@ pub fn check_install(install_root: String) -> CheckInstallResult {
     };
 
     let (device_id, device_name) = read_registered_identity(&root);
+    // Version staged by a deferred installer re-run (Linux); the splash offers
+    // "Update" when it's newer than the installed version.
+    let pending_version = std::fs::read_to_string(root.join("state").join("pending-version"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     match installed_version(&root) {
         Some(v) => CheckInstallResult {
@@ -162,6 +172,7 @@ pub fn check_install(install_root: String) -> CheckInstallResult {
             reason: None,
             device_id,
             device_name,
+            pending_version,
         },
         None => CheckInstallResult {
             installed: false,
@@ -172,6 +183,7 @@ pub fn check_install(install_root: String) -> CheckInstallResult {
             reason: Some("No `current` pointer found under install root.".to_string()),
             device_id,
             device_name,
+            pending_version,
         },
     }
 }
@@ -1155,6 +1167,47 @@ pub fn open_preferences_window(app: tauri::AppHandle) {
     }
 }
 
+/// Show the setup window and tell it to start the re-register flow. Invoked from
+/// Preferences (Agent section) so a registered device can re-register — the setup
+/// window is where re-register lives (it wipes then re-onboards via the wizard).
+#[tauri::command]
+pub fn open_re_register(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    crate::tray::show_setup_window(&app);
+    let _ = app.emit("start-re-register", ());
+}
+
+/// Apply a staged (deferred) installer payload: copy `pending/` to a temp dir so
+/// install.sh isn't deleting the dir it runs from, then run it detached with
+/// --apply. Linux only (defer is Linux); the splash's "Update" invokes this.
+#[tauri::command]
+pub fn apply_pending_update() -> Result<(), String> {
+    let root = PathBuf::from(resolve_install_root());
+    let pending = root.join("pending");
+    if !pending.join("install.sh").is_file() {
+        return Err("no staged update to apply".to_string());
+    }
+    let tmp = std::env::temp_dir().join("locai-apply");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let ok = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(&pending)
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("stage apply (cp): {e}"))?
+        .success();
+    if !ok {
+        return Err("stage apply: cp failed".to_string());
+    }
+    std::process::Command::new("systemd-run")
+        .args(["--user", "--collect", "--unit", "locai-link-apply", "--", "/bin/bash"])
+        .arg(tmp.join("install.sh"))
+        .arg("--apply")
+        .spawn()
+        .map_err(|e| format!("systemd-run apply: {e}"))?;
+    Ok(())
+}
+
 /// Best-effort device self-deregister before uninstall.
 ///
 /// Reads the device identity from the session and asks Control to delete this
@@ -1220,25 +1273,12 @@ pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
     if !std::path::Path::new(&script).exists() {
         return Err(format!("uninstall.sh not found at {script}"));
     }
-    // Acquire admin auth up-front with a no-op command. If the user dismisses
-    // the dialog, nothing has happened yet — no deregister, no removal — so a
-    // cancel is a true no-op. We report a "cancelled" sentinel the UI treats as
-    // benign (not a failure). macOS caches the granted credential for the
-    // security session, so the uninstaller run below reuses it without a second
-    // prompt.
-    let auth = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            "do shell script \"true\" with administrator privileges",
-        ])
-        .output()
-        .map_err(|e| format!("osascript: {e}"))?;
-    if !auth.status.success() {
-        return Err(uninstall_err(&auth.stderr, "admin authorization failed"));
-    }
-    // Auth granted — now it's safe to deregister (it needs the session api_key
-    // the uninstaller wipes) and run the uninstaller. If the run below somehow
-    // fails, the device is deregistered but still installed (recoverable on retry).
+    // Deregister first: it needs the session api_key the uninstaller wipes, and
+    // it needs no admin. A single admin prompt (the detached run below) gates the
+    // removal — an earlier no-op auth prompt was a SEPARATE osascript, and macOS
+    // doesn't share the granted credential across processes, so it prompted
+    // twice. A dismissed prompt (-128 -> "cancelled") leaves the device
+    // deregistered but installed, recoverable by re-running the uninstall.
     best_effort_deregister();
     // AppleScript's `quoted form of` safely escapes the shell argument; `&`
     // concatenation keeps the path inside AppleScript's own string escaping.
@@ -1250,8 +1290,14 @@ pub fn launch_uninstaller(_install_root: String) -> Result<(), String> {
     // removal, leaving the install behind. This mirrors the Linux path, which
     // detaches via `systemd-run --collect` for the same reason.
     let escaped_path = script.replace('\\', "\\\\").replace('"', "\\\"");
+    // Detach via launchd, NOT `nohup … &`: the osascript admin context has no
+    // controlling tty, so nohup errors "can't detach from console" and the job
+    // dies together with the app it's about to kill (nothing gets removed).
+    // launchctl hands the job to launchd (PID 1) so it outlives the app teardown
+    // — the macOS analogue of the Linux `systemd-run --collect` path. `remove`
+    // first clears any prior job of the same label so a re-run can't collide.
     let apple_script = format!(
-        "do shell script \"nohup /bin/bash \" & quoted form of \"{escaped_path}\" & \" >/tmp/locai-uninstall.log 2>&1 &\" with administrator privileges"
+        "do shell script \"launchctl remove co.locai.link.uninstall 2>/dev/null; launchctl submit -l co.locai.link.uninstall -o /tmp/locai-uninstall.log -e /tmp/locai-uninstall.log -- /bin/bash \" & quoted form of \"{escaped_path}\" with administrator privileges"
     );
     let out = std::process::Command::new("osascript")
         .args(["-e", &apple_script])

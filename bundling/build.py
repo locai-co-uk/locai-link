@@ -156,6 +156,21 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
     return target_dir
 
 
+def _ship_migration_finisher(versioned_dir: Path) -> None:
+    """Ship the macOS migration finisher alongside the runtime so it is version-
+    matched and present at ``<install_root>/current/finish-migration.sh`` after an
+    OTA. The runtime runs it (via an admin prompt) to finish a pre-merge -> merged
+    transition. Small + harmless on platforms that never invoke it."""
+    src = SPEC_DIR / "finish-migration.sh"
+    if not src.is_file():
+        logger.warning(f"migration finisher not found at {src}; skipping")
+        return
+    dst = versioned_dir / "finish-migration.sh"
+    shutil.copy2(src, dst)
+    dst.chmod(0o755)
+    logger.info(f"  shipped migration finisher -> {dst}")
+
+
 def _write_current_pointer(install_root: Path, version: str) -> None:
     """Write the ``current`` pointer the launcher follows on start.
 
@@ -215,6 +230,7 @@ def main() -> None:
     version = _read_root_version()
     logger.info(f"== Version: {version} ==")
     versioned_dir = restructure_to_versioned_layout(bundle_dir, version)
+    _ship_migration_finisher(versioned_dir)
     manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT)
 
     install_root = bundle_dir

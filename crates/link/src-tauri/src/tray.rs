@@ -207,6 +207,8 @@ pub fn run() {
             setup::mark_deployment_pending,
             setup::wait_for_agent_ready,
             setup::re_register,
+            setup::open_re_register,
+            setup::apply_pending_update,
             setup::open_preferences_window,
             setup::finish_setup,
             setup::launch_uninstaller,
@@ -300,9 +302,11 @@ pub fn run() {
             let app_handle = app.handle().clone();
             thread::spawn(move || poll_forever(app_handle, tray, handles));
 
-            // First run (no registered identity) shows the onboarding window;
-            // post-onboarding launches skip straight to the tray.
-            if !device_registered() {
+            // Open the setup window on first run (no identity yet), or when the
+            // installer dropped the manage marker (a re-run on an already-set-up
+            // device -> the setup window lands on the "already set up" splash).
+            let show_manage = consume_show_manage_marker();
+            if !device_registered() || show_manage {
                 show_setup_window(app.handle());
             }
             Ok(())
@@ -317,11 +321,25 @@ fn device_registered() -> bool {
     crate::shared::read_identity(&std::path::PathBuf::from(preferences::install_root())).is_some()
 }
 
+/// One-shot marker the installer drops so a re-run on an installed device opens
+/// the manage/splash window even when a device is already registered (otherwise
+/// a registered start goes straight to the tray). Consumed (deleted) on read.
+fn consume_show_manage_marker() -> bool {
+    let marker = std::path::PathBuf::from(preferences::install_root())
+        .join("state")
+        .join("show-manage-on-start");
+    if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        return true;
+    }
+    false
+}
+
 /// Route a re-launch (single-instance) to the window that matters: the setup
 /// wizard while unregistered, Preferences once onboarding is done.
 /// Show + focus the first-run setup window; macOS flips to Regular so it gets a
 /// Dock icon + focus during onboarding (mirrors the Preferences window).
-fn show_setup_window(app: &AppHandle) {
+pub(crate) fn show_setup_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("setup") else {
         eprintln!("[link] setup window not found");
         return;

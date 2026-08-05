@@ -533,6 +533,14 @@ SPDX-License-Identifier: BUSL-1.1
     });
   }
 
+  async function openReRegister() {
+    try {
+      await invoke("open_re_register");
+    } catch (e) {
+      console.warn("open_re_register:", e);
+    }
+  }
+
   async function restartRuntime() {
     await withPending("runtime", async () => {
       suppressUpdateInfer = true;
@@ -809,6 +817,11 @@ SPDX-License-Identifier: BUSL-1.1
               Start Locai Link
             </button>
           {/if}
+          <!-- Re-register wipes + re-onboards, so it hands off to the setup
+               window's re-register flow rather than acting in place. -->
+          <button class="btn btn--secondary" onclick={openReRegister}>
+            Re-register…
+          </button>
         </div>
         <label class="toggle-row">
           <input

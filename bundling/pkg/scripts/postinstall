@@ -196,7 +196,27 @@ if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
     log "WARN: could not resolve home directory for $CONSOLE_USER; skipping launchd bootstrap"
     exit 0
 fi
+# If this device is already set up, drop the manage marker so the app opens the
+# "already set up" splash on this re-run instead of dropping straight to the tray.
+# (A .pkg always lays its payload, so this is macOS's re-run surface.)
+if compgen -G "${INSTALL_ROOT}/configs/session_*.json" >/dev/null 2>&1; then
+    mkdir -p "${INSTALL_ROOT}/state"
+    : > "${INSTALL_ROOT}/state/show-manage-on-start"
+    chown "${CONSOLE_USER}:staff" "${INSTALL_ROOT}/state/show-manage-on-start" 2>/dev/null || true
+fi
+
 USER_LA="${USER_HOME}/Library/LaunchAgents"
+
+# LEGACY-SA-CLEANUP: pre-merge installs ran the launcher/runtime under a separate
+# agent LaunchAgent; the merged app supervises now. Bootout + remove it so an
+# upgrade-in-place leaves a single LaunchAgent (the macOS twin of dropping the
+# Linux agent unit).
+sudo -u "$CONSOLE_USER" launchctl bootout "gui/${USER_UID}/uk.co.locai.link.agent" 2>/dev/null || true
+rm -f "${USER_LA}/uk.co.locai.link.agent.plist"
+# Drop the pre-merge standalone launcher binary (the merged binary lives in the
+# .app). A payload-only upgrade never overwrites it, so remove it explicitly.
+rm -f "${INSTALL_ROOT}/locai-link"
+
 PLIST_SRC="${INSTALL_ROOT}/LaunchAgents/uk.co.locai.link.companion.plist"
 PLIST_DST="${USER_LA}/uk.co.locai.link.companion.plist"
 SERVICE="gui/${USER_UID}/uk.co.locai.link.companion"

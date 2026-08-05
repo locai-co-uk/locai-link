@@ -784,6 +784,57 @@ def test_ota_sweeps_legacy_setup_assistant_linux(tmp_path, monkeypatch):
     assert not (desktop / "locai-setup-assistant.desktop").exists()
 
 
+def test_stop_legacy_supervisor_macos(tmp_path, monkeypatch):
+    """Silent, no-admin: remove the agent LaunchAgent plist + boot the agent out
+    detached so the device drops to a single runtime right after the OTA."""
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    agent_plist = home / "Library" / "LaunchAgents" / f"{updater._LEGACY_AGENT_LABEL}.plist"
+    agent_plist.write_text("<plist/>")
+    monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
+    monkeypatch.setattr(updater, "_home_for_uid", lambda uid: home)
+    popen_calls: list = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: popen_calls.append((args, kw)))
+
+    updater._stop_legacy_supervisor_macos(tmp_path / "root")
+
+    assert not agent_plist.exists()  # agent unit removed (second supervisor gone)
+    assert popen_calls, "expected a detached launchctl bootout of the agent"
+    args, kw = popen_calls[0]
+    assert args[:2] == ["launchctl", "bootout"] and updater._LEGACY_AGENT_LABEL in args[2]
+    assert kw.get("start_new_session") is True
+
+
+def test_run_admin_finish_macos_prompts_once(tmp_path, monkeypatch):
+    """One admin prompt (osascript) runs the version-matched finisher; gated to at
+    most once per version so a dismissed prompt doesn't nag every boot."""
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    root = tmp_path / "root"
+    (root / "current").mkdir(parents=True)
+    finisher = root / "current" / "finish-migration.sh"
+    finisher.write_text("#!/bin/bash\n")
+    (root / "state").mkdir()
+
+    class _Man:
+        version = "1.3.0"
+
+    monkeypatch.setattr(updater, "read_manifest", lambda r: _Man)
+    calls: list = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: calls.append((args, kw)))
+
+    updater._run_admin_finish_macos(root)
+    updater._run_admin_finish_macos(root)  # gated: no second prompt
+
+    assert len(calls) == 1, "should prompt at most once per version"
+    args, kw = calls[0]
+    assert args[0] == "osascript"
+    assert str(finisher) in args  # the finisher path is passed as an argv item
+    assert "administrator privileges" in args[2]
+    assert kw.get("start_new_session") is True
+    assert (root / "state" / updater._MIGRATION_PROMPTED_MARKER).read_text().strip() == "1.3.0"
+
+
 # --- check_update_available --------------------------------------
 
 

@@ -8,6 +8,7 @@ SPDX-License-Identifier: BUSL-1.1
   import { openUrl } from "@tauri-apps/plugin-opener";
   import locaiLogo from "./lib/locai-logo.png";
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
 
   // Release-channel marker shown by the version in the sidebar foot. From
   // VITE_CHANNEL at build time (defaults to "alpha" so unset builds still get
@@ -43,6 +44,7 @@ SPDX-License-Identifier: BUSL-1.1
     reason: string | null;
     device_id: string | null;
     device_name: string | null;
+    pending_version: string | null;
   };
 
   // Install root, loaded from Rust on mount (macOS → /Library/Locai,
@@ -255,10 +257,21 @@ SPDX-License-Identifier: BUSL-1.1
     }
   }
 
+  let unlistenReRegister: (() => void) | null = null;
+
   onMount(() => {
     void runBootstrapCheck();
+    // Preferences → "Re-register…" opens this window and emits this; jump
+    // straight into the re-register confirmation on the manage splash.
+    void listen("start-re-register", () => {
+      mode = "splash";
+      startReRegister();
+    }).then((un) => {
+      unlistenReRegister = un;
+    });
     return () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
+      unlistenReRegister?.();
     };
   });
 
@@ -563,6 +576,42 @@ SPDX-License-Identifier: BUSL-1.1
     splashAction = { kind: "confirming", action: "re-register" };
   }
 
+  function versionGt(a: string, b: string): boolean {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0;
+      const y = pb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+
+  // A deferred installer re-run staged a newer version under pending/; the splash
+  // offers to apply it. Null when nothing newer is staged.
+  const pendingUpdate = $derived(
+    bootstrap.kind === "ready" &&
+      bootstrap.install.pending_version != null &&
+      bootstrap.install.version != null &&
+      versionGt(bootstrap.install.pending_version, bootstrap.install.version)
+      ? bootstrap.install.pending_version
+      : null,
+  );
+
+  async function applyPending() {
+    splashAction = { kind: "working", message: `Updating to v${pendingUpdate ?? ""}…` };
+    try {
+      // The staged installer applies detached and restarts the app onto the new
+      // version, so there's nothing more to do here on success.
+      await invoke("apply_pending_update");
+    } catch (e) {
+      splashAction = {
+        kind: "error",
+        message: `Update failed: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  }
+
   function startUninstall() {
     splashAction = { kind: "confirming", action: "uninstall" };
   }
@@ -711,11 +760,16 @@ SPDX-License-Identifier: BUSL-1.1
             </div>
           {/if}
           <div class="chooser__actions">
-            <button class="btn btn--primary btn--wide" onclick={openPreferences}>
+            {#if pendingUpdate}
+              <button class="btn btn--primary btn--wide" onclick={applyPending}>
+                Update to v{pendingUpdate}
+              </button>
+            {/if}
+            <button
+              class="btn {pendingUpdate ? 'btn--ghost' : 'btn--primary'} btn--wide"
+              onclick={openPreferences}
+            >
               Preferences
-            </button>
-            <button class="btn btn--ghost btn--wide" onclick={startReRegister}>
-              Re-register…
             </button>
             <button class="btn btn--ghost btn--wide" onclick={startUninstall}>
               Uninstall…

@@ -895,10 +895,10 @@ def _remove_legacy_setup_assistant(install_root: Path) -> None:
     targets it). LEGACY-SA-CLEANUP: remove once no pre-merge install remains."""
     targets: list[Path] = []
     if sys.platform == "darwin":
-        # Only the user-owned install-root copy is removable from the user-context
-        # OTA; the /Applications copy is pkg-managed (root-owned) and clears on the
-        # next pkg reinstall/uninstall.
+        # Both copies are user-owned (the pkg chowns them to the user), so the
+        # user-context runtime can remove them right after the OTA.
         targets.append(install_root / "Setup Assistant.app")
+        targets.append(Path("/Applications/Locai Setup Assistant.app"))
     elif sys.platform.startswith("linux"):
         targets.append(install_root / "setup-assistant")
         targets.append(Path.home() / ".local" / "share" / "applications" / "locai-setup-assistant.desktop")
@@ -1191,6 +1191,11 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
             settle += 1
         if not companion_version or companion_version == runtime_version:
             return
+        if _on_legacy_layout(root):
+            # A pre-merge -> merged migration is under way; heal_legacy_layout runs
+            # its own finish (with an admin prompt), so don't also fire a "reinstall
+            # needed" notice - that would be two competing prompts for one update.
+            return
         marker = root / constants.STATE_SUBDIR / "ui-drift-notified"
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == runtime_version:
             return
@@ -1202,6 +1207,188 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
         marker.write_text(runtime_version, encoding="utf-8")
     except Exception as e:  # noqa: BLE001 - the drift check must never crash the agent
         logger.debug(f"ui drift check skipped: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Self-heal: finish a breaking OTA (pre-merge layout -> merged build)
+# ---------------------------------------------------------------------------
+# The frictionless OTA only swaps versions/<v>, so a device on the pre-merge
+# layout (separate `companion`/`setup-assistant` binaries + a launcher-supervised
+# agent unit) ends up running the new runtime under old scaffolding. The merged
+# build ships one `locai-link` binary + one unit and none of those artefacts, so
+# their presence means the install must finish the transition to the merged
+# layout. One-way: pre-merge -> merged is a hard boundary (no rollback).
+#
+# Linux reinstalls itself per-user (no admin). macOS can't fully self-heal without
+# root (the /usr/local/bin symlink + pkg receipt), so it splits the work: the
+# no-admin part runs silently on every boot - stop the pre-merge agent unit so the
+# device is on a single runtime at once - then it prompts ONCE for admin and runs
+# the version-matched finish-migration.sh for the privileged bits (symlink, receipt,
+# /Applications refresh, launcher removal). The prompt is a normal continuation of
+# the update the user already started; a dismissed prompt just leaves the silent
+# single-runtime state and re-prompts on the next version.
+
+_LEGACY_HEAL_MARKER = "legacy-heal-attempted"
+_LEGACY_HEAL_RETRY_SECONDS = 15 * 60
+# Written with the runtime version once the admin finish has been offered, so a
+# dismissed prompt doesn't nag on every boot (re-prompts when the version changes).
+_MIGRATION_PROMPTED_MARKER = "migration-finish-prompted"
+# Pre-merge launcher-supervised agent LaunchAgent; only the macOS finish refers to
+# it (the merged build ships only the companion unit).
+_LEGACY_AGENT_LABEL = f"{constants.REVERSE_DNS}.agent"
+
+
+def _on_legacy_layout(install_root: Path) -> bool:
+    """True if this install still has the pre-merge layout (separate UI binaries
+    or the launcher's agent unit). False on a native merged install."""
+    if sys.platform.startswith("linux"):
+        if (install_root / "companion").exists() or (install_root / "setup-assistant").exists():
+            return True
+        agent_unit = Path.home() / ".config" / "systemd" / "user" / "locai-link-agent.service"
+        return agent_unit.exists()
+    if sys.platform == "darwin":
+        # Any pre-merge artefact still on disk: the standalone Setup Assistant, the
+        # standalone launcher binary at the install root, or the launcher's agent
+        # LaunchAgent. All are absent on a native merged install.
+        if (install_root / "Setup Assistant.app").exists() or (install_root / "locai-link").exists():
+            return True
+        uid = _macos_console_uid() or _current_uid()
+        agent_plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_LEGACY_AGENT_LABEL}.plist"
+        return agent_plist.exists()
+    return False
+
+
+def _stop_legacy_supervisor_macos(install_root: Path) -> None:
+    """Stop the pre-merge launcher-supervised agent unit (the second supervisor
+    spawning a duplicate runtime) so the device is on a single runtime right after
+    the OTA, with or without the admin finish. User domain, no admin. The bootout
+    is detached (start_new_session) so that if this runtime happens to be the
+    agent's own child, tearing the job down can't kill it before the call lands; the
+    companion-supervised runtime keeps serving either way."""
+    uid = _macos_console_uid() or _current_uid()
+    agent_plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_LEGACY_AGENT_LABEL}.plist"
+    try:
+        _rm(agent_plist)  # so it can't relaunch after a logout
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"stop-supervisor: agent plist removal skipped: {e}")
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["launchctl", "bootout", f"gui/{uid}/{_LEGACY_AGENT_LABEL}"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("stop-supervisor: booted out legacy agent unit (single runtime)")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"stop-supervisor: agent bootout skipped: {e}")
+
+
+def _run_admin_finish_macos(install_root: Path) -> None:
+    """Prompt once for admin and run the version-matched finish-migration.sh to
+    complete the merged layout (drop the launcher, refresh /Applications, fix the
+    /usr/local/bin symlink + pkg receipt). The user already chose to update, so the
+    prompt is a normal continuation. Detached so the blocking prompt doesn't stall
+    the runtime; gated to at most once per version so a dismissed prompt doesn't nag
+    every boot."""
+    finisher = install_root / "current" / "finish-migration.sh"
+    if not finisher.is_file():
+        logger.warning(f"migration finisher missing at {finisher}; skipping admin finish")
+        return
+    version = read_manifest(install_root).version
+    marker = install_root / constants.STATE_SUBDIR / _MIGRATION_PROMPTED_MARKER
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == version:
+        return  # already offered for this version; don't nag
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(version, encoding="utf-8")
+    # Pass the script path as an osascript argv item (not interpolated into the
+    # AppleScript source) so the path can't alter the program; quoted form handles
+    # any shell metacharacters when bash runs it as root.
+    applescript = (
+        "on run argv\n"
+        'do shell script ("/bin/bash " & quoted form of (item 1 of argv)) '
+        "with administrator privileges\n"
+        "end run"
+    )
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["osascript", "-e", applescript, str(finisher)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info(f"prompted for admin to finish migration to {version}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"admin finish prompt failed: {e}")
+
+
+def heal_legacy_layout(install_root: Path | None = None) -> None:
+    """Finish the pre-merge -> merged transition when a frictionless OTA left the
+    new runtime on old scaffolding, so every component (binary, unit, UI) ends up on
+    this version. Frozen installs only. Linux reinstalls per-user (no admin); macOS
+    stops the second supervisor silently, then prompts once for admin to finish the
+    privileged bits. Best-effort; never crashes the agent."""
+    if not running_frozen_bundle():
+        return
+    try:
+        root = install_root or discover_install_root()
+        if not _on_legacy_layout(root):
+            return
+        # Remove the legacy Setup Assistant first (user-owned, no admin).
+        _remove_legacy_setup_assistant(root)
+        if sys.platform == "darwin":
+            _stop_legacy_supervisor_macos(root)  # silent: one runtime immediately
+            _run_admin_finish_macos(root)  # one admin prompt: the privileged bits
+            return
+        if sys.platform.startswith("linux"):
+            # One reinstall at a time: during the hybrid two supervisors each spawn
+            # a runtime and both call this on startup.
+            marker = root / constants.STATE_SUBDIR / _LEGACY_HEAL_MARKER
+            if marker.exists() and (time.time() - marker.stat().st_mtime) < _LEGACY_HEAL_RETRY_SECONDS:
+                return  # a heal is already in flight; don't stack
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(int(time.time())), encoding="utf-8")
+            _self_heal_reinstall_linux(root)
+    except Exception as e:  # noqa: BLE001 - self-heal must never crash the agent
+        logger.warning(f"legacy-layout self-heal skipped: {e}")
+
+
+def _locate_installer_root(extract_dir: Path) -> Path:
+    """Directory holding install.sh inside an extracted release tarball."""
+    for p in extract_dir.rglob("install.sh"):
+        if p.is_file():
+            return p.parent
+    raise BundleUpdateError(f"self-heal: no install.sh in extracted release under {extract_dir}")
+
+
+def _self_heal_reinstall_linux(install_root: Path) -> None:
+    """Download the current release and run its install.sh detached, so the
+    ``systemctl --user disable`` of the agent unit inside install.sh can't kill
+    the reinstall along with this process."""
+    manifest = read_manifest(install_root)
+    release = latest_release_for(manifest.asset_name)
+    logger.info(f"self-heal: reinstalling {release.version} to migrate off the pre-merge layout")
+    staging = staging_path(install_root)
+    archive = download(release.download_url, staging / release.asset_name)
+    if release.checksums_url:
+        verify(archive, expected_sha256=_sha256_from_checksums(release.checksums_url, release.asset_name))
+    else:
+        verify(archive, expected_sha256_url=release.sha256_url)
+    extract_dir = staging / "heal-extract"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    _extract_archive(archive, extract_dir)
+    script = _locate_installer_root(extract_dir) / "install.sh"
+    if not script.is_file():
+        raise BundleUpdateError(f"self-heal: install.sh missing at {script}")
+    # `--collect` reaps the transient unit on exit; running detached is what lets
+    # install.sh disable the agent unit (which supervises us) without self-killing.
+    subprocess.Popen(
+        ["systemd-run", "--user", "--collect", "--unit", "locai-link-heal", "--", "/bin/bash", str(script), "--apply"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    logger.info("self-heal: launched detached reinstall (journalctl --user -u locai-link-heal)")
 
 
 def _harden_swapped_app(dest: Path) -> None:
