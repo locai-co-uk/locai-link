@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+// SPDX-License-Identifier: BUSL-1.1
+
 import { mount } from "svelte";
 import SetupApp from "./SetupApp.svelte";
 import "./lib/tokens/tokens.css";

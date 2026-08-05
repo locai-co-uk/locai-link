@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+SPDX-License-Identifier: BUSL-1.1
+-->
+
 <script lang="ts">
   // Preferences window for the Locai Link app. Tray "Preferences…"
   // un-hides + focuses it; the window's close button hides it (see

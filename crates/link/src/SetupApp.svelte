@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+SPDX-License-Identifier: BUSL-1.1
+-->
+
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { openUrl } from "@tauri-apps/plugin-opener";

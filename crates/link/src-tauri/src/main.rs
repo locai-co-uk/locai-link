@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+// SPDX-License-Identifier: BUSL-1.1
+
 // Prevents an extra console window on Windows in release for the desktop app.
 // The headless supervisor is a service binary and keeps a console.
 #![cfg_attr(

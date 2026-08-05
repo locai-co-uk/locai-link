@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+
 """CLI entry point: dispatches run, stop, reset, self-check, install-plugin subcommands."""
 
 import argparse
@@ -128,7 +131,7 @@ def run(args: argparse.Namespace):
                 sys.exit(1)
 
     # --- PHASE 2: DEPLOYMENT ---
-    if args.prod:
+    if args.headless:
         _deploy_service(cwd)
         return
 
@@ -423,7 +426,11 @@ def main():
     # Lifecycle
     run_p = subparsers.add_parser("run", help="Runs the agent.")
     run_p.add_argument("--config", help="Path to a config file OR a session state file.")
-    run_p.add_argument("--prod", action="store_true", help="Deploy as a background service.")
+    run_p.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run as a background service (no foreground process).",
+    )
     run_p.add_argument("--registration-key", help="One-time key for onboarding.")
     run_p.add_argument("--device-name", help="Device name for onboarding.")
     run_p.add_argument("--device-id", help="Existing device ID for re-activation.")
