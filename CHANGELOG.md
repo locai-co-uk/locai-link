@@ -202,6 +202,12 @@ sections below the summary. -->
   runtime and model controls are locked while the update applies and the app
   restarts, so an update no longer interrupts a mid-action user.
 
+## [1.2.2]
+
+- The companion now shows an "Updating…" state during an app update: the
+  runtime and model controls are locked while the update applies and the app
+  restarts, so an update no longer interrupts a mid-action user.
+
 ### Changed: lock the companion UI during an OTA update (`crates/companion`)
 
 - The agent surfaces an authoritative `update_in_flight` flag through the
