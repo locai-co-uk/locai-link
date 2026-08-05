@@ -530,17 +530,21 @@ fn build_tray_menu(
     })
 }
 
+/// (submenu, model check-items by pipeline id, deploy rows by id) — the item
+/// handles the poll loop updates in place.
+type ModelsSubmenu = (
+    Submenu<Wry>,
+    Vec<(String, CheckMenuItem<Wry>)>,
+    Vec<(String, MenuItem<Wry>)>,
+);
+
 /// Populate the Models submenu: in-flight deployments (disabled text) first,
 /// deployed rows (CheckMenuItems) below. Empty → single disabled placeholder.
 fn build_models_submenu(
     app: &AppHandle,
     models: &[ModelInfo],
     deployments: &[DeploymentProgress],
-) -> tauri::Result<(
-    Submenu<Wry>,
-    Vec<(String, CheckMenuItem<Wry>)>,
-    Vec<(String, MenuItem<Wry>)>,
-)> {
+) -> tauri::Result<ModelsSubmenu> {
     // Native menu items can't right-align trailing text, so the serving summary
     // folds into the parent label.
     let submenu_label = models_serving_label(models);
@@ -956,7 +960,7 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
         // AppKit (it read a half-written icon and panicked in muda, crashing the
         // tray). Decide what changed here, then apply it all in one main-thread hop.
         let icon_bytes: Option<&'static [u8]> =
-            (next_tray != current_tray).then(|| match next_tray {
+            (next_tray != current_tray).then_some(match next_tray {
                 TrayState::Up => TRAY_ICON_UP,
                 TrayState::Down => TRAY_ICON_DOWN,
             });
