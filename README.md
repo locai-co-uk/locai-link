@@ -107,7 +107,7 @@ If your account has no password (e.g. Google sign-up), the CLI seamlessly switch
 On subsequent runs, resume the saved session:
 
 ```
-uv run main.py run            # or --prod to install as a systemd/launchd/Windows service
+uv run main.py run            # or --headless to install as a systemd/launchd/Windows service
 ```
 
 ### CLI reference

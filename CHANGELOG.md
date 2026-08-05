@@ -6,7 +6,7 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
-## [Unreleased]
+## [1.3.0]
 
 - Setup and Preferences are now one desktop app. First-run onboarding opens in a
   window of Locai Link instead of a separate Setup Assistant, so there is a

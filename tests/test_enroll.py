@@ -31,7 +31,7 @@ def _args(**overrides):
         token=None,
         api_url=None,
         fleet_key=None,
-        prod=True,  # short-circuit after _deploy_service so the runtime never starts
+        headless=True,  # short-circuit after _deploy_service so the runtime never starts
     )
     base.update(overrides)
     return argparse.Namespace(**base)
