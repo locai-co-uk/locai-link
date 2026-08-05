@@ -1,10 +1,9 @@
-"""CLI entry point: dispatches setup, run, install, reset, stop subcommands."""
+"""CLI entry point: dispatches run, stop, reset, self-check, install-plugin subcommands."""
 
 import argparse
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import tomllib
 from fnmatch import fnmatch
@@ -17,8 +16,6 @@ from link.app.state import StateManager
 from link.app.updater import (
     BundleUpdateError,
     ReleaseNotFound,
-    pull_and_update,
-    reinstall_plugin_binaries,
     running_frozen_bundle,
     swap_bundle,
 )
@@ -29,125 +26,6 @@ from link.infra.zenoh import get_or_create_zenoh_session
 from link.utils.logger import setup_logging
 
 logger = setup_logging()
-
-
-def setup(args: argparse.Namespace):
-    """Lightweight setup: only installs Python dependencies."""
-    logger.info("Setting up Loc.ai Python Environment")
-    install_targets = []
-    if args.dev:
-        install_targets.append("dev")
-
-    cmd = ["uv", "pip", "install", "-e", "."]
-    if install_targets:
-        cmd[-1] = f".[{','.join(install_targets)}]"
-
-    logger.info(f"Installing: {cmd[-1]}")
-    subprocess.run(cmd, check=True)
-
-
-def install(args: argparse.Namespace):
-    """Web-installer orchestrator: clone the repo, set up the environment,
-    register the device, and start the agent, all in one command.
-    """
-    cwd = Path.cwd()
-
-    # Determine API URL
-    target_api_url = constants.DEFAULT_API_URL
-    if args.api_url:
-        target_api_url = args.api_url
-        logger.info(f"Using provided API URL: {target_api_url}")
-    elif args.dev:
-        print("\n--- Development Configuration ---")
-        try:
-            sys.stdin.flush()
-        except Exception:
-            pass
-        user_input = input("Enter Target API URL: ").strip()
-        if not user_input:
-            logger.critical("API URL is required when using --dev.")
-            sys.exit(1)
-        target_api_url = user_input
-        logger.info(f"Selected Custom URL: {target_api_url}")
-
-    # Git Operations
-    if (cwd / "pyproject.toml").exists():
-        install_dir = cwd
-        logger.info(f"Detected existing repository in {install_dir}")
-        is_fresh_clone = False
-    else:
-        install_dir = cwd / "locai-link"
-        logger.info(f"Target Directory: {install_dir}")
-        is_fresh_clone = True
-
-    if is_fresh_clone:
-        if install_dir.exists():
-            logger.info("Existing installation found — pulling latest changes...")
-            subprocess.run(["git", "-C", str(install_dir), "pull", "--ff-only"], check=True)
-        else:
-            logger.info(f"Cloning repository ({args.branch})...")
-            subprocess.run(
-                ["git", "clone", "--depth", "1", "-b", args.branch, args.repo_url, str(install_dir)],
-                check=True,
-            )
-    else:
-        logger.info("Running from repository — pulling latest changes...")
-        subprocess.run(["git", "pull", "--ff-only"], check=True)
-
-    # Fleet enrollment replaces the interactive registration flow entirely.
-    if not args.fleet_key:
-        # Interactive Inputs (only prompt for missing values)
-        if not args.device_name:
-            args.device_name = input("Enter Device Name: ").strip()
-        if not args.token and not args.email:
-            args.email = input("Enter Email: ").strip()
-        if not args.registration_key:
-            args.registration_key = input("Enter Registration Key: ").strip()
-
-        identity_provided = args.token or args.email
-        if not all([args.device_name, args.registration_key]) or not identity_provided:
-            logger.critical("Device name, registration key, and an identity (--email or --token) are required.")
-            sys.exit(1)
-
-    # Helper to run commands inside the target repo
-    def run_target(cmd_list):
-        full_cmd = ["uv", "run", "main.py"] + cmd_list
-        try:
-            subprocess.run(full_cmd, cwd=install_dir, check=True)
-        except KeyboardInterrupt:
-            sys.exit(0)
-
-    try:
-        # A. Setup
-        logger.info("Setting up environment...")
-        run_target(["setup"])
-
-        # B. Register & Run
-        logger.info("Registering and starting the agent...")
-        if args.fleet_key:
-            reg_args = ["run", "--fleet-key", args.fleet_key, "--api-url", target_api_url]
-        else:
-            reg_args = [
-                "run",
-                "--device-name",
-                args.device_name,
-                "--registration-key",
-                args.registration_key,
-                "--api-url",
-                target_api_url,
-            ]
-            if args.token:
-                reg_args += ["--token", args.token]
-            else:
-                reg_args += ["--email", args.email]
-                # Do NOT pass --password here; onboarding will prompt securely via getpass
-
-        # Directly run without checking any start conditions
-        run_target(reg_args)
-
-    except subprocess.CalledProcessError as e:
-        logger.critical(f"Installation step failed (Exit Code: {e.returncode})")
-        sys.exit(e.returncode)
 
 
 def run(args: argparse.Namespace):
@@ -299,7 +177,7 @@ def run(args: argparse.Namespace):
     #   persisted-but-unapplied AgentConfig after a hot-swap failure.
     # Code update takes priority; if both are set, git pull covers the config too.
     if runtime.update_requested:
-        _apply_update_and_reexec(cwd, agent_config)
+        _apply_update_and_reexec()
     elif runtime.config_restart_requested:
         logger.info("Restarting agent to pick up persisted config...")
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -364,54 +242,36 @@ def self_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
-    """Apply an OTA update via the right path for the install shape.
+def _apply_update_and_reexec():
+    """Apply a bundled OTA: swap_bundle downloads, verifies, health-checks, and
+    atomically flips ``current``, then exits 42 for the launcher to respawn. We
+    never execv here because a frozen ``sys.executable`` points at the old
+    version being replaced. Source installs are developer-only and update via
+    ``git pull``, so OTA is declined there."""
+    if not running_frozen_bundle():
+        logger.info("Source install: OTA disabled (update via git manually); ignoring request.")
+        return
 
-    Source install (cloned repo, ``sys.frozen`` False): git pull + plugin
-    refresh + ``os.execv`` (same PID, FDs, and env, so service managers see a
-    continuously running process).
-
-    Bundled install (PyInstaller artifact): ``swap_bundle`` downloads, verifies,
-    extracts, health-checks, and atomically flips ``current``, then exits 42 for
-    the launcher to respawn from ``current``. We never ``execv`` here because a
-    frozen ``sys.executable`` points at the old version being replaced.
-    """
     logger.info("Applying OTA update...")
-
-    if running_frozen_bundle():
-        try:
-            swap_bundle()
-        except ReleaseNotFound as e:
-            # Version published but its per-platform asset isn't up yet, so this
-            # is not a failure: relaunch current (42) and retry next poll.
-            logger.info(f"Update not ready yet ({e}); relaunching current, will retry.")
-            sys.exit(42)
-        except BundleUpdateError as e:
-            logger.critical(f"Bundle update failed: {e}")
-            sys.exit(1)
-        except Exception as e:
-            # Anything BundleUpdateError doesn't cover (disk-full OSError, a
-            # network stack panic): route through the same graceful exit path so
-            # the launcher doesn't read an uncaught traceback as a rollback trigger.
-            logger.critical(f"Bundle update failed with unexpected error ({type(e).__name__}): {e}")
-            sys.exit(1)
-        # Always exit 42: whether we flipped or were already at latest, the
-        # launcher should respawn from `current`. Returning 0 would tell it to
-        # stay stopped, wrong when the user requested an update check.
-        logger.info("Exiting (code 42) for launcher to respawn from current.")
-        sys.exit(42)
-
     try:
-        pull_and_update(repo_dir)
-        reinstall_plugin_binaries(repo_dir, config)
-    except Exception as e:
-        logger.critical(f"Update failed: {e}")
+        swap_bundle()
+    except ReleaseNotFound as e:
+        # Version published but its per-platform asset isn't up yet: relaunch
+        # current (42) and retry next poll.
+        logger.info(f"Update not ready yet ({e}); relaunching current, will retry.")
+        sys.exit(42)
+    except BundleUpdateError as e:
+        logger.critical(f"Bundle update failed: {e}")
         sys.exit(1)
-
-    logger.info("Restarting agent with updated code...")
-    # execv replaces this process image in place (same PID, FDs, env), so
-    # service managers see a continuously running process.
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        # Route disk-full/network panics through the same graceful exit so the
+        # launcher doesn't read an uncaught traceback as a rollback trigger.
+        logger.critical(f"Bundle update failed with unexpected error ({type(e).__name__}): {e}")
+        sys.exit(1)
+    # Always exit 42: whether we flipped or were already at latest, the launcher
+    # respawns from `current`.
+    logger.info("Exiting (code 42) for launcher to respawn from current.")
+    sys.exit(42)
 
 
 def _deploy_service(cwd: Path):
@@ -560,10 +420,6 @@ def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
 
-    # Setup
-    setup_p = subparsers.add_parser("setup", help="Sets up the environment.")
-    setup_p.add_argument("--dev", action="store_true", help="Install dev dependencies.")
-
     # Lifecycle
     run_p = subparsers.add_parser("run", help="Runs the agent.")
     run_p.add_argument("--config", help="Path to a config file OR a session state file.")
@@ -580,24 +436,6 @@ def main():
         help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
     )
 
-    # Install (one-liner orchestrator)
-    install_p = subparsers.add_parser("install", help="Full installation wizard.")
-    install_p.add_argument("--repo-url", default=constants.REPO_URL)
-    install_p.add_argument("--branch", default=constants.DEFAULT_BRANCH)
-    install_p.add_argument("--device-name", help="Device name for onboarding.")
-    install_p.add_argument("--email", help="Platform email for authentication.")
-    install_p.add_argument("--password", help="Platform password (prompted securely if omitted).")
-    install_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email/password).")
-    install_p.add_argument("--registration-key", help="One-time registration key.")
-    install_p.add_argument(
-        "--fleet-key",
-        help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
-    )
-    install_p.add_argument("--device-type", default="other")
-    install_p.add_argument("--start-running", action="store_true", help="Start the agent after installation.")
-    install_p.add_argument("--api-url", help="Override API URL.")
-    install_p.add_argument("--dev", action="store_true", help="Prompt for custom API URL.")
-
     subparsers.add_parser("stop", help="Stops all running services.")
     subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
 
@@ -611,16 +449,12 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "setup":
-        setup(args)
-    elif args.command == "stop":
+    if args.command == "stop":
         stop()
     elif args.command == "reset":
         reset(args.hard)
     elif args.command == "run":
         run(args)
-    elif args.command == "install":
-        install(args)
     elif args.command == "install-plugin":
         from link.components.registry import ComponentRegistry
 

@@ -6,9 +6,8 @@
 from __future__ import annotations
 
 # --- Repository ------------------------------------------------------------
+# GitHub repo the frozen OTA downloads release assets from (updater DEFAULT_RELEASES_REPO).
 REPO_SLUG = "locai-co-uk/locai-link"
-REPO_URL = f"https://github.com/{REPO_SLUG}.git"
-DEFAULT_BRANCH = "main"
 
 # --- Reverse-DNS identity ---------------------------------------------------
 # Runtime uses only the companion label (the updater relaunches the companion by this

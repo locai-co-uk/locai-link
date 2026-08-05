@@ -1,22 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""OTA update logic covering both install shapes.
+"""Bundled OTA update logic.
 
-Source install (``curl … | bash`` deployments): pulls latest code via git +
-refreshes dependencies and plugin binaries. Entry point: ``pull_and_update``.
+The frozen install (PyInstaller artifact under ``<install_root>/``) downloads a
+release tarball, verifies, extracts, flips the ``current`` pointer, health-checks
+the new runtime, and GCs the old. Entry points in the ``Bundle OTA`` section:
+``discover_install_root``, ``read_manifest``, ``latest_release_for``,
+``download``, ``verify``, ``extract``, ``flip_current``, ``health_check``,
+``gc_old_versions``.
 
-Bundled install (PyInstaller artifact deployed to ``<install_root>/``):
-downloads a release tarball, verifies, extracts, flips the ``current``
-pointer, health-checks the new runtime, GCs the old. Entry points: the
-``Bundle OTA`` section below — ``discover_install_root``, ``read_manifest``,
-``latest_release_for``, ``download``, ``verify``, ``extract``,
-``flip_current``, ``health_check``, ``gc_old_versions``.
-
-The runtime signals an update request by setting
-``AgentRuntime.update_requested = True`` and shutting down. ``main.run`` then
-invokes ``_apply_update_and_reexec`` which routes to one of the two paths
-above based on ``sys.frozen`` (dispatch wiring not yet in this commit).
+The runtime signals an update by setting ``AgentRuntime.update_requested = True``
+and shutting down; ``main.run`` then calls ``_apply_update_and_reexec`` which runs
+``swap_bundle``. Source installs are developer-only and update via ``git pull``.
 
 Bundled-install layout this module operates on::
 
@@ -48,7 +44,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
@@ -57,7 +52,6 @@ import requests
 from packaging.version import Version
 
 from link import constants
-from link.config.models import AgentConfig
 from link.utils import archive as archive_util
 
 logger = logging.getLogger(__name__)
@@ -68,184 +62,6 @@ class _HttpGetter(Protocol):
     module itself, or a test stub, all called with the same keyword args."""
 
     def get(self, url: str, **kwargs: Any) -> Any: ...
-
-
-# ===========================================================================
-# Source-install OTA: git-based, used when running from a cloned repo.
-# ===========================================================================
-
-DEFAULT_BRANCH = constants.DEFAULT_BRANCH
-
-
-def _command_exists(name: str) -> bool:
-    return shutil.which(name) is not None
-
-
-def get_current_branch(repo_dir: Path) -> str | None:
-    """Current git branch name, or None if it cannot be determined."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    )
-    branch = result.stdout.strip()
-    return branch if result.returncode == 0 and branch and branch != "HEAD" else None
-
-
-def get_local_version(repo_dir: Path) -> str | None:
-    """Version string from pyproject.toml, or None if not found."""
-    toml_path = repo_dir / "pyproject.toml"
-    if not toml_path.exists():
-        return None
-    try:
-        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    project = data.get("project")
-    version = project.get("version") if isinstance(project, dict) else None
-    return version if isinstance(version, str) else None
-
-
-def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
-    """Pull the latest code from the remote, stashing any local changes.
-
-    ``branch`` is overridden if the checkout is on a dev branch. Returns True if
-    the codebase was updated, False if already up to date. Raises RuntimeError if
-    git is unavailable or the pull fails irrecoverably.
-    """
-    if not _command_exists("git"):
-        raise RuntimeError("git is required for updates but was not found.")
-
-    # Use the actual current branch rather than the default, so running
-    # update on a dev branch doesn't pull main into it.
-    current_branch = get_current_branch(repo_dir)
-    if current_branch and current_branch != branch:
-        logger.info(f"Detected branch '{current_branch}' — updating from origin/{current_branch}.")
-        branch = current_branch
-
-    # Fetch without merging so we can compare first
-    subprocess.run(["git", "fetch", "origin", branch], cwd=repo_dir, check=True)
-
-    # Count commits the local branch is behind the remote
-    result = subprocess.run(
-        ["git", "rev-list", "--count", f"HEAD..origin/{branch}"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    )
-    behind = int(result.stdout.strip() or "0")
-
-    if behind == 0:
-        local_ver = get_local_version(repo_dir)
-        logger.info(f"Already up to date{f' (v{local_ver})' if local_ver else ''}.")
-        return False
-
-    logger.info(f"Update available: {behind} new commit(s) on {branch}.")
-
-    # Check for local modifications that would block the pull
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    stashed = False
-    if dirty:
-        logger.info("Local modifications detected — stashing before update...")
-        stash_result = subprocess.run(
-            ["git", "stash", "push", "--include-untracked", "-m", "locai-auto-stash"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-        )
-        if stash_result.returncode != 0:
-            raise RuntimeError("Could not stash local changes. Aborting update to avoid data loss.")
-        stashed = True
-
-    # Pull
-    subprocess.run(["git", "pull", "origin", branch], cwd=repo_dir, check=True)
-
-    # Restore stash if we created one
-    if stashed:
-        pop_result = subprocess.run(
-            ["git", "stash", "pop"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-        )
-        if pop_result.returncode != 0:
-            logger.warning("Update succeeded but stash could not be re-applied cleanly.")
-            logger.warning("Your changes are saved in git stash — run 'git stash show' to review.")
-        else:
-            logger.info("Local changes re-applied successfully.")
-
-    # Re-install dependencies in case pyproject.toml changed
-    logger.info("Updating dependencies...")
-    subprocess.run(["uv", "pip", "install", "-e", "."], cwd=repo_dir, check=True)
-
-    new_ver = get_local_version(repo_dir)
-    logger.info(f"Update complete{f' — now at v{new_ver}' if new_ver else ''}.")
-    return True
-
-
-def reinstall_plugin_binaries(repo_dir: Path, config: AgentConfig) -> None:
-    """Re-run install.py only for plugins referenced by the active config.
-
-    Each plugin declares its component type(s) via `[project.entry-points."locai.plugins"]`
-    in its `pyproject.toml`; a plugin is installed only if one of those
-    entry-point names appears as `source.type` or `sink.type` in the config's
-    pipelines. Built-in component types have no plugin dir and are skipped.
-    Plugins use tag-based caching, so re-runs are cheap when versions are unchanged.
-    """
-    plugins_dir = repo_dir / "plugins"
-    if not plugins_dir.exists():
-        logger.debug("No plugins/ directory — skipping binary refresh.")
-        return
-
-    referenced = _referenced_component_types(config)
-
-    for plugin_dir in sorted(plugins_dir.iterdir()):
-        install_script = plugin_dir / "install.py"
-        if not install_script.is_file():
-            continue
-
-        declared = _plugin_entry_point_names(plugin_dir)
-        if not declared & referenced:
-            logger.debug(f"Skipping plugin '{plugin_dir.name}' — not used by active config.")
-            continue
-
-        logger.info(f"Refreshing binaries for plugin '{plugin_dir.name}'...")
-        try:
-            subprocess.run(["uv", "run", "python", str(install_script)], cwd=repo_dir, check=True)
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Plugin '{plugin_dir.name}' install failed (exit {e.returncode}) — continuing.")
-
-
-def _referenced_component_types(config: AgentConfig) -> set[str]:
-    """Collects all source/sink component types referenced by the config's pipelines."""
-    types: set[str] = set()
-    for pipeline in config.pipelines:
-        if pipeline.source and pipeline.source.type:
-            types.add(pipeline.source.type)
-        if pipeline.sink and pipeline.sink.type:
-            types.add(pipeline.sink.type)
-    return types
-
-
-def _plugin_entry_point_names(plugin_dir: Path) -> set[str]:
-    """Reads the 'locai.plugins' entry-point names from a plugin's pyproject.toml."""
-    pyproject = plugin_dir / "pyproject.toml"
-    if not pyproject.is_file():
-        return set()
-    try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning(f"Could not parse {pyproject}: {e}")
-        return set()
-    entries = data.get("project", {}).get("entry-points", {}).get("locai.plugins", {})
-    return set(entries.keys())
 
 
 # ===========================================================================

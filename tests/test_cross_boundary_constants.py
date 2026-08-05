@@ -25,12 +25,6 @@ CRATES = REPO_ROOT / "crates"
 LAUNCH_AGENTS = REPO_ROOT / "bundling" / "pkg" / "LaunchAgents"
 
 
-def test_repo_url_derives_from_repo_slug():
-    """REPO_URL must be the clone URL for REPO_SLUG -- one fact now, both consumed
-    from constants by main.py (clone) and updater.py (release discovery)."""
-    assert constants.REPO_URL == f"https://github.com/{constants.REPO_SLUG}.git"
-
-
 def test_agent_loopback_port_matches_rust_health_url():
     """Python serves health on HEALTH_PORT; the Rust companion polls a hardcoded
     loopback URL. If the ports drift, the tray can never see the agent."""
