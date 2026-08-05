@@ -6,65 +6,30 @@ import pytest
 from link.infra.utils import get_platform_arch
 
 
-def test_windows(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-    monkeypatch.setattr("platform.machine", lambda: "AMD64")
-
-    assert get_platform_arch() == "x86_64-pc-windows-msvc"
-
-
-def test_mac_intel(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Darwin")
-    monkeypatch.setattr("platform.machine", lambda: "x86_64")
-
-    assert get_platform_arch() == "x86_64-apple-darwin"
-
-
-def test_mac_silicon(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Darwin")
-    monkeypatch.setattr("platform.machine", lambda: "arm64")
-
-    assert get_platform_arch() == "aarch64-apple-darwin"
-
-
-def test_ubuntu_debian_standard(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Linux")
-    monkeypatch.setattr("platform.machine", lambda: "x86_64")
-    monkeypatch.setattr("platform.libc_ver", lambda: ("glibc", "2.35"))
-    monkeypatch.setattr("platform.release", lambda: "5.15.0-generic")
-
-    assert get_platform_arch() == "x86_64-unknown-linux-gnu"
+@pytest.mark.parametrize(
+    "system,machine,libc,release,expected",
+    [
+        ("Windows", "AMD64", None, None, "x86_64-pc-windows-msvc"),
+        ("Darwin", "x86_64", None, None, "x86_64-apple-darwin"),
+        ("Darwin", "arm64", None, None, "aarch64-apple-darwin"),
+        ("Linux", "x86_64", ("glibc", "2.35"), "5.15.0-generic", "x86_64-unknown-linux-gnu"),
+        ("Linux", "aarch64", ("glibc", "2.31"), "5.10.0-v8+", "aarch64-unknown-linux-gnu"),
+        ("Linux", "x86_64", ("", ""), "5.4.0-alpine", "x86_64-unknown-linux-musl"),
+    ],
+)
+def test_get_platform_arch_supported(monkeypatch, system, machine, libc, release, expected):
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("platform.machine", lambda: machine)
+    if libc is not None:
+        monkeypatch.setattr("platform.libc_ver", lambda: libc)
+    if release is not None:
+        monkeypatch.setattr("platform.release", lambda: release)
+    assert get_platform_arch() == expected
 
 
-def test_linux_aarch64_gnu(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Linux")
-    monkeypatch.setattr("platform.machine", lambda: "aarch64")
-    monkeypatch.setattr("platform.libc_ver", lambda: ("glibc", "2.31"))
-    monkeypatch.setattr("platform.release", lambda: "5.10.0-v8+")
-
-    assert get_platform_arch() == "aarch64-unknown-linux-gnu"
-
-
-def test_linux_alpine_musl(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Linux")
-    monkeypatch.setattr("platform.machine", lambda: "x86_64")
-    monkeypatch.setattr("platform.libc_ver", lambda: ("", ""))
-    monkeypatch.setattr("platform.release", lambda: "5.4.0-alpine")
-
-    assert get_platform_arch() == "x86_64-unknown-linux-musl"
-
-
-def test_unsupported_arch(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Linux")
-    monkeypatch.setattr("platform.machine", lambda: "mips64")
-
-    with pytest.raises(RuntimeError):
-        get_platform_arch()
-
-
-def test_unsupported_os(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "JavaOS")
-    monkeypatch.setattr("platform.machine", lambda: "x86_64")
-
+@pytest.mark.parametrize("system,machine", [("Linux", "mips64"), ("JavaOS", "x86_64")])
+def test_get_platform_arch_unsupported_raises(monkeypatch, system, machine):
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("platform.machine", lambda: machine)
     with pytest.raises(RuntimeError):
         get_platform_arch()

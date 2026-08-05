@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import pytest
+
 from link.config.templating import resolve_templates
 
 CTX = {
@@ -12,34 +14,30 @@ CTX = {
 # --- Scalar substitution ---
 
 
-def test_resolve_single_placeholder():
-    assert resolve_templates("${identity.device_id}", CTX) == "dev_abc"
+@pytest.mark.parametrize(
+    "template,expected",
+    [
+        ("${identity.device_id}", "dev_abc"),
+        ("prefix/${identity.device_id}/suffix", "prefix/dev_abc/suffix"),
+        ("${identity.device_id}@${identity.api_url}", "dev_abc@https://api.test"),
+        ("${api_url}", "https://api.test"),
+    ],
+)
+def test_scalar_substitution(template, expected):
+    assert resolve_templates(template, CTX) == expected
 
 
-def test_resolve_placeholder_embedded_in_string():
-    assert resolve_templates("prefix/${identity.device_id}/suffix", CTX) == "prefix/dev_abc/suffix"
-
-
-def test_resolve_multiple_placeholders_in_one_string():
-    result = resolve_templates("${identity.device_id}@${identity.api_url}", CTX)
-    assert result == "dev_abc@https://api.test"
-
-
-def test_unknown_placeholder_left_intact():
-    assert resolve_templates("${missing.key}", CTX) == "${missing.key}"
-
-
-def test_unknown_nested_path_left_intact():
-    assert resolve_templates("${identity.nope}", CTX) == "${identity.nope}"
-
-
-def test_runtime_placeholders_not_touched():
-    """Non-dollar placeholders like {cid} pass through unchanged."""
-    assert resolve_templates("/commands/{cid}/status", CTX) == "/commands/{cid}/status"
-
-
-def test_top_level_key_lookup():
-    assert resolve_templates("${api_url}", CTX) == "https://api.test"
+@pytest.mark.parametrize(
+    "template,ctx",
+    [
+        ("${missing.key}", CTX),  # unknown top-level key
+        ("${identity.nope}", CTX),  # unknown nested path
+        ("/commands/{cid}/status", CTX),  # non-dollar runtime placeholder
+        ("${identity.device_id}", {}),  # empty context
+    ],
+)
+def test_placeholder_left_intact(template, ctx):
+    assert resolve_templates(template, ctx) == template
 
 
 # --- Structure traversal ---
@@ -83,7 +81,3 @@ def test_resolve_mixed_structure():
 def test_non_string_values_unchanged():
     obj = {"interval": 30, "active": True, "handlers": []}
     assert resolve_templates(obj, CTX) == obj
-
-
-def test_empty_context():
-    assert resolve_templates("${identity.device_id}", {}) == "${identity.device_id}"

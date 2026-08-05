@@ -285,15 +285,14 @@ def test_sha256_from_checksums_matches_asset_line():
     assert got == "ab" * 32
 
 
-def test_sha256_from_checksums_missing_entry_raises():
-    body = f"{'ab' * 32}  something-else.tar.gz\n".encode()
-    session = _StubSession({"https://example/checksums.txt": (200, body)})
-    with pytest.raises(updater.VerifyFailed):
-        updater._sha256_from_checksums("https://example/checksums.txt", "wanted.tar.gz", session=session)
-
-
-def test_sha256_from_checksums_rejects_bad_hex():
-    body = b"nothex  wanted.tar.gz\n"
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"{'ab' * 32}  something-else.tar.gz\n".encode(),  # wanted asset not listed
+        b"nothex  wanted.tar.gz\n",  # entry present but hash isn't valid hex
+    ],
+)
+def test_sha256_from_checksums_rejects(body):
     session = _StubSession({"https://example/checksums.txt": (200, body)})
     with pytest.raises(updater.VerifyFailed):
         updater._sha256_from_checksums("https://example/checksums.txt", "wanted.tar.gz", session=session)
@@ -565,18 +564,18 @@ def test_gc_keeps_extra_when_keep_higher(tmp_path):
     reason="Fixture uses a #!/usr/bin/env bash shebang script which Windows can't exec. "
     "Windows OTA validation exercises health_check with a real locai-link.exe in CI.",
 )
-def test_health_check_passes_on_exit_zero(tmp_path):
+@pytest.mark.parametrize(
+    "script_body,expected",
+    [
+        ("#!/usr/bin/env bash\nexit 0\n", True),
+        ('#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n', False),
+    ],
+)
+def test_health_check_reflects_exit_code(tmp_path, script_body, expected):
     script = tmp_path / "fake_runtime"
-    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    script.write_text(script_body)
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    assert updater.health_check(script, timeout=5.0) is True
-
-
-def test_health_check_fails_on_exit_nonzero(tmp_path):
-    script = tmp_path / "fake_runtime"
-    script.write_text('#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    assert updater.health_check(script, timeout=5.0) is False
+    assert updater.health_check(script, timeout=5.0) is expected
 
 
 def test_health_check_fails_on_missing_binary(tmp_path):
@@ -627,17 +626,11 @@ def test_swap_bundle_short_circuits_when_already_at_latest(tmp_path, mocker):
     flip_spy.assert_not_called()
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="fake_extract lays down a bash-script runtime the Windows loader can't exec; "
-    "health_check fails for the wrong reason. Windows OTA is validated separately.",
-)
-def test_swap_bundle_happy_path(tmp_path, mocker):
-    """End-to-end mock: newer release available -> chain runs, current flipped."""
-    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
-    new_version = "1.0.16"
+def _prime_swap(mocker, new_version, *, exit_code):
+    """Mock the swap_bundle chain (release/download/verify/extract) so only the
+    on-disk flip + health-check run for real. The extracted runtime stub exits
+    with ``exit_code`` (0 = healthy; nonzero triggers rollback)."""
     asset_name = f"locai-link-llm-linux-x86_64-v{new_version}.tar.gz"
-
     mocker.patch.object(
         updater,
         "latest_release_for",
@@ -650,8 +643,6 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
         ),
     )
 
-    # Stub download + verify so we don't need a network. extract gets a real
-    # tarball so the on-disk flip / health-check exercise real code paths.
     def fake_download(url, dest, **kw):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"placeholder")
@@ -659,35 +650,43 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
 
     mocker.patch.object(updater, "download", side_effect=fake_download)
     mocker.patch.object(updater, "verify")
-    # verify_extracted_macos shells out to `codesign` on macOS runners;
-    # the fake bash-script runtime we lay down isn't signed, so mock it.
+    # verify_extracted_macos shells out to codesign; the fake bash runtime isn't signed.
     mocker.patch.object(updater, "verify_extracted_macos")
 
     def fake_extract_archive(archive, staging):
-        # Lay down a versioned payload (manifest + runnable runtime stub) in the
-        # extract staging; _locate_versioned_payload finds it by the runtime.
         payload = staging / "payload"
         payload.mkdir(parents=True, exist_ok=True)
         (payload / updater.MANIFEST_NAME).write_text(
             f'{{"manifest_version": 1, "asset_name": "locai-link-llm-linux-x86_64", "version": "{new_version}"}}'
         )
         runtime = payload / updater.RUNTIME_BINARY
-        runtime.write_text("#!/usr/bin/env bash\nexit 0\n")
+        runtime.write_text(f"#!/usr/bin/env bash\nexit {exit_code}\n")
         runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     mocker.patch.object(updater, "_extract_archive", side_effect=fake_extract_archive)
 
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fake_extract lays down a bash-script runtime the Windows loader can't exec; "
+    "health_check fails for the wrong reason. Windows OTA is validated separately.",
+)
+def test_swap_bundle_happy_path(tmp_path, mocker):
+    """End-to-end mock: newer release available -> chain runs, current flipped."""
+    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
+    _prime_swap(mocker, "1.0.16", exit_code=0)
+
     assert updater.swap_bundle(install_root=root) is True
-    assert (root / updater.CURRENT_LINK).resolve().name == new_version
+    assert (root / updater.CURRENT_LINK).resolve().name == "1.0.16"
     assert (root / updater.PREVIOUS_LINK).resolve().name == "1.0.15"
 
     # Phase 4: the launcher's post-update health window is gated on this stamp.
     stamp = root / updater.UPDATE_PENDING_STAMP
     assert stamp.is_file(), "swap_bundle must write .update-pending after flip"
-    lines = stamp.read_text(encoding="utf-8").splitlines()
-    assert len(lines) >= 2
-    assert int(lines[0]) > 0, "stamp first line must be a unix timestamp"
-    assert lines[1] == "1.0.15", "stamp second line must record the previous version"
+    stamp_lines = stamp.read_text(encoding="utf-8").splitlines()
+    assert len(stamp_lines) >= 2
+    assert int(stamp_lines[0]) > 0, "stamp first line must be a unix timestamp"
+    assert stamp_lines[1] == "1.0.15", "stamp second line must record the previous version"
 
 
 @pytest.mark.skipif(
@@ -699,44 +698,14 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
 def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     """A failing self-check should remove the staged version and raise."""
     root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
-    new_version = "1.0.16"
-    asset_name = f"locai-link-llm-linux-x86_64-v{new_version}.tar.gz"
-
-    mocker.patch.object(
-        updater,
-        "latest_release_for",
-        return_value=ReleaseInfo(
-            version=new_version,
-            tag=f"v{new_version}",
-            asset_name=asset_name,
-            download_url="https://example/" + asset_name,
-            sha256_url="https://example/" + asset_name + ".sha256",
-        ),
-    )
-    mocker.patch.object(updater, "download", side_effect=lambda url, dest, **_: dest)
-    mocker.patch.object(updater, "verify")
-    # Same as the happy-path test: codesign would reject the fake runtime.
-    mocker.patch.object(updater, "verify_extracted_macos")
-
-    def fake_extract_archive(archive, staging):
-        # A runtime that exits nonzero so health_check fails.
-        payload = staging / "payload"
-        payload.mkdir(parents=True, exist_ok=True)
-        (payload / updater.MANIFEST_NAME).write_text(
-            f'{{"manifest_version": 1, "asset_name": "locai-link-llm-linux-x86_64", "version": "{new_version}"}}'
-        )
-        runtime = payload / updater.RUNTIME_BINARY
-        runtime.write_text("#!/usr/bin/env bash\nexit 17\n")
-        runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    mocker.patch.object(updater, "_extract_archive", side_effect=fake_extract_archive)
+    _prime_swap(mocker, "1.0.16", exit_code=17)
     flip_spy = mocker.patch.object(updater, "flip_current")
 
     with pytest.raises(updater.HealthCheckFailed):
         updater.swap_bundle(install_root=root)
 
     # The staged version dir should be cleaned up on failure.
-    assert not (root / updater.VERSIONS_DIR / new_version).exists()
+    assert not (root / updater.VERSIONS_DIR / "1.0.16").exists()
     # And no flip should have happened.
     flip_spy.assert_not_called()
     assert (root / updater.CURRENT_LINK).resolve().name == "1.0.15"

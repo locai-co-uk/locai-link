@@ -556,26 +556,22 @@ def _resp_with_retry_after(value):
     return types.SimpleNamespace(headers=headers)
 
 
-def test_retry_after_absent_or_no_headers_returns_none():
-    assert _retry_after_seconds(_resp_with_retry_after(None)) is None
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, None),  # Retry-After absent (empty headers)
+        ("7", 7.0),
+        ("soon", None),  # unparseable
+        ("-5", None),  # negative
+        (str(_RETRY_AFTER_HONOR_CAP_SECONDS + 1000), _RETRY_AFTER_HONOR_CAP_SECONDS),  # clamped to cap
+    ],
+)
+def test_retry_after_seconds(value, expected):
+    assert _retry_after_seconds(_resp_with_retry_after(value)) == expected
+
+
+def test_retry_after_none_headers_returns_none():
     assert _retry_after_seconds(types.SimpleNamespace(headers=None)) is None
-
-
-def test_retry_after_parses_numeric_seconds():
-    assert _retry_after_seconds(_resp_with_retry_after("7")) == 7.0
-
-
-def test_retry_after_unparseable_returns_none():
-    assert _retry_after_seconds(_resp_with_retry_after("soon")) is None
-
-
-def test_retry_after_negative_returns_none():
-    assert _retry_after_seconds(_resp_with_retry_after("-5")) is None
-
-
-def test_retry_after_clamped_to_honor_cap():
-    over_cap = str(_RETRY_AFTER_HONOR_CAP_SECONDS + 1000)
-    assert _retry_after_seconds(_resp_with_retry_after(over_cap)) == _RETRY_AFTER_HONOR_CAP_SECONDS
 
 
 # --- Browser-handoff helpers ---
