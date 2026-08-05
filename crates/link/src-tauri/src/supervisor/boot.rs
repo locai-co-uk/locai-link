@@ -9,33 +9,12 @@
 use std::fs;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+// One BootConfig schema for the whole crate; the bootstrap `asset_basename`
+// behaviour is an inherent impl on the shared type below. Re-exported so the
+// existing `boot::BootConfig` path (used by bootstrap.rs) keeps working.
+pub use crate::shared::BootConfig;
 
 const BOOT_JSON: &str = "boot.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootConfig {
-    // host_app and channel are documented schema fields, unused at runtime today
-    // but written by installers so telemetry/staged-rollout routing can use them
-    // later without a schema migration.
-    #[allow(dead_code)]
-    pub host_app: String,
-    #[serde(default)]
-    pub plugin_set: Vec<String>,
-    #[allow(dead_code)]
-    #[serde(default = "default_channel")]
-    pub channel: String,
-    pub asset_repo: String,
-    /// Optional direct download URL. When present, skips the GitHub Releases
-    /// API entirely (air-gapped mirrors, CI stubs). The sibling `<url>.sha256`
-    /// is still consulted for verify.
-    #[serde(default)]
-    pub asset_url: Option<String>,
-}
-
-fn default_channel() -> String {
-    "stable".to_string()
-}
 
 /// Canonical order of plugin codes in the asset name; the tarball is named in
 /// this order. MUST mirror `PLUGIN_ORDER` in `bundling/manifest.py`.
@@ -199,33 +178,6 @@ mod tests {
             b.asset_basename().starts_with("locai-link-base-"),
             "got: {}",
             b.asset_basename()
-        );
-    }
-
-    // Guards the two duplicated BootConfig copies against drift. Identical field
-    // values must serialize identically: a field added to only one side fails to
-    // compile here (the struct literals are exhaustive), and a serde-attr change
-    // fails the JSON comparison. Mirror: shared/src/install.rs::BootConfig.
-    #[test]
-    fn boot_config_schema_matches_shared() {
-        let launcher = BootConfig {
-            host_app: "SafeChat".into(),
-            plugin_set: vec!["llm".into(), "stt".into()],
-            channel: "beta".into(),
-            asset_repo: "locai-co-uk/locai-link".into(),
-            asset_url: Some("https://example.test/release.tar.gz".into()),
-        };
-        let shared = crate::shared::install::BootConfig {
-            host_app: "SafeChat".into(),
-            plugin_set: vec!["llm".into(), "stt".into()],
-            channel: "beta".into(),
-            asset_repo: "locai-co-uk/locai-link".into(),
-            asset_url: Some("https://example.test/release.tar.gz".into()),
-        };
-        assert_eq!(
-            serde_json::to_value(&launcher).unwrap(),
-            serde_json::to_value(&shared).unwrap(),
-            "launcher and shared BootConfig serialize differently — schemas drifted",
         );
     }
 }

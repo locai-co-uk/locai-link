@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Schema of `boot.json`. Field optionality must match
-/// `crate::supervisor::boot::BootConfig` exactly.
+/// Schema of `boot.json`. `host_app`/`channel` are schema-only (written by
+/// installers for later telemetry/rollout routing); the supervisor's
+/// `asset_basename` (supervisor/boot.rs) reads `plugin_set`/`asset_repo`/`asset_url`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     pub host_app: String,
