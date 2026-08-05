@@ -82,12 +82,10 @@ PREVIOUS_LINK = "previous"
 CURRENT_POINTER_FILE = "CURRENT"
 PREVIOUS_POINTER_FILE = "PREVIOUS"
 MANIFEST_NAME = "manifest.json"
-BOOT_NAME = "boot.json"
 RUNTIME_BINARY = "locai-link-runtime.exe" if sys.platform == "win32" else "locai-link-runtime"
 UPDATE_PENDING_STAMP = ".update-pending"
 
 DEFAULT_RELEASES_REPO = constants.REPO_SLUG
-DEFAULT_CHANNEL = "stable"
 
 # Download tuning. Generous: this runs once per OTA, not in a hot path.
 _CHUNK_SIZE = 1024 * 1024  # 1 MiB
@@ -562,10 +560,6 @@ def _locate_versioned_payload(staging: Path) -> Path:
 def _resolve_current(root: Path) -> Path | None:
     """Return the absolute path of ``versions/<v>/`` for the live version."""
     return _resolve_pointer(root, CURRENT_LINK, CURRENT_POINTER_FILE)
-
-
-# def _resolve_previous(root: Path) -> Path | None:
-#     return _resolve_pointer(root, PREVIOUS_LINK, PREVIOUS_POINTER_FILE)
 
 
 def _resolve_pointer(root: Path, link_name: str, file_name: str) -> Path | None:

@@ -109,4 +109,3 @@ class ZenohListener(Source):
         """Stop the subscriber and undeclare the subscription."""
         if self._subscriber:
             self._subscriber.undeclare()
-            # self._subscriber = None

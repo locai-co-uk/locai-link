@@ -300,115 +300,118 @@ mod tests {
         );
     }
 
+    // The /models/<id>/<action> POST helpers share one shape; drive them from a
+    // table (Rust has no parametrize) rather than repeating per helper.
     #[test]
-    fn toggle_serving_hits_serve_path_and_reports_ok() {
-        let (port, handle, captured) =
-            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        let res = toggle_serving(
-            &format!("http://127.0.0.1:{port}/models"),
-            "llm_server",
-            ServingAction::Start,
-        );
-        handle.join().unwrap();
-        assert!(res.is_ok(), "got {res:?}");
-        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-        assert!(
-            request_line.starts_with("POST /models/llm_server/serve HTTP/1.1"),
-            "got: {request_line:?}"
-        );
+    fn model_action_helpers_hit_their_path_and_report_ok() {
+        type Invoke = fn(&str) -> Result<(), String>;
+        let cases: &[(&str, Invoke, &str)] = &[
+            (
+                "serve",
+                |b| toggle_serving(b, "llm_server", ServingAction::Start),
+                "serve",
+            ),
+            (
+                "stop",
+                |b| toggle_serving(b, "llm_server", ServingAction::Stop),
+                "stop-serving",
+            ),
+            (
+                "cancel",
+                |b| cancel_deployment(b, "llm_server"),
+                "cancel-deploy",
+            ),
+            (
+                "uninstall",
+                |b| uninstall_model(b, "llm_server"),
+                "uninstall",
+            ),
+        ];
+        for (label, invoke, suffix) in cases {
+            let (port, handle, captured) =
+                serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+            let res = invoke(&format!("http://127.0.0.1:{port}/models"));
+            handle.join().unwrap();
+            assert!(res.is_ok(), "{label}: got {res:?}");
+            let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+            assert!(
+                request_line.starts_with(&format!("POST /models/llm_server/{suffix} HTTP/1.1")),
+                "{label}: got {request_line:?}"
+            );
+        }
     }
 
     #[test]
-    fn toggle_serving_hits_stop_serving_path() {
-        let (port, handle, captured) =
-            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        let res = toggle_serving(
-            &format!("http://127.0.0.1:{port}/models"),
-            "llm_server",
-            ServingAction::Stop,
-        );
-        handle.join().unwrap();
-        assert!(res.is_ok(), "got {res:?}");
-        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-        assert!(
-            request_line.starts_with("POST /models/llm_server/stop-serving HTTP/1.1"),
-            "got: {request_line:?}"
-        );
+    fn post_helpers_return_err_on_non_2xx() {
+        type Invoke = fn(u16) -> Result<(), String>;
+        let cases: &[(&str, Invoke)] = &[
+            ("toggle_serving", |p| {
+                toggle_serving(
+                    &format!("http://127.0.0.1:{p}/models"),
+                    "ghost",
+                    ServingAction::Start,
+                )
+            }),
+            ("cancel_deployment", |p| {
+                cancel_deployment(&format!("http://127.0.0.1:{p}/models"), "ghost")
+            }),
+            ("uninstall_model", |p| {
+                uninstall_model(&format!("http://127.0.0.1:{p}/models"), "ghost")
+            }),
+            ("trigger_update", |p| {
+                trigger_update(&format!("http://127.0.0.1:{p}/update"))
+            }),
+            ("mark_deployment_pending", |p| {
+                mark_deployment_pending(
+                    &format!("http://127.0.0.1:{p}/deployments/pending"),
+                    "p1",
+                    None,
+                )
+            }),
+        ];
+        for (label, invoke) in cases {
+            let (port, handle) = serve_once("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            let res = invoke(port);
+            handle.join().unwrap();
+            assert!(
+                res.is_err(),
+                "{label}: expected Err on non-2xx, got {res:?}"
+            );
+        }
     }
 
     #[test]
-    fn toggle_serving_returns_err_on_non_2xx() {
-        let (port, handle, _) =
-            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-        let res = toggle_serving(
-            &format!("http://127.0.0.1:{port}/models"),
-            "ghost",
-            ServingAction::Start,
-        );
-        handle.join().unwrap();
-        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
-    }
-
-    #[test]
-    fn toggle_serving_returns_err_on_connection_refused() {
-        let res = toggle_serving(
-            "http://127.0.0.1:1/models",
-            "anything",
-            ServingAction::Start,
-        );
-        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
-    }
-
-    #[test]
-    fn cancel_deployment_hits_cancel_path_and_reports_ok() {
-        let (port, handle, captured) =
-            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        let res = cancel_deployment(&format!("http://127.0.0.1:{port}/models"), "llm_server");
-        handle.join().unwrap();
-        assert!(res.is_ok(), "got {res:?}");
-        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-        assert!(
-            request_line.starts_with("POST /models/llm_server/cancel-deploy HTTP/1.1"),
-            "got: {request_line:?}"
-        );
-    }
-
-    #[test]
-    fn cancel_deployment_returns_err_on_non_2xx() {
-        let (port, handle, _) =
-            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-        let res = cancel_deployment(&format!("http://127.0.0.1:{port}/models"), "ghost");
-        handle.join().unwrap();
-        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
-    }
-
-    #[test]
-    fn cancel_deployment_returns_err_on_connection_refused() {
-        let res = cancel_deployment("http://127.0.0.1:1/models", "anything");
-        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
-    }
-
-    #[test]
-    fn uninstall_model_hits_uninstall_path_and_reports_ok() {
-        let (port, handle, captured) =
-            serve_once_capturing("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-        let res = uninstall_model(&format!("http://127.0.0.1:{port}/models"), "llm_server");
-        handle.join().unwrap();
-        assert!(res.is_ok(), "got {res:?}");
-        let request_line = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-        assert!(
-            request_line.starts_with("POST /models/llm_server/uninstall HTTP/1.1"),
-            "got: {request_line:?}"
-        );
-    }
-
-    #[test]
-    fn uninstall_model_returns_err_on_non_2xx() {
-        let (port, handle, _) =
-            serve_once_capturing("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-        let res = uninstall_model(&format!("http://127.0.0.1:{port}/models"), "ghost");
-        handle.join().unwrap();
-        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
+    fn post_helpers_return_err_on_connection_refused() {
+        // Port 1 never has a listener.
+        type Invoke = fn() -> Result<(), String>;
+        let cases: &[(&str, Invoke)] = &[
+            ("toggle_serving", || {
+                toggle_serving(
+                    "http://127.0.0.1:1/models",
+                    "anything",
+                    ServingAction::Start,
+                )
+            }),
+            ("cancel_deployment", || {
+                cancel_deployment("http://127.0.0.1:1/models", "anything")
+            }),
+            ("uninstall_model", || {
+                uninstall_model("http://127.0.0.1:1/models", "anything")
+            }),
+            ("trigger_update", || {
+                trigger_update("http://127.0.0.1:1/update")
+            }),
+            ("mark_deployment_pending", || {
+                mark_deployment_pending("http://127.0.0.1:1/deployments/pending", "p1", None)
+            }),
+        ];
+        for (label, invoke) in cases {
+            let res = invoke();
+            assert!(
+                res.is_err(),
+                "{label}: expected Err on refused connect, got {res:?}"
+            );
+        }
     }
 
     #[test]
@@ -447,44 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn mark_deployment_pending_returns_err_on_non_2xx() {
-        let (port, handle) = serve_once("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
-        let res = mark_deployment_pending(
-            &format!("http://127.0.0.1:{port}/deployments/pending"),
-            "p1",
-            None,
-        );
-        handle.join().unwrap();
-        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
-    }
-
-    #[test]
-    fn mark_deployment_pending_returns_err_on_connection_refused() {
-        let res = mark_deployment_pending("http://127.0.0.1:1/deployments/pending", "p1", None);
-        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
-    }
-
-    #[test]
     fn trigger_update_reports_ok_on_2xx() {
         let (port, handle) = serve_once("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n");
         let res = trigger_update(&format!("http://127.0.0.1:{port}/update"));
         handle.join().unwrap();
         assert!(res.is_ok(), "got {res:?}");
-    }
-
-    #[test]
-    fn trigger_update_returns_err_on_non_2xx() {
-        let (port, handle) =
-            serve_once("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
-        let res = trigger_update(&format!("http://127.0.0.1:{port}/update"));
-        handle.join().unwrap();
-        assert!(res.is_err(), "expected Err on non-2xx, got {res:?}");
-    }
-
-    #[test]
-    fn trigger_update_returns_err_on_connection_refused() {
-        let res = trigger_update("http://127.0.0.1:1/update");
-        assert!(res.is_err(), "expected Err on refused connect, got {res:?}");
     }
 
     // Minimal one-shot HTTP server: bind, accept once, write canned response, exit.
