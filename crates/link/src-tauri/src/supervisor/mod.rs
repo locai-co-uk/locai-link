@@ -46,10 +46,8 @@ const EXIT_RESTART_FOR_UPDATE: i32 = 42;
 /// stamp is treated as stale.
 const POST_UPDATE_HEALTH_WINDOW_SECS: u64 = 120;
 
-/// Headless entry point: the supervisor loop (resolve `current`, spawn the
-/// runtime child, exit-42 respawn, `.update-pending` rollback, Pattern-B
-/// bootstrap). Was the standalone launcher's `main`. In `ui` builds the desktop
-/// app starts this on a background thread instead (see P2).
+/// Headless entry point: the supervisor loop. In `ui` builds the desktop app
+/// starts this on a background thread instead.
 pub fn run_supervisor() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
@@ -76,10 +74,9 @@ struct ControlState {
     restart: bool,
     /// A child is currently alive (read by the tray).
     running: bool,
-    /// Monotonic count of exit-42 (restart-for-update) respawns the supervisor
-    /// has handled. The UI's OTA lock reads this as the authoritative "the
-    /// update applied and the runtime is restarting" signal, instead of a
-    /// wall-clock timeout (INFRA-466 item 1).
+    /// Monotonic count of exit-42 (restart-for-update) respawns handled. The
+    /// UI's OTA lock reads this as the authoritative "update applied, runtime
+    /// restarting" signal instead of a wall-clock timeout.
     update_restart_epoch: u64,
 }
 
@@ -143,9 +140,8 @@ fn next_backoff(b: Duration) -> Duration {
 }
 
 /// Stop the runtime child gracefully. On Unix, SIGTERM first so the runtime runs
-/// its shutdown (stop pipelines, publish "offline", stop llama-swap/llama-server)
-/// then wait ~5s and SIGKILL as a fallback — a bare SIGKILL orphaned those engine
-/// subprocesses. Windows has no SIGTERM, so it uses the std terminate.
+/// its shutdown, then SIGKILL after ~5s as a fallback; a bare SIGKILL would
+/// orphan its engine subprocesses. Windows has no SIGTERM, so it uses the std terminate.
 #[cfg(unix)]
 fn terminate_child(child: &mut std::process::Child) {
     // SAFETY: `child.id()` is this supervisor's own live child; SIGTERM is valid.
@@ -174,11 +170,9 @@ fn terminate_child(child: &mut std::process::Child) {
 }
 
 /// Desktop in-process supervision: keep the runtime child alive on a background
-/// thread, honouring Start/Stop/Restart from `control`. Reuses the same resolve
-/// / bootstrap / rollback helpers as the headless `run()`; unlike `run()` the
-/// wait is interruptible so a Stop can kill the child. Stop/Restart go through
-/// `terminate_child` (SIGTERM + grace + SIGKILL) so the runtime cleans up its
-/// engine subprocesses instead of being SIGKILLed and orphaning them. Runs forever.
+/// thread, honouring Start/Stop/Restart from `control`. Unlike the headless
+/// `run()`, the wait is interruptible so a Stop can kill the child, and
+/// Stop/Restart go through `terminate_child` so engine subprocesses clean up. Runs forever.
 pub fn supervise_forever(control: SupervisorControl) {
     let install_root = match find_install_root() {
         Ok(r) => r,
@@ -197,11 +191,10 @@ pub fn supervise_forever(control: SupervisorControl) {
             continue;
         }
 
-        // Don't spawn the runtime until the device is registered. During
-        // first-run onboarding there's no session identity yet; a config-less
-        // runtime would exit immediately, and (before this gate) that clean exit
-        // latched the supervisor stopped. Idle until `finish_setup` registers +
-        // re-arms. Already-provisioned installs pass this on the first tick.
+        // Don't spawn the runtime until the device is registered: during
+        // first-run onboarding there's no session identity yet, and a
+        // config-less runtime would exit 0 and latch the supervisor stopped.
+        // Idle until `finish_setup` registers and re-arms.
         if crate::shared::read_identity(&install_root).is_none() {
             control.set_running(false);
             std::thread::sleep(poll);
@@ -244,11 +237,9 @@ pub fn supervise_forever(control: SupervisorControl) {
             continue;
         }
 
-        // The runtime is always launched in `run` mode (the GUI app isn't
-        // invoked with that arg the way the headless service is). Run it FROM the
-        // install root: the runtime resolves `configs/` (its session + state)
-        // relative to its cwd, and the supervisor inherits the launcher's cwd
-        // ($HOME under systemd --user), not the install root.
+        // Always launch in `run` mode, from the install root: the runtime
+        // resolves `configs/` relative to its cwd, and the supervisor otherwise
+        // inherits the launcher's cwd ($HOME under systemd --user).
         let mut child = match Command::new(&runtime)
             .arg("run")
             .current_dir(&install_root)
@@ -282,20 +273,18 @@ pub fn supervise_forever(control: SupervisorControl) {
         control.set_running(false);
 
         match outcome {
-            // Stop -> idle next iteration; Restart -> respawn immediately.
+            // Stop: idle next iteration. Restart: respawn immediately.
             Outcome::Interrupted => backoff = Duration::from_secs(1),
-            // OTA: re-resolve `current` (an update may have flipped it) + respawn.
-            // Bump the update-restart epoch — the UI's OTA lock clears on this
+            // OTA: re-resolve `current` (an update may have flipped it) and respawn.
+            // Bump the update-restart epoch so the UI's OTA lock clears on this
             // authoritative signal rather than a wall-clock timeout.
             Outcome::Exited(Some(EXIT_RESTART_FOR_UPDATE)) => {
                 control.note_update_restart();
                 backoff = Duration::from_secs(1);
             }
             // Deliberate stop: the runtime's contract is 42=respawn, 1=crash,
-            // 0=stay stopped (see src/link/main.py). Honour it — respawning a
-            // 0-exit would resurrect a Control-/user-initiated shutdown. The
-            // onboarding case that motivated a change here is handled by the
-            // registration gate above (a config-less runtime exits 1, not 0).
+            // 0=stay stopped. Respawning a 0-exit would resurrect a
+            // Control- or user-initiated shutdown.
             Outcome::Exited(Some(0)) => {
                 control.stop();
             }
@@ -322,11 +311,9 @@ fn run() -> Result<u8, String> {
         let version = match resolve_current_version(&install_root) {
             Some(v) => v,
             None => {
-                // No `current` yet — Pattern B first launch. Try to
-                // bootstrap from boot.json. The host installer is
-                // responsible for dropping that file alongside this
-                // launcher. If it's also missing, that's a clear
-                // installer bug and we surface it as exit 2.
+                // No `current` yet (Pattern B first launch): bootstrap from
+                // boot.json, which the host installer drops alongside this
+                // launcher. If it's also missing, surface the installer bug as exit 2.
                 if !install_root.join("boot.json").is_file() {
                     return Err(format!(
                         "no installed version and no boot.json in {}. \n\
@@ -376,17 +363,15 @@ fn run() -> Result<u8, String> {
             }
             Some(0) => return Ok(0),
             Some(code) => {
-                // Non-zero exit. If we're inside the post-update health
-                // window for an OTA that just flipped, roll back; otherwise
-                // surface the exit code.
+                // Non-zero exit: roll back if inside the post-update health
+                // window for an OTA that just flipped, else surface the code.
                 if try_rollback(&install_root, &version, code)? {
                     continue;
                 }
                 return Ok(code.clamp(0, 255) as u8);
             }
-            // Killed by a signal (Unix) — surface as a non-zero exit so
-            // supervisors notice. Don't loop: a signal-kill is not the
-            // same as a needs-restart signal.
+            // Killed by a signal (Unix): surface as a non-zero exit so
+            // supervisors notice. Don't loop; a signal-kill is not a restart signal.
             None => return Ok(1),
         }
     }
@@ -407,8 +392,8 @@ fn try_rollback(install_root: &Path, failed_version: &str, exit_code: i32) -> Re
 
     let age_secs = now_unix().saturating_sub(pending.flipped_at_unix);
     if age_secs > POST_UPDATE_HEALTH_WINDOW_SECS {
-        // Stamp is stale — outside the window. Clear it so we don't keep
-        // checking on every future crash, but don't roll back.
+        // Stamp is stale (outside the window): clear it so we don't recheck on
+        // every future crash, but don't roll back.
         let _ = fs::remove_file(install_root.join(UPDATE_PENDING_STAMP));
         return Ok(false);
     }
@@ -417,8 +402,8 @@ fn try_rollback(install_root: &Path, failed_version: &str, exit_code: i32) -> Re
         .join(VERSIONS_DIR)
         .join(&pending.previous_version);
     if !previous_dir.is_dir() {
-        // Previous version was GC'd or never existed — nothing to roll back
-        // to. Clear the stamp; surface the crash.
+        // Previous version was GC'd or never existed: nothing to roll back to.
+        // Clear the stamp and surface the crash.
         let _ = fs::remove_file(install_root.join(UPDATE_PENDING_STAMP));
         return Ok(false);
     }
@@ -429,8 +414,7 @@ fn try_rollback(install_root: &Path, failed_version: &str, exit_code: i32) -> Re
         prev = pending.previous_version,
     );
     write_current_pointer(install_root, &pending.previous_version)?;
-    // Demote both `previous` pointer shapes — the rollback target is now
-    // current, so there's nothing left to demote to.
+    // Remove both `previous` pointer shapes: the rollback target is now current.
     let _ = fs::remove_file(install_root.join(PREVIOUS_SYMLINK));
     let _ = fs::remove_file(install_root.join(PREVIOUS_POINTER_FILE));
     let _ = fs::remove_file(install_root.join(UPDATE_PENDING_STAMP));
@@ -480,17 +464,14 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
             Ok(()) => {
                 fs::rename(&tmp, &symlink_path)
                     .map_err(|e| format!("rename rollback symlink: {e}"))?;
-                // If a stale pointer file is hanging around, get rid of it —
-                // but only if it's a regular file. On case-insensitive
-                // filesystems (macOS APFS/HFS+ default) `CURRENT` and
-                // `current` share an inode; a naked remove would delete the
-                // symlink we just wrote.
+                // Remove a stale pointer file, but only if it's a regular file:
+                // on case-insensitive filesystems `CURRENT` and `current` share
+                // an inode, so a naked remove would delete the symlink just written.
                 remove_if_regular_file(&install_root.join(CURRENT_POINTER_FILE));
                 return Ok(());
             }
             Err(_) => {
-                // Symlink not permitted on this platform — fall through to
-                // the pointer file shape.
+                // Symlink not permitted here: fall through to the pointer file shape.
                 let _ = fs::remove_file(&tmp);
             }
         }
@@ -500,8 +481,7 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
     let tmp = install_root.join(format!("{CURRENT_POINTER_FILE}.rollback.tmp"));
     fs::write(&tmp, format!("{version}\n")).map_err(|e| format!("write rollback pointer: {e}"))?;
     fs::rename(&tmp, &pointer).map_err(|e| format!("rename rollback pointer: {e}"))?;
-    // Clean up any stale symlink from a previous shape — same
-    // case-insensitive caveat as above.
+    // Clean up any stale symlink from a previous shape (same case-insensitive caveat).
     remove_if_symlink(&symlink_path);
     Ok(())
 }
@@ -516,7 +496,7 @@ fn remove_if_regular_file(path: &Path) {
     }
 }
 
-/// Symmetric guard — remove `path` iff it's actually a symlink.
+/// Symmetric guard: remove `path` iff it's actually a symlink.
 fn remove_if_symlink(path: &Path) {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {

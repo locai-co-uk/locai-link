@@ -22,7 +22,7 @@ def resolve_agent_version() -> str | None:
         4. ``pyproject.toml`` walk-up from ``sys.argv[0]`` (script runs where
            ``__file__`` points deep into site-packages).
 
-    Cached on success only — an early ``None`` (e.g. before ``sys.argv`` is
+    Cached on success only: an early ``None`` (e.g. before ``sys.argv`` is
     populated) doesn't pin the result; a later call can still recover.
     """
     global _cached
@@ -81,7 +81,7 @@ def _resolve() -> str | None:
                     return project["version"]
     except Exception:
         # Best-effort fallback. Filesystem / parse errors aren't worth
-        # crashing the agent over — version-reporting just returns None.
+        # crashing the agent over; version-reporting just returns None.
         pass
 
     return None

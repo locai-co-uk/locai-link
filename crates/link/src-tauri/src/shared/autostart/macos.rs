@@ -4,12 +4,12 @@
 //! macOS autostart via a per-user LaunchAgent under
 //! `~/Library/LaunchAgents/<app_id>.plist`.
 //!
-//! LaunchAgent (not SMAppService Login Items): same plist works for both the
-//! .pkg installer and developer flows, and it avoids SMAppService's
-//! code-signing entitlement + registered-.app requirements.
+//! LaunchAgent (not SMAppService Login Items): one plist works for both the
+//! .pkg installer and developer flows, avoiding SMAppService's code-signing
+//! entitlement and registered-.app requirements.
 //!
 //! Matches the plist format `link.infra.service::MacOSBackend` writes for the
-//! agent, so both entries look uniform in System Settings → Login Items.
+//! agent, so both entries look uniform in System Settings Login Items.
 
 use std::fs;
 use std::io;
@@ -54,8 +54,7 @@ pub fn enable(app_id: &str, exec_path: &Path) -> io::Result<()> {
 "#
     );
     fs::write(&path, plist)?;
-    // Fire-and-forget: `launchctl load` returns non-zero when the label
-    // is already loaded, which isn't a real error for our purposes.
+    // Fire-and-forget: `launchctl load` returns non-zero for an already-loaded label.
     let _ = Command::new("launchctl")
         .args(["load", "-w"])
         .arg(&path)
@@ -65,15 +64,15 @@ pub fn enable(app_id: &str, exec_path: &Path) -> io::Result<()> {
 
 pub fn disable(app_id: &str) -> io::Result<()> {
     let path = plist_path(app_id)?;
-    // Unload first so launchd forgets the label; then remove the plist.
-    // Ignore launchctl's exit code — the file removal is what matters.
+    // Unload so launchd forgets the label, then remove the plist. The file
+    // removal is what matters, so ignore launchctl's exit code.
     let _ = Command::new("launchctl")
         .args(["unload", "-w"])
         .arg(&path)
         .status();
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
-        // Idempotent: already gone → success.
+        // Idempotent: already gone counts as success.
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
@@ -83,19 +82,16 @@ pub fn is_enabled(app_id: &str) -> bool {
     plist_path(app_id).map(|p| p.exists()).unwrap_or(false)
 }
 
-/// `launchctl unload` on the plist without deleting the file — stops
-/// the running instance but keeps the login-time hook intact.
-///
-/// If the plist doesn't exist, silently succeed: nothing to stop.
+/// `launchctl unload` on the plist without deleting the file: stops the
+/// running instance but keeps the login-time hook intact. Succeeds silently
+/// when the plist doesn't exist.
 pub fn stop_now(app_id: &str) -> io::Result<()> {
     let path = plist_path(app_id)?;
     if !path.exists() {
         return Ok(());
     }
-    // Fire-and-forget: launchctl reports non-zero for "already
-    // unloaded" which isn't a real failure from the caller's
-    // perspective. The caller (app Quit) just wants best-effort
-    // "stop everything now".
+    // Fire-and-forget: launchctl reports non-zero for an already-unloaded label,
+    // and the caller only wants best-effort "stop everything now".
     let _ = Command::new("launchctl")
         .args(["unload"])
         .arg(&path)

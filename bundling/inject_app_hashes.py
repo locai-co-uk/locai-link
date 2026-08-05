@@ -4,11 +4,10 @@
 """Inject UI-app content hashes into a bundle ``manifest.json`` for whole-app OTA.
 
 ``swap_bundle`` compares these hashes between the installed and the new manifest
-and re-swaps a UI app only when its hash changed. We hash each app's
-*source* (its crate + the shared crate + the lockfile), not the built binary:
-release builds aren't byte-reproducible, so a source hash is what stays stable
-when nothing actually changed, which is what makes the "only swap if changed"
-behaviour work.
+and re-swaps a UI app only when its hash changed. We hash each app's *source*
+(its crate + the shared crate + the lockfile), not the built binary: release
+builds aren't byte-reproducible, so a source hash is what stays stable when
+nothing changed.
 
 Usage::
 

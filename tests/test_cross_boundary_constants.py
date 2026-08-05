@@ -36,7 +36,7 @@ def test_agent_loopback_port_matches_rust_health_url():
     loopback URL. If the ports drift, the tray can never see the agent."""
     m = re.search(
         r'DEFAULT_HEALTH_URL[^"]*"http://([\d.]+):(\d+)/',
-        (CRATES / "shared" / "src" / "health.rs").read_text(encoding="utf-8"),
+        (CRATES / "link" / "src-tauri" / "src" / "shared" / "health.rs").read_text(encoding="utf-8"),
     )
     assert m, "DEFAULT_HEALTH_URL not found in health.rs"
     assert (constants.HEALTH_HOST, str(constants.HEALTH_PORT)) == (m.group(1), m.group(2))
@@ -47,7 +47,7 @@ def test_companion_label_matches_plist_and_bundle_id():
     Label, and the companion app's bundle identifier must all agree, or the
     relaunch targets a service that isn't the running app."""
     plist_label = plistlib.loads((LAUNCH_AGENTS / "uk.co.locai.link.companion.plist").read_bytes())["Label"]
-    bundle_id = json.loads((CRATES / "companion" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))[
+    bundle_id = json.loads((CRATES / "link" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))[
         "identifier"
     ]
     assert constants.COMPANION_LABEL == plist_label == bundle_id
@@ -59,7 +59,7 @@ def test_install_root_matches_rust_and_pkg_scripts():
     the tray, or the uninstaller on a directory nothing else uses."""
     root = constants.MACOS_INSTALL_ROOT
 
-    endpoints = (CRATES / "shared" / "src" / "endpoints.rs").read_text(encoding="utf-8")
+    endpoints = (CRATES / "link" / "src-tauri" / "src" / "shared" / "endpoints.rs").read_text(encoding="utf-8")
     m = re.search(r'"(/[^"]+)"\.to_string\(\)', endpoints)
     assert m, "macOS install root not found in endpoints.rs"
     assert m.group(1) == root
@@ -78,14 +78,14 @@ def test_companion_running_version_marker_matches_rust():
     """The companion (Rust) writes its running version to <root>/state/<marker>;
     the updater's post-OTA drift check reads the same path. If the components
     drift, the check silently reports every companion as stale/pre-fix."""
-    lib = (CRATES / "companion" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    src = (CRATES / "link" / "src-tauri" / "src" / "tray.rs").read_text(encoding="utf-8")
     # Assert the sequential state/<marker> join, not the two literals independently,
     # so unrelated paths containing either literal cannot satisfy the test.
     marker_path = re.compile(
         rf'\.join\("{re.escape(constants.STATE_SUBDIR)}"\)\s*'
         rf'\.join\("{re.escape(constants.COMPANION_RUNNING_VERSION_MARKER)}"\)'
     )
-    assert marker_path.search(lib), "companion running-version marker path not found in lib.rs"
+    assert marker_path.search(src), "companion running-version marker path not found in tray.rs"
 
 
 def test_default_api_url_is_single_sourced_in_python():

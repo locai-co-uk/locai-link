@@ -1,4 +1,4 @@
-"""Session state persistence — timestamped JSON files for crash recovery."""
+"""Session state persistence: timestamped JSON files for crash recovery."""
 
 import copy
 import glob
@@ -30,16 +30,8 @@ class StateManager:
         self.STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     def load_state(self, explicit_path: Path | None = None) -> dict[str, Any] | None:
-        """Loads state from disk.
-
-        1. If explicit_path is provided, tries to load that specific file.
-        2. If not, finds the most recent timestamped session file in configs/.
-
-        Args:
-            explicit_path (Path | None): Optional path to a specific state file.
-
-        Returns:
-            dict | None: The loaded state dictionary or None if loading failed.
+        """Load state from disk: the given ``explicit_path``, else the most
+        recent timestamped session file in configs/. None if loading failed.
         """
         if self._cache:
             return self._cache
@@ -64,9 +56,9 @@ class StateManager:
         try:
             data = json.loads(target_path.read_text(encoding="utf-8"))
 
-            # Tighten before the schema check — files with incompatible versions
-            # may still contain secrets (api_key, password) we don't want world-
-            # readable while the user resolves the schema drift manually.
+            # Tighten before the schema check: files with incompatible versions
+            # may still contain secrets (api_key, password) we don't want
+            # world-readable while the user resolves the drift manually.
             self._tighten_permissions(target_path)
 
             # Basic schema check: Version Compatibility
@@ -84,12 +76,8 @@ class StateManager:
             logger.warning(f"State file corrupted ({target_path}): {e}")
 
     def bootstrap(self, config: AgentConfig):
-        """Called on fresh start (or explicit config load) to seed a NEW session.
-
-        Generates a timestamped filename in configs/.
-
-        Args:
-            config (AgentConfig): The initial agent configuration.
+        """Seed a NEW session on fresh start (or explicit config load), with a
+        timestamped filename in configs/.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"session_{timestamp}.json"
@@ -113,12 +101,8 @@ class StateManager:
     def update_full_config(self, config: AgentConfig) -> None:
         """Atomically replace the cached config and flush to disk.
 
-        Preserves the runtime `active` flag for pipelines that exist in both
-        the old and new config, so a hot-swap doesn't reset a running pipeline
-        to inactive.
-
-        Args:
-            config (AgentConfig): The new full agent configuration.
+        Preserves the runtime `active` flag for pipelines in both the old and
+        new config, so a hot-swap doesn't reset a running pipeline to inactive.
         """
         self._ensure_loaded()
         assert self._cache is not None
@@ -135,10 +119,9 @@ class StateManager:
         self._flush()
 
     def snapshot(self) -> dict[str, Any] | None:
-        """Deep copy of the persisted state, for a later restore(). Deep so a
-        live mutation of the cache (e.g. nested pipelines) can't corrupt the
-        frozen snapshot before restore() runs. None when nothing is loaded, so
-        restore(None) is a safe no-op."""
+        """Deep copy of the persisted state for a later restore(); deep so a
+        live cache mutation can't corrupt the frozen snapshot. None when nothing
+        is loaded, so restore(None) is a safe no-op."""
         return copy.deepcopy(self._cache) if self._cache is not None else None
 
     def restore(self, snapshot: dict[str, Any] | None) -> None:
@@ -150,11 +133,7 @@ class StateManager:
         self._flush()
 
     def update_pipeline_config(self, pipeline_config: PipelineConfig):
-        """Updates (or adds) a pipeline configuration in the persistent state.
-
-        Args:
-            pipeline_config (PipelineConfig): The pipeline configuration to update.
-        """
+        """Update (or add) a pipeline configuration in the persistent state."""
         self._ensure_loaded()
         assert self._cache is not None
 
@@ -183,12 +162,7 @@ class StateManager:
         self._flush()
 
     def set_pipeline_status(self, pid: str, active: bool):
-        """Marks a pipeline as active (running) or inactive (stopped).
-
-        Args:
-            pid (str): The pipeline ID.
-            active (bool): The new activity status.
-        """
+        """Mark a pipeline as active (running) or inactive (stopped)."""
         self._ensure_loaded()
         assert self._cache is not None
 
@@ -202,11 +176,7 @@ class StateManager:
         self._flush()
 
     def remove_pipeline(self, pid: str):
-        """Completely removes a pipeline from config.
-
-        Args:
-            pid (str): The pipeline ID to remove.
-        """
+        """Remove a pipeline from config entirely."""
         self._ensure_loaded()
         assert self._cache is not None
 
@@ -216,11 +186,7 @@ class StateManager:
         self._flush()
 
     def _get_latest_session_file(self) -> Path | None:
-        """Finds the most recent session file in configs/ based on timestamp.
-
-        Returns:
-            Path | None: The path to the latest session file or None if not found.
-        """
+        """Most recent session file in configs/ by timestamp, or None."""
         pattern = str(self.STATE_DIR / "session_*.json")
         files = glob.glob(pattern)
         if not files:

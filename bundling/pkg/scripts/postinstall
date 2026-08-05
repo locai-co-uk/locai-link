@@ -9,7 +9,7 @@
 #     /Library/Locai/Locai Link.app        (the app: supervisor + tray + first-run setup)
 #
 # The single `locai-link` binary lives inside the .app
-# (Contents/MacOS/locai-link) — there is no separate launcher.
+# (Contents/MacOS/locai-link); there is no separate launcher.
 #
 # This script:
 #     1. Ensures the .app is present and the state tree is user-owned.
@@ -21,15 +21,15 @@
 #        the setup window so the user picks up in the wizard the moment
 #        Installer.app's conclusion pane appears.
 #
-# We deliberately do NOT register the runtime or LaunchAgents here — the
+# We deliberately do NOT register the runtime or LaunchAgents here; the
 # "Run at login" choice is captured in the setup wizard's Permissions step, so
 # registration happens on Finish, not at .pkg install time.
 #
 # pkgbuild passes these positional args:
-#     $1 — the .pkg's own path (unused)
-#     $2 — the target-location inside the payload (unused)
-#     $3 — the target volume ("/" on a normal install)
-#     $4 — install location root ("/" for volume-only installs)
+#     $1: the .pkg's own path (unused)
+#     $2: the target-location inside the payload (unused)
+#     $3: the target volume ("/" on a normal install)
+#     $4: install location root ("/" for volume-only installs)
 set -euo pipefail
 
 INSTALL_ROOT="/Library/Locai"
@@ -39,7 +39,7 @@ COMPANION_SYMLINK="/Applications/Locai Link.app"
 # The merged binary (supervisor + tray) lives inside the .app.
 MERGED_BIN="${COMPANION_APP}/Contents/MacOS/locai-link"
 UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
-# Legacy onboarding app from pre-merge installs — removed on upgrade.
+# Legacy onboarding app from pre-merge installs; removed on upgrade.
 LEGACY_SA="${INSTALL_ROOT}/Setup Assistant.app"
 LEGACY_SA_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 
@@ -60,7 +60,7 @@ fi
 # runtime + OTA touch. Prefer $SUDO_USER (pkg installs run as root via sudo),
 # else fall back to the console user.
 INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
-# LaunchAgents write to $INSTALL_ROOT/logs/*.log — create it here so the
+# LaunchAgents write to $INSTALL_ROOT/logs/*.log; create it here so the
 # first launchctl kickstart doesn't fail on a fresh install.
 for d in versions state logs; do
     mkdir -p "$INSTALL_ROOT/$d"
@@ -105,7 +105,7 @@ fi
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 # The console user (driving Installer.app). The LS database is per-user and
-# this runs as root — registering as root doesn't reliably surface the app
+# this runs as root; registering as root doesn't reliably surface the app
 # for the logged-in user (intermittently missing from search).
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 
@@ -175,15 +175,14 @@ done
 # --- 5. Launch Locai Link via launchd --------------------------------
 # postinstall runs as root; the app must run as the console user (its LaunchAgent
 # GUI domain + Keychain). We bootstrap the LaunchAgent rather than `open -a` so
-# LAUNCHD OWNS THE ONE INSTANCE from install — parity with the Linux systemd
-# service, and required now that the tauri single-instance guard is gone (an
-# `open`-launched tray would run alongside the launchd one). First run has no
-# registered device, so the app opens the setup window. `install_launchagents`
-# at Finish only tweaks RunAtLoad — it does not re-bootstrap (that would restart
-# the wizard mid-onboarding).
+# launchd owns the one instance from install, required now that the tauri
+# single-instance guard is gone (an `open`-launched tray would run alongside the
+# launchd one). First run has no registered device, so the app opens the setup
+# window. `install_launchagents` at Finish only tweaks RunAtLoad; it does not
+# re-bootstrap (that would restart the wizard mid-onboarding).
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     # No graphical console user (headless / remote / root Terminal). Skip the
-    # launch — the user can open Locai Link manually (it self-bootstraps at login).
+    # launch; the user can open Locai Link manually (it self-bootstraps at login).
     log "no console user detected; skipping launchd bootstrap"
     exit 0
 fi

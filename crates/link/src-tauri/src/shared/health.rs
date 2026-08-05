@@ -16,7 +16,7 @@ pub const DEFAULT_MODELS_URL: &str = "http://127.0.0.1:20505/models";
 
 /// Base for per-model action endpoints, combined with
 /// `/{pipeline_id}/{serve,stop-serving,cancel-deploy}`. Same string as
-/// [`DEFAULT_MODELS_URL`] — kept distinct so call sites read as intent.
+/// [`DEFAULT_MODELS_URL`], kept distinct so call sites read as intent.
 pub const DEFAULT_MODEL_ACTION_BASE: &str = DEFAULT_MODELS_URL;
 
 /// Loopback endpoint that triggers an in-app OTA update.
@@ -62,7 +62,7 @@ pub struct DeploymentProgress {
     pub pipeline_id: String,
     /// Asset file name. `None` on early ticks before the runtime resolves it.
     pub model_name: Option<String>,
-    /// `downloading` or `configuring` — never `completed` on the wire.
+    /// `downloading` or `configuring`, never `completed` on the wire.
     pub stage: String,
     /// 0.0–100.0. Throttled to 5% steps by the runtime's reporter.
     pub progress_pct: f64,
@@ -108,8 +108,8 @@ pub enum ModelsStatus {
     Malformed(String),
 }
 
-/// Fetch the servable-model list. All failure modes collapse into `Down`/`Malformed` —
-/// nothing bubbles as `Result`.
+/// Fetch the servable-model list. All failure modes collapse into
+/// `Down`/`Malformed`; nothing bubbles as `Result`.
 pub fn list_models(url: &str) -> ModelsStatus {
     match HTTP_AGENT.get(url).call() {
         Ok(resp) => match resp.into_json::<ModelsResponse>() {
@@ -197,7 +197,7 @@ pub fn mark_deployment_pending(
 }
 
 /// Probe Link's `/healthz` endpoint. Every failure mode collapses to
-/// `Down`/`Malformed` — never panics or bubbles a `Result`.
+/// `Down`/`Malformed`; never panics or bubbles a `Result`.
 pub fn agent_health(url: &str) -> HealthStatus {
     match HTTP_AGENT.get(url).call() {
         Ok(resp) => match resp.into_json::<AgentHealth>() {

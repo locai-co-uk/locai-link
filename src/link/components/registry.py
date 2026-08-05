@@ -24,11 +24,7 @@ class Source(Component):
     """A component that produces data."""
 
     def __call__(self) -> dict[str, Any] | None:
-        """Produces data.
-
-        Returns:
-            dict[str, Any] | None: The produced data or None.
-        """
+        """Produces data, or None when there is nothing to emit."""
         ...
 
 
@@ -36,14 +32,7 @@ class Sink(Component):
     """A component that consumes data."""
 
     def __call__(self, data: Any) -> bool | None:
-        """Consumes data.
-
-        Args:
-            data (Any): The data to consume.
-
-        Returns:
-            bool | None: True if successful, False otherwise.
-        """
+        """Consumes data; returns True on success, False otherwise."""
         ...
 
 
@@ -55,13 +44,7 @@ class ComponentRegistry:
 
     @classmethod
     def register(cls, name: str) -> Callable[[type], type]:
-        """Decorator to register a component class.
-
-        Args:
-            name (str): The unique name for the component.
-
-        Returns:
-            Callable: The decorator function.
+        """Decorator registering a component class under a unique name.
 
         Usage:
             @ComponentRegistry.register("clock_tick")
@@ -78,30 +61,19 @@ class ComponentRegistry:
 
     @classmethod
     def get(cls, name: str) -> type | None:
-        """Get a component class by name.
-
-        Args:
-            name (str): The component name.
-
-        Returns:
-            type | None: The component class or None if not found.
-        """
+        """Get a component class by name, or None if not registered."""
         return cls._components.get(name)
 
     @classmethod
     def all(cls) -> dict[str, type]:
-        """Return a copy of all registered components.
-
-        Returns:
-            dict[str, type]: A dictionary of all registered components.
-        """
+        """Return a copy of all registered components."""
         return cls._components.copy()
 
     @classmethod
     def install_plugin(cls, name: str) -> None:
         """Install a plugin's dependencies without instantiating it.
 
-        Same flow as `load_plugin`'s install step — used by the `install-plugin`
+        Same flow as `load_plugin`'s install step, used by the `install-plugin`
         CLI command and by callers that want to pre-stage a plugin's deps and
         native binaries before deciding whether to load it.
         """
@@ -112,23 +84,14 @@ class ComponentRegistry:
 
     @classmethod
     def load_plugin(cls, name: str, args: dict[str, Any]) -> Component:
-        """Dynamically installs and loads a plugin component.
-
-        Args:
-            name (str): The name of the plugin (e.g., "image_classifier").
-            args (dict): Arguments to initialise the plugin.
-
-        Returns:
-            Component: The instantiated component.
-        """
+        """Dynamically installs and loads a plugin component (args initialise it)."""
         frozen = bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
 
         # 1. Locate the plugin directory
         plugin_dir = cls._find_plugin_dir(name)
 
-        # 2. Install Dependencies (Lazy) — skipped in a frozen bundle, where
-        # every plugin is pre-installed at build time and there's no live venv
-        # to pip into.
+        # 2. Install dependencies (lazy). Skipped in a frozen bundle, where every
+        # plugin is pre-installed at build time and there's no live venv to pip into.
         if plugin_dir and not frozen:
             cls._install_plugin_dependencies(name, plugin_dir)
 
@@ -189,10 +152,8 @@ class ComponentRegistry:
                 raise RuntimeError(f"Dependency installation failed for {name}")
 
         # B. Custom Install Script (install.py)
-        # The plugin's install.py is responsible for being quiet when nothing to do
-        # (it knows what "already installed" means — typically a pinned-tag check).
-        # We always invoke it so it can self-detect; the script's own logs report
-        # actual work. Demoting our intro to DEBUG keeps the no-op run silent.
+        # Always invoked; the script self-detects "already installed" (typically a
+        # pinned-tag check) and stays quiet. Our intro is DEBUG so a no-op run is silent.
         install_script = plugin_dir / "install.py"
         if install_script.exists():
             logger.debug(f"Running custom install script for {name}...")

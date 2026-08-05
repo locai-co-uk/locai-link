@@ -11,7 +11,7 @@
 # Also clears any legacy Setup Assistant.app (pre-merge installs shipped a
 # separate onboarding app; it now lives inside the main app).
 #
-# Refuses to run without root (see the $EUID check) — prior versions
+# Refuses to run without root (see the $EUID check); prior versions
 # swallowed permission-denied errors and exited 0, falsely claiming success.
 #
 # Approach 1 runs as root but LaunchAgents + Tauri caches live in the console
@@ -24,7 +24,7 @@
 #
 # The app deregisters the device from Control before it runs this script, so the
 # normal uninstall flow removes the dashboard row.
-# Running this script standalone does NOT deregister — delete the device row in
+# Running this script standalone does NOT deregister; delete the device row in
 # Control manually in that case. No Keychain items are touched.
 set -uo pipefail
 
@@ -47,7 +47,7 @@ log() {
 }
 
 # Refuse non-root. Every step writes into /Library, /Applications,
-# /usr/local/bin, or the console user's Library — without root the rm's fail
+# /usr/local/bin, or the console user's Library; without root the rm's fail
 # silently (`|| true`) and the script exits 0 while leaving the app installed.
 if [[ $EUID -ne 0 ]]; then
     cat >&2 <<EOF
@@ -66,7 +66,7 @@ fi
 
 # --- 1. Stop + unload LaunchAgents (user domain) ---------------------
 # Per-user; `launchctl bootout gui/$UID/...` targets the console user's aqua
-# session. Best-effort — bootout on a stopped service returns non-zero.
+# session. Best-effort; bootout on a stopped service returns non-zero.
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     log "no console user detected; skipping user-domain launchctl steps"
@@ -80,7 +80,7 @@ else
             "gui/$USER_UID/uk.co.locai.link.agent" 2>/dev/null || true
     fi
     # Delete the plists themselves (bootout only unloads, doesn't
-    # remove the file — a subsequent login would re-load them).
+    # remove the file; a subsequent login would re-load them).
     USER_LA_DIR="/Users/$CONSOLE_USER/Library/LaunchAgents"
     rm -f "$USER_LA_DIR/uk.co.locai.link.agent.plist"
     rm -f "$USER_LA_DIR/uk.co.locai.link.companion.plist"
@@ -90,7 +90,7 @@ fi
 # bootout SIGTERMs each service, but a runtime spawned outside launchd (e.g.
 # `locai run` from a terminal) isn't covered. Match `/<name>.app/` (leading +
 # trailing slashes) so we don't hit macOS's own /System .../Setup Assistant.app.
-# The main app is killed LAST — it typically invoked us via osascript, so
+# The main app is killed LAST; it typically invoked us via osascript, so
 # killing it earlier cuts off our own error path.
 pkill -f "$INSTALL_ROOT/locai-link"                 2>/dev/null || true
 # Legacy Setup Assistant copies (pre-merge installs).

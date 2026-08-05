@@ -1,16 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Locai Link — one binary, two shapes:
-//! - headless (`--no-default-features`): the `supervisor` loop only (resolve
-//!   `current`, spawn + supervise the runtime child, exit-42 respawn, rollback,
-//!   Pattern-B bootstrap).
-//! - desktop (`ui`, default): the supervisor plus the tray + setup/preferences
-//!   windows (the `tray` / `preferences` / `setup` modules).
+//! Locai Link: one binary in two shapes.
+//! - headless (`--no-default-features`): the `supervisor` loop only.
+//! - desktop (`ui`, default): the supervisor plus the tray and setup/preferences windows.
 
 pub mod supervisor;
 
-// Folded-in platform/Control helpers (was the `locai-link-shared` crate).
+// Folded-in platform/Control helpers.
 mod shared;
 
 #[cfg(feature = "ui")]

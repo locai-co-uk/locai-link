@@ -97,12 +97,12 @@ class _ChatTelemetry:
                 self._stream = bool(req.get("stream"))
                 self._model = req.get("model")
         except json.JSONDecodeError:
-            # Best-effort metadata only — a malformed request body is the
+            # Best-effort metadata only: a malformed request body is the
             # upstream's problem to reject, not ours to crash on.
             pass
 
     # ------------------------------------------------------------------
-    # Streaming SSE — parse frames as bytes arrive
+    # Streaming SSE: parse frames as bytes arrive
     # ------------------------------------------------------------------
 
     def ingest_chunk(self, chunk: bytes) -> None:
@@ -145,7 +145,7 @@ class _ChatTelemetry:
             self._absorb(obj)
 
     # ------------------------------------------------------------------
-    # Non-streaming — single JSON body
+    # Non-streaming: single JSON body
     # ------------------------------------------------------------------
 
     def ingest_full_response(self, body: bytes) -> None:
@@ -166,7 +166,7 @@ class _ChatTelemetry:
         if isinstance(usage, dict):
             self._usage = usage
         # NOTE: we deliberately don't update self._model from the response. The
-        # request body's model is the canonical id (what the client asked for —
+        # request body's model is the canonical id (what the client asked for,
         # the pipeline_id UUID). The response echoes the llama-server file stem,
         # which doesn't match the adapter's id and breaks per-model attribution.
         for choice in obj.get("choices") or []:
@@ -208,12 +208,11 @@ class _ChatTelemetry:
 
 
 class _ProxyHandler(BaseHTTPRequestHandler):
-    """OPTIONS / GET / POST endpoints — everything else returns 404.
+    """OPTIONS / GET / POST endpoints; everything else returns 404.
 
     Surface intentionally minimal: only the llama-swap endpoints used by
     browser and native clients (preflight, model list, health, chat
-    completions). Adding routes here is a deliberate design decision,
-    not a "throw a kitchen sink in front" — we don't want this to become
+    completions). Adding routes is a deliberate decision; this must not become
     a general HTTP proxy.
     """
 
@@ -241,12 +240,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _sanitize_header_value(raw: str | None) -> str:
         """Strip CR/LF + surrounding whitespace from a value before it touches a header.
 
-        Header injection (HTTP response splitting) defense: any value that
-        ultimately reaches ``send_header`` MUST be free of CR/LF. The
-        allowlist check below also prevents the attack — no legitimate
-        Origin contains CR/LF, so a tampered one can't match. Sanitizing
-        here is belt-and-braces and lets the static analyzer prove safety
-        from input to output.
+        Header injection (HTTP response splitting) defense: any value reaching
+        ``send_header`` MUST be free of CR/LF. Belt-and-braces alongside the
+        Origin allowlist, and it lets the static analyzer prove safety.
         """
         if not raw:
             return ""
@@ -256,8 +252,8 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         """Origin to echo back in ACAO, or None for non-browser/disallowed callers.
 
         Requests without an Origin header (curl, Python requests, native
-        clients) deliberately return None — they're not subject to CORS,
-        so omitting the header is correct AND prevents header pollution.
+        clients) deliberately return None: they're not subject to CORS, so
+        omitting the header is correct and prevents header pollution.
         """
         origin = self._sanitize_header_value(self.headers.get("Origin"))
         if not origin:
@@ -276,7 +272,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         """
         if echo_origin:
             self.send_header("Access-Control-Allow-Origin", echo_origin)
-        # Always Vary on Origin even when no ACAO is sent — tells caches
+        # Always Vary on Origin even when no ACAO is sent: tells caches
         # the response varies depending on the request Origin, so a CDN
         # or shared cache doesn't serve a stale cross-origin response.
         self.send_header("Vary", "Origin")
@@ -319,14 +315,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             return
         try:
             on_telemetry(recorder.build_record())
-        except Exception as exc:  # noqa: BLE001 — never let observability break the request
+        except Exception as exc:  # noqa: BLE001 (never let observability break the request)
             logger.debug("[serving_proxy] telemetry callback failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Routes
     # ------------------------------------------------------------------
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 — stdlib API
+    def do_OPTIONS(self) -> None:  # noqa: N802 (stdlib API)
         """CORS preflight. Any path; browser doesn't care which.
 
         Chrome 142+'s Local Network Access requires
@@ -342,7 +338,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Private-Network", "true")
         # Cache the preflight for a day so subsequent chat messages skip the
         # OPTIONS round-trip. Browsers cap this at their own ceiling (Chrome
-        # 2h, Firefox 24h) — sending the upper bound is harmless.
+        # 2h, Firefox 24h); sending the upper bound is harmless.
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -376,7 +372,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             logger.info("[serving_proxy] client disconnected during GET %s", self.path)
 
     def do_POST(self) -> None:  # noqa: N802
-        """Chat completions. The hot path — and the telemetry capture point."""
+        """Chat completions. The hot path, and the telemetry capture point."""
         if self.path != "/v1/chat/completions":
             self.send_error(404, "Not Found")
             return
@@ -394,7 +390,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 data=body,
                 headers=self._forward_headers(),
                 stream=True,
-                # Generous timeout — chat completions on a 14B model can
+                # Generous timeout: chat completions on a 14B model can
                 # legitimately run for minutes on cold cache.
                 timeout=600,
             )
@@ -445,16 +441,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             if recorder is not None and nonstream_buf is not None:
                 recorder.ingest_full_response(bytes(nonstream_buf))
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            # Client disconnected mid-stream — common when the user navigates
+            # Client disconnected mid-stream: common when the user navigates
             # away or hits Stop. (On Windows: ConnectionAbortedError /
             # WinError 10053.) Drop the upstream so llama-swap's
             # maxConcurrent slot frees immediately rather than at TTL expiry.
             logger.info("[serving_proxy] client disconnected mid-stream; closing upstream")
         finally:
             resp.close()
-            # Fire telemetry whether or not the client hung up — a
-            # cancelled stream still represents a real inference for
-            # whatever was generated before the disconnect.
+            # Fire telemetry whether or not the client hung up: a cancelled
+            # stream still represents a real inference for whatever was
+            # generated before the disconnect.
             self._fire_telemetry(recorder)
 
 
@@ -474,7 +470,7 @@ class ServingProxy:
         ...
         proxy.stop()
 
-    Idempotent ``start()`` / ``stop()`` — calling them when already in the
+    Idempotent ``start()`` / ``stop()``: calling them when already in the
     target state is a no-op. Survives upstream restarts: the proxy only
     cares about its own listen socket; upstream availability is a
     per-request concern surfaced as 502s.
@@ -508,7 +504,7 @@ class ServingProxy:
             if self._port_in_use():
                 # Fail loudly: callers like SwapManager.ensure_proxy() can't
                 # detect a silent return, and readiness probes against the
-                # internal upstream port pass independently — so swallowing
+                # internal upstream port pass independently, so swallowing
                 # this would let serving look healthy with no public proxy
                 # actually listening.
                 raise RuntimeError(
@@ -523,7 +519,7 @@ class ServingProxy:
                 allowed_origins=self._allowed_origins,
                 on_telemetry=self._on_telemetry,
             )
-            # poll_interval bounds shutdown() blocking — tests that
+            # poll_interval bounds shutdown() blocking: tests that
             # spin proxies up and down eat this per teardown. 50ms is
             # far below any user-perceptible cost in production and
             # saves several seconds on the test suite.
@@ -550,7 +546,7 @@ class ServingProxy:
             try:
                 self._server.shutdown()
                 self._server.server_close()
-            except Exception as exc:  # noqa: BLE001 — best-effort teardown
+            except Exception as exc:  # noqa: BLE001 (best-effort teardown)
                 logger.warning("[serving_proxy] shutdown raised: %s", exc)
             self._server = None
             self._thread = None

@@ -109,7 +109,6 @@ pub fn stop_now(app_id: &str) -> io::Result<()> {
     }
 }
 
-/// Reverse-DNS labels shared across platforms — LaunchAgent label on macOS,
-/// `.desktop` stem on Linux, `Run` registry value name on Windows.
+/// Reverse-DNS labels used as the autostart entry identifier on each platform.
 pub const AGENT_APP_ID: &str = "uk.co.locai.link.agent";
 pub const COMPANION_APP_ID: &str = "uk.co.locai.link.companion";

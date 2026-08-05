@@ -8,7 +8,7 @@ placeholders like `${identity.device_id}` and `${identity.api_key}`. Values
 known only on the client side (the `api_url` the agent was launched with, the
 `api_key` returned in the same response) are substituted by `resolve_templates`.
 
-Unknown placeholders are preserved verbatim — this lets runtime placeholders
+Unknown placeholders are preserved verbatim, letting runtime placeholders
 like `{cid}` / `{mid}` pass through untouched (they use a different syntax and
 are substituted by handlers at emit time).
 """
@@ -42,7 +42,7 @@ def resolve_templates(obj: Any, context: dict[str, Any]) -> Any:
 
 
 def _lookup(context: dict[str, Any], path: str) -> str:
-    """Resolve `a.b.c` from `context['a']['b']['c']` — or return the literal placeholder."""
+    """Resolve `a.b.c` from `context['a']['b']['c']`, or return the literal placeholder."""
     node: Any = context
     for part in path.split("."):
         if not isinstance(node, dict) or part not in node:

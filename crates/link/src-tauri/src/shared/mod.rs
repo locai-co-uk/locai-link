@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Platform + Control helpers (autostart, boot.json, install-state, health).
-//! Internal library surface: not every item is used in every feature build
-//! (most is `ui`-only), so `allow` the unused-in-this-config lints crate-wide
-//! for this module — mirrors its prior life as a separate library crate.
+//! Platform and Control helpers (autostart, boot.json, install-state, health).
+//! Not every item is used in every feature build (most is `ui`-only), so allow
+//! the unused-in-this-config lints crate-wide for this module.
 #![allow(dead_code, unused_imports)]
 
 pub mod autostart;

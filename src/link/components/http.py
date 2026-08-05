@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""HTTP pipeline components — polling source and publishing sink."""
+"""HTTP pipeline components: polling source and publishing sink."""
 
 import logging
 import time
@@ -20,14 +20,7 @@ class HttpPoller(Source):
     """Polls a REST API at a fixed interval with Auth support."""
 
     def __init__(self, url: str, api_key: str | None = None, interval: float = 1.0, **kwargs):
-        """Initialises the HttpPoller.
-
-        Args:
-            url (str): The target URL.
-            api_key (str | None): Optional API key for Bearer auth.
-            interval (float): Polling interval in seconds.
-            kwargs (Any): Additional arguments.
-        """
+        """Initialises the HttpPoller (api_key, if set, becomes a Bearer header)."""
         # 1. Prepare Headers
         headers = {}
         if api_key:
@@ -40,13 +33,9 @@ class HttpPoller(Source):
 
     @override
     def __call__(self) -> Any | None:
-        """Polls the configured URL.
+        """Polls the URL when the interval has elapsed; returns data or None.
 
-        Returns:
-            Any | None: The response data if polling occurred, else None.
-
-        Raises:
-            HttpError: Propagated for non-retryable failures (e.g. 401/403).
+        Raises HttpError on non-retryable failures (e.g. 401/403).
         """
         now = time.time()
         if now - self.last_poll < self.interval:
@@ -68,14 +57,7 @@ class HttpPublisher(Sink):
     """Posts data to a REST API with Auth support."""
 
     def __init__(self, url: str, api_key: str | None = None, timeout: int = 10, **kwargs):
-        """Initialises the HttpPublisher.
-
-        Args:
-            url (str): The target URL.
-            api_key (str | None): Optional API key for Bearer auth.
-            timeout (int): Request timeout in seconds.
-            kwargs (Any): Additional arguments.
-        """
+        """Initialises the HttpPublisher (api_key, if set, becomes a Bearer header)."""
         # 1. Prepare Headers
         headers = {}
         if api_key:
@@ -86,16 +68,9 @@ class HttpPublisher(Sink):
 
     @override
     def __call__(self, payload: Any) -> bool | None:
-        """Posts the payload to the configured URL.
+        """Posts the payload; returns True/False, or None if payload is empty.
 
-        Args:
-            payload (Any): The data to post.
-
-        Returns:
-            bool | None: True if successful, False if failed, None if no payload.
-
-        Raises:
-            HttpError: Propagated for non-retryable failures (e.g. 401/403).
+        Raises HttpError on non-retryable failures (e.g. 401/403).
         """
         if not payload:
             return None

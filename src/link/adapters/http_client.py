@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""HTTP client adapter with typed errors — distinguishes retryable vs fatal failures."""
+"""HTTP client adapter with typed errors, distinguishing retryable vs fatal failures."""
 
 import logging
 from typing import Any
@@ -28,14 +28,8 @@ class HttpClient:
     def __init__(
         self, base_url: str | None = None, default_headers: dict[str, str] | None = None, timeout: float = 5.0
     ):
-        """Initialises the HttpClient.
-
-        Args:
-            base_url (str | None): The base URL for the client.
-            default_headers (dict[str, str] | None): Default headers to include in every request.
-            timeout (float): Request timeout in seconds.
-        """
-        # Clean the base_url but handle None gracefully
+        """Initialises the HttpClient."""
+        # Strip trailing slash, tolerating None
         self.base_url = base_url.rstrip("/") if base_url else ""
         self.timeout = timeout
         self.session = requests.Session()
@@ -46,15 +40,8 @@ class HttpClient:
     def get(self, endpoint: str = "", params: dict[str, Any] | None = None) -> Any | None:
         """Performs a GET request.
 
-        Args:
-            endpoint (str): The API endpoint (relative to base_url).
-            params (dict[str, Any] | None): Query parameters.
-
-        Returns:
-            Any | None: The JSON response data or None if the request failed.
-
-        Raises:
-            HttpError: On non-retryable failures (auth errors, not found, etc.).
+        Returns the parsed JSON, or None on retryable failures (timeout, connection
+        error, 5xx, bad JSON). Raises HttpError on non-retryable failures (auth, 404).
         """
         url = self._build_url(endpoint)
         try:
@@ -85,15 +72,8 @@ class HttpClient:
     def post(self, endpoint: str = "", json_data: Any = None) -> bool:
         """Performs a POST request.
 
-        Args:
-            endpoint (str): The API endpoint (relative to base_url).
-            json_data (Any): The JSON payload to send.
-
-        Returns:
-            bool: True if the request was successful, False otherwise.
-
-        Raises:
-            HttpError: On non-retryable failures (auth errors, bad request, etc.).
+        Returns True on success, False on retryable failures (timeout, connection
+        error, 5xx). Raises HttpError on non-retryable failures (auth, bad request).
         """
         url = self._build_url(endpoint)
         try:
@@ -122,24 +102,16 @@ class HttpClient:
         self.session.close()
 
     def _build_url(self, endpoint: str) -> str:
-        """Intelligently joins base_url and endpoint without forcing slashes.
-
-        Args:
-            endpoint (str): The target endpoint.
-
-        Returns:
-            str: The full URL.
-        """
-        # 1. Absolute Overrides (e.g. get("https://google.com"))
+        """Joins base_url and endpoint without forcing slashes."""
+        # Absolute URLs override the base entirely.
         if endpoint.startswith("http"):
             return endpoint
 
-        # 2. No Endpoint provided? Return base exactly as is.
+        # No endpoint: return the base as-is.
         if not endpoint:
             return self.base_url
 
-        # 3. Join with slash
-        # If we have a base, join them. If no base, return endpoint (relative path).
+        # Join with a slash if there's a base, else treat endpoint as the full path.
         if self.base_url:
             return f"{self.base_url}/{endpoint.lstrip('/')}"
         return endpoint

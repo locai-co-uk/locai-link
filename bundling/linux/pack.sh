@@ -12,7 +12,7 @@
 #     ( cd crates/link && npm run tauri build -- --no-bundle )
 #
 # Plugin selection is read from dist/locai-link/manifest.json (written by
-# build.py) — the tarball is labelled for whatever plugins the bundle has;
+# build.py); the tarball is labelled for whatever plugins the bundle has;
 # no separate --plugins flag here.
 #
 # Output layout (inside the tarball):
@@ -76,7 +76,7 @@ MANIFEST="$BUNDLE_DIR/current/manifest.json"
 # --- Derive the asset name from manifest.json ------------------------
 # manifest.json is the single source of truth for bundle contents (build.py
 # wrote it from the compiled plugin set), so the tarball label can't diverge
-# from what's inside — a separate flag-based list could mislabel.
+# from what's inside; a separate flag-based list could mislabel.
 
 read -r ASSET_STEM VERSION < <(python3 -c '
 import json, sys
@@ -114,7 +114,7 @@ cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
 # root; stage it inside bundle/ so install.sh's `cp -a bundle/.` lays it down.
 install -m 0755 "$TAURI_DIR/locai-link" "$ROOT/bundle/locai-link"
 
-# 2b. App content hashes for whole-app OTA — written to the tarball's
+# 2b. App content hashes for whole-app OTA, written to the tarball's
 # manifest so swap_bundle re-swaps a UI app only when its source changed.
 python3 "$REPO_ROOT/bundling/inject_app_hashes.py" \
     --manifest "$ROOT/bundle/current/manifest.json" --repo-root "$REPO_ROOT"

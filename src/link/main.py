@@ -1,4 +1,4 @@
-"""CLI entry point — dispatches setup, run, install, reset, stop subcommands."""
+"""CLI entry point: dispatches setup, run, install, reset, stop subcommands."""
 
 import argparse
 import logging
@@ -32,11 +32,7 @@ logger = setup_logging()
 
 
 def setup(args: argparse.Namespace):
-    """Lightweight Setup: Only installs Python dependencies.
-
-    Args:
-        args (argparse.Namespace): The parsed command line arguments.
-    """
+    """Lightweight setup: only installs Python dependencies."""
     logger.info("Setting up Loc.ai Python Environment")
     install_targets = []
     if args.dev:
@@ -51,13 +47,8 @@ def setup(args: argparse.Namespace):
 
 
 def install(args: argparse.Namespace):
-    """Orchestrator: The 'Web Installer' Logic.
-
-    Handles cloning the repository, setting up the environment, registering the
-    device, and starting the agent — all in one command.
-
-    Args:
-        args (argparse.Namespace): The parsed command line arguments.
+    """Web-installer orchestrator: clone the repo, set up the environment,
+    register the device, and start the agent, all in one command.
     """
     cwd = Path.cwd()
 
@@ -160,14 +151,11 @@ def install(args: argparse.Namespace):
 
 
 def run(args: argparse.Namespace):
-    """Unified Entry Point.
+    """Unified entry point for identity resolution.
 
-    1. CLI Config Provided? -> Resume State or Bootstrap New Session.
-    2. No CLI Args? -> Auto-Resume Latest Session.
-    3. No Session? -> Fallback to Default Config.
-
-    Args:
-        args (argparse.Namespace): The parsed command line arguments.
+    1. CLI config provided? -> resume state or bootstrap new session.
+    2. No CLI args? -> auto-resume latest session.
+    3. No session? -> fall back to default config.
     """
     cwd = Path.cwd().absolute()
     state_manager = StateManager()
@@ -246,7 +234,7 @@ def run(args: argparse.Namespace):
                 logger.critical(f"Fleet enrollment failed: {e}", exc_info=True)
                 sys.exit(1)
         elif FLEET_MARKER_PATH.exists():
-            # Wiped fleet device — refuse to silently re-bootstrap as a fresh agent.
+            # Wiped fleet device: refuse to silently re-bootstrap as a fresh agent.
             logger.critical(
                 "This device was fleet-enrolled but no local session was found. "
                 "Re-run enrollment with --fleet-key (normally done by the partner installer)."
@@ -296,8 +284,8 @@ def run(args: argparse.Namespace):
         logger.critical(f"Runtime crash: {e}")
         sys.exit(1)
     finally:
-        # Flush logging handlers BEFORE closing Zenoh — the offline lifecycle message queued
-        # by AsyncZenohHandler must drain against an open session, not a closed one.
+        # Flush logging handlers BEFORE closing Zenoh: the offline lifecycle message
+        # queued by AsyncZenohHandler must drain against an open session.
         try:
             logging.shutdown()
         except Exception:
@@ -309,7 +297,7 @@ def run(args: argparse.Namespace):
     # - `update_requested` → pull latest code + refresh binaries, then execv.
     # - `config_restart_requested` → execv only (no git pull) to pick up a
     #   persisted-but-unapplied AgentConfig after a hot-swap failure.
-    # Code update takes priority — if both are set, git pull covers the config too.
+    # Code update takes priority; if both are set, git pull covers the config too.
     if runtime.update_requested:
         _apply_update_and_reexec(cwd, agent_config)
     elif runtime.config_restart_requested:
@@ -318,21 +306,20 @@ def run(args: argparse.Namespace):
 
 
 def self_check(args: argparse.Namespace) -> int:
-    """Boot the runtime to the point of config + transport + plugins, then exit cleanly.
+    """Boot the runtime to config + transport + plugins, then exit cleanly.
 
     Sole consumer: ``bundle_updater.health_check()``. Run on a freshly extracted
-    bundle before flipping ``current`` — proves the new binary can import, parse
-    the active session, open its transport, and enumerate plugin entry points.
-    No pipelines start, no inference runs.
-
-    Exit 0 = healthy, nonzero = failure (caller rolls back the flip).
+    bundle before flipping ``current`` to prove the new binary can import, parse
+    the active session, open its transport, and enumerate plugin entry points; no
+    pipelines start and no inference runs. Exit 0 = healthy, nonzero = failure
+    (caller rolls back the flip).
     """
     state_manager = StateManager()
     saved_state = state_manager.load_state()
     if saved_state is None:
-        # No session means there's nothing meaningful to check against. The
-        # bootstrap path (Pattern B) hits this — that's fine, it has its own
-        # verification at fetch time. OTA path always has a session.
+        # No session means nothing meaningful to check against. The bootstrap
+        # path (Pattern B) hits this and has its own verification at fetch time;
+        # the OTA path always has a session.
         logger.info("self-check: no session found — binary boot only.")
         try:
             from link.components.registry import ComponentRegistry
@@ -346,9 +333,8 @@ def self_check(args: argparse.Namespace) -> int:
     try:
         agent_config = AgentConfig(**saved_state)
     except Exception as e:
-        # Log the exception class only — the message can include field
-        # values from saved_state (identity tokens, api keys) which we
-        # don't want written to the self-check log.
+        # Log the exception class only: the message can include field values
+        # from saved_state (identity tokens, api keys) we don't want logged.
         logger.error("self-check: session present but unparseable (%s)", type(e).__name__)
         return 1
 
@@ -379,23 +365,16 @@ def self_check(args: argparse.Namespace) -> int:
 
 
 def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
-    """Applies an OTA update via the right path for the install shape.
+    """Apply an OTA update via the right path for the install shape.
 
     Source install (cloned repo, ``sys.frozen`` False): git pull + plugin
-    refresh + ``os.execv``. Same PID, same FDs, same env — service managers
-    see a continuously running process.
+    refresh + ``os.execv`` (same PID, FDs, and env, so service managers see a
+    continuously running process).
 
-    Bundled install (PyInstaller artifact): ``swap_bundle`` downloads the new
-    release, verifies, extracts, health-checks, and atomically flips the
-    ``current`` pointer. The process then exits with code 42, which the Rust
-    launcher (or any compatible supervisor) recognises as "respawn me from
-    whatever ``current`` now points at". We never ``execv`` in the bundle
-    path because ``sys.executable`` for a frozen binary points at the *old*
-    version's runtime, which the new ``current`` is replacing.
-
-    Args:
-        repo_dir (Path): The project root (git repository) — used only on the source path.
-        config (AgentConfig): The active config — used to pick which plugins refresh on the source path.
+    Bundled install (PyInstaller artifact): ``swap_bundle`` downloads, verifies,
+    extracts, health-checks, and atomically flips ``current``, then exits 42 for
+    the launcher to respawn from ``current``. We never ``execv`` here because a
+    frozen ``sys.executable`` points at the old version being replaced.
     """
     logger.info("Applying OTA update...")
 
@@ -411,16 +390,14 @@ def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
             logger.critical(f"Bundle update failed: {e}")
             sys.exit(1)
         except Exception as e:
-            # Anything BundleUpdateError doesn't cover — OSError from disk
-            # full, a network stack panic, whatever. Route through the same
-            # graceful exit path rather than letting the launcher see an
-            # uncaught traceback and interpret it as a rollback trigger.
+            # Anything BundleUpdateError doesn't cover (disk-full OSError, a
+            # network stack panic): route through the same graceful exit path so
+            # the launcher doesn't read an uncaught traceback as a rollback trigger.
             logger.critical(f"Bundle update failed with unexpected error ({type(e).__name__}): {e}")
             sys.exit(1)
-        # Always exit 42 — whether we flipped or were already at latest, the
-        # launcher should respawn from `current`. Returning 0 would tell the
-        # launcher to stay stopped, which is the wrong outcome when the user
-        # explicitly requested an update check.
+        # Always exit 42: whether we flipped or were already at latest, the
+        # launcher should respawn from `current`. Returning 0 would tell it to
+        # stay stopped, wrong when the user requested an update check.
         logger.info("Exiting (code 42) for launcher to respawn from current.")
         sys.exit(42)
 
@@ -432,17 +409,13 @@ def _apply_update_and_reexec(repo_dir: Path, config: AgentConfig):
         sys.exit(1)
 
     logger.info("Restarting agent with updated code...")
-    # execv replaces this process image in place — same PID, same FDs, same env.
-    # Service managers (systemd, launchd) see a continuously running process.
+    # execv replaces this process image in place (same PID, FDs, env), so
+    # service managers see a continuously running process.
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def _deploy_service(cwd: Path):
-    """Installs the Agent as a service.
-
-    Args:
-        cwd (Path): The current working directory.
-    """
+    """Install the agent as a service."""
     logger.info("Deploying Agent Service...")
 
     python_exe = cwd / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
@@ -482,17 +455,10 @@ def stop():
 
 
 def _find_link_repo_root(start: Path) -> Path | None:
-    """Locate the locai-link repository root at or above ``start``.
+    """Locate the locai-link repo root at or above ``start``, or None.
 
-    Walks upward looking for a ``pyproject.toml`` that positively identifies
-    the locai-link project (project name ``locai-link``, or an ``src/link``
-    package alongside it as a structural fallback).
-
-    Args:
-        start (Path): Directory to begin the upward search from.
-
-    Returns:
-        Path | None: The repo root, or None if it cannot be identified.
+    Walks upward for a ``pyproject.toml`` that identifies the locai-link project
+    (project name ``locai-link``, or an ``src/link`` package as a fallback).
     """
     for candidate in (start, *start.parents):
         pyproject = candidate / "pyproject.toml"
@@ -511,11 +477,7 @@ def _find_link_repo_root(start: Path) -> Path | None:
 
 
 def reset(hard: bool = False):
-    """Nukes the environment recursively.
-
-    Args:
-        hard (bool): If True, deletes session files as well.
-    """
+    """Nuke the environment recursively; ``hard`` also deletes session files."""
     logger.info("Resetting environment...")
 
     # Stop & Uninstall
@@ -594,7 +556,7 @@ def reset(hard: bool = False):
 
 
 def main():
-    """CLI entry point — parses arguments and dispatches to subcommands."""
+    """CLI entry point: parses arguments and dispatches to subcommands."""
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
 
@@ -639,7 +601,7 @@ def main():
     subparsers.add_parser("stop", help="Stops all running services.")
     subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
 
-    # Self-check — minimal boot used by the OTA health check in bundle_updater.
+    # Self-check: minimal boot used by the OTA health check in bundle_updater.
     subparsers.add_parser(
         "self-check",
         help="Boot to config+transport+plugins and exit 0 if healthy. Used by OTA rollback.",

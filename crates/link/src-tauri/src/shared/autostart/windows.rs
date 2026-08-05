@@ -5,7 +5,7 @@
 //!
 //! Real implementation writes a REG_SZ under
 //! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, keyed on `app_id`
-//! with the quoted `exec_path` as data — runs the exe once per logon. Stub
+//! with the quoted `exec_path` as data, to run the exe once per logon. Stub
 //! keeps [`crate::autostart`]'s API stable until the Windows target lands.
 
 use std::io;

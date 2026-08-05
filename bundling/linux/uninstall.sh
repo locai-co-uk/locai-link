@@ -31,7 +31,7 @@ fi
 
 # --- 1. Stop + disable user services (best-effort) --------------------
 # `disable --now` stops and prevents auto-start in one call. Failures are
-# non-fatal — just ensure nothing's running before we delete the binary.
+# non-fatal; just ensure nothing's running before we delete the binary.
 systemctl --user disable --now locai-link-companion.service 2>/dev/null || true
 # LEGACY: pre-merge separate agent unit (the merged binary supervises now).
 systemctl --user disable --now locai-link-agent.service     2>/dev/null || true

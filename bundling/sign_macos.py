@@ -59,7 +59,7 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # Apple's recommended bundle identifier convention. Notarisation accepts any
-# reverse-DNS string but it's stored in the staple ticket — keep it stable
+# reverse-DNS string but it's stored in the staple ticket; keep it stable
 # across releases so audits and revocation lookups stay clean.
 BUNDLE_IDENTIFIER = "uk.co.locai.link"
 
@@ -185,7 +185,7 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
 
         # notarytool --wait blocks until Accepted/Invalid. Two failure modes:
         #  (a) notarytool fails to run (network/auth/outage/too-large): exits
-        #      nonzero, maybe no JSON — surface whatever it wrote.
+        #      nonzero, maybe no JSON; surface whatever it wrote.
         #  (b) reaches a verdict but it's Invalid: notarytool exits 0 (the
         #      SUBMISSION succeeded), so detect it via the JSON status field.
         # check=False to handle the exit code ourselves; echo both streams so CI
@@ -261,7 +261,7 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
 
     # Staple the ticket so first launch works offline. BEST-EFFORT: stapler only
     # writes into .app/.dmg/.pkg; a PyInstaller onedir is a plain dir, so it
-    # exits 73. Skipping is safe here — the bundle is notarised, and on first
+    # exits 73. Skipping is safe here: the bundle is notarised, and on first
     # launch (which always has network, since Link registers with the control
     # plane immediately) Gatekeeper accepts it via online lookup. Wrapping the
     # onedir in a .dmg/.pkg later would let stapling that container bake the
@@ -286,12 +286,12 @@ def notarise(bundle: Path, key_id: str, issuer_id: str, key_path: Path) -> None:
                 "stapling. Notarisation itself is intact."
             )
     except Exception as exc:
-        # Defence in depth — we already use check=False above, but log
+        # Defence in depth: we already use check=False above, but log
         # anything unexpected and continue to spctl.
         logger.warning("Stapler step raised unexpectedly: %s. Continuing.", exc)
 
     # Final Gatekeeper assessment (what macOS does on first launch).
-    # IMPORTANT: target the main executable, NOT the bundle dir — spctl treats a
+    # IMPORTANT: target the main executable, NOT the bundle dir; spctl treats a
     # directory as a .app and expects Contents/Resources/, failing with "code
     # has no resources but signature indicates they must be present". The
     # canonical check for a CLI binary is against the Mach-O itself. With

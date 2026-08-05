@@ -173,12 +173,7 @@ pub fn request_deploy(id: &DeviceIdentity, model_id: &str) -> Result<DeployOutco
 }
 
 /// Deregister (delete) the calling device from Control during uninstall.
-///
-/// `DELETE {api_url}/agent/{device_id}` with the device's own API key.
-/// A 404 (row already gone) is treated as success. A 401 means the key was
-/// rejected and the device was NOT deleted, so it is returned as an error rather
-/// than a false success. Any error is returned for the caller to log — uninstall
-/// must never block on this.
+/// Errors are returned for the caller to log; uninstall must never block on this.
 pub fn deregister_device(id: &DeviceIdentity) -> Result<(), String> {
     let base = secure_api_base(&id.api_url)?;
     let url = format!("{base}/agent/{}", encode_segment(&id.device_id));

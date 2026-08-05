@@ -1,12 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `boot.json` parsing — describes what to fetch on first launch when no
-//! `current` is installed yet (Pattern B).
-//!
-//! The host installer drops this file at `<install_root>/boot.json`
-//! alongside the launcher binary; the contents are the only thing the
-//! bootstrap path needs to resolve a download URL.
+//! `boot.json` parsing: describes what to fetch on first launch when no
+//! `current` is installed yet (Pattern B). The host installer drops this file
+//! at `<install_root>/boot.json` alongside the launcher binary; its contents
+//! are all the bootstrap path needs to resolve a download URL.
 
 use std::fs;
 use std::path::Path;
@@ -17,9 +15,9 @@ const BOOT_JSON: &str = "boot.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
-    // host_app + channel are documented schema fields, unused at runtime today —
-    // present so partner installers write the full payload now and we can enable
-    // telemetry / staged-rollout routing later without a schema migration.
+    // host_app and channel are documented schema fields, unused at runtime today
+    // but written by installers so telemetry/staged-rollout routing can use them
+    // later without a schema migration.
     #[allow(dead_code)]
     pub host_app: String,
     #[serde(default)]
@@ -28,9 +26,9 @@ pub struct BootConfig {
     #[serde(default = "default_channel")]
     pub channel: String,
     pub asset_repo: String,
-    /// Optional direct download URL. When present, skips the GitHub
-    /// Releases API entirely — useful for air-gapped mirrors and CI
-    /// stubs. The sibling `<url>.sha256` is still consulted for verify.
+    /// Optional direct download URL. When present, skips the GitHub Releases
+    /// API entirely (air-gapped mirrors, CI stubs). The sibling `<url>.sha256`
+    /// is still consulted for verify.
     #[serde(default)]
     pub asset_url: Option<String>,
 }
@@ -39,8 +37,8 @@ fn default_channel() -> String {
     "stable".to_string()
 }
 
-/// Canonical order of plugin codes in the asset name. MUST mirror `PLUGIN_ORDER`
-/// in `bundling/manifest.py` — the tarball is named in this order.
+/// Canonical order of plugin codes in the asset name; the tarball is named in
+/// this order. MUST mirror `PLUGIN_ORDER` in `bundling/manifest.py`.
 const PLUGIN_ORDER: &[&str] = &["llm", "stt"];
 
 impl BootConfig {
@@ -58,9 +56,8 @@ impl BootConfig {
             .iter()
             .filter(|p| !PLUGIN_ORDER.contains(&p.as_str()))
             .collect();
-        // Unknown plugins land at the end in input order. Surfaced later
-        // by the release-asset lookup if the name doesn't match anything
-        // published — better than silently dropping them.
+        // Unknown plugins land at the end in input order, so a bad name
+        // surfaces later via the release-asset lookup rather than being dropped.
         let mut joined: Vec<String> = codes.iter().map(|s| (*s).to_string()).collect();
         joined.extend(unknown.into_iter().cloned());
         let plugins = if joined.is_empty() {

@@ -5,7 +5,7 @@
 
 A bundle is identified by the plugin set compiled into it. The artifact
 name is derived from that plugin set (see ``bundling/manifest.py`` for
-the codes and ordering). There is no separate "profile" concept — the
+the codes and ordering). There is no separate "profile" concept; the
 plugin list IS the recipe.
 
 Bare (zero-plugin) bundles aren't a release shape; for that, use the
@@ -45,9 +45,9 @@ SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
 
-# Bundleable plugins — the keys of PLUGIN_CODES, in their canonical order.
-# Anything outside this set is a config error at parse time; bundling a
-# plugin without a code would produce an un-nameable artifact.
+# Bundleable plugins: the keys of PLUGIN_CODES, in canonical order. Anything
+# outside this set is a config error at parse time (a plugin without a code
+# would produce an un-nameable artifact).
 KNOWN_PLUGINS: list[str] = list(PLUGIN_CODES.keys())
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -122,10 +122,10 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
 
     PyInstaller writes everything to ``<dist>/locai-link/``. We move that into
     ``versions/<version>/`` and add a ``current`` pointer so the tarball extracts
-    on a target machine as a valid Pattern-A first install (see ../OTA-BUNDLE.md
-    §4.1). Any stale ``versions``/``current``/``CURRENT`` from a prior build is
-    removed first, else a second run would nest the old tree inside the new
-    ``versions/<version>/``. Returns the new versioned bundle directory.
+    on a target machine as a valid first install. Any stale
+    ``versions``/``current``/``CURRENT`` from a prior build is removed first, else
+    a second run would nest the old tree inside the new ``versions/<version>/``.
+    Returns the new versioned bundle directory.
     """
     if not bundle_dir.is_dir():
         raise SystemExit(f"Expected PyInstaller output at {bundle_dir}, but it isn't a directory.")
@@ -134,7 +134,7 @@ def restructure_to_versioned_layout(bundle_dir: Path, version: str) -> Path:
     dist_root = install_root.parent
     staging = dist_root / f"_staged_{version}"
 
-    # Clean stale versioning artefacts from a prior build — PyInstaller re-writes
+    # Clean stale versioning artefacts from a prior build; PyInstaller re-writes
     # everything else, but these live at the install-root layer we synthesise here.
     for stale in ("versions", "current", "CURRENT"):
         stale_path = install_root / stale

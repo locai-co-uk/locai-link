@@ -13,10 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_platform_arch() -> str:
-    """Determines the platform architecture for the current system.
-
-    Returns:
-        str: The platform string (e.g., 'x86_64-unknown-linux-gnu').
+    """Return the Rust target triple for the current platform (e.g. 'x86_64-unknown-linux-gnu').
 
     Raises:
         RuntimeError: If the platform is unsupported.
@@ -69,7 +66,7 @@ def get_platform_arch() -> str:
     raise RuntimeError(f"Unsupported platform: System={system}, Machine={machine}")
 
 
-# Machine identity — only the SHA-256 of the raw OS machine-id is sent over
+# Machine identity: only the SHA-256 of the raw OS machine-id is sent over
 # the wire, never the id itself. Resolution order: Linux /etc/machine-id →
 # Windows HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid → macOS ioreg
 # IOPlatformUUID → fallback UUID persisted in <CWD>/configs/.machine_id.

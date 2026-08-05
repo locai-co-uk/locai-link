@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Pipeline thread — connects a source to a sink with cooperative shutdown."""
+"""Pipeline thread: connects a source to a sink with cooperative shutdown."""
 
 import logging
 import threading
@@ -22,13 +22,7 @@ class Pipeline(threading.Thread):
     _IDLE_SLEEP_MAX = 0.2
 
     def __init__(self, pipeline_id: str, source: Any, sink: Any):
-        """Initialise the pipeline.
-
-        Args:
-            pipeline_id (str): The pipeline ID.
-            source (Any): The source component.
-            sink (Any): The sink component.
-        """
+        """Initialise the pipeline."""
         super().__init__(name=f"Pipeline-{pipeline_id}", daemon=True)
         self.pipeline_id = pipeline_id
         self.source = source
@@ -39,10 +33,7 @@ class Pipeline(threading.Thread):
 
     @override
     def run(self):
-        """The threaded loop for this specific pipeline.
-
-        Continuously fetches data from source and passes it to sink.
-        """
+        """Threaded loop: fetch from source, pass to sink, until stopped."""
         logger.info(f"Pipeline '{self.pipeline_id}' started.")
         idle_sleep = self._IDLE_SLEEP_MIN
         try:
@@ -59,11 +50,11 @@ class Pipeline(threading.Thread):
                 try:
                     data = self.source()
                     if data is not None:
-                        idle_sleep = self._IDLE_SLEEP_MIN  # active — reset backoff
+                        idle_sleep = self._IDLE_SLEEP_MIN  # active: reset backoff
                         if not self.sink(data):
                             logger.warning(f"Sink is returning False, something went wrong '{self.pipeline_id}'")
                     else:
-                        # No data — back off up to the cap.
+                        # No data: back off up to the cap.
                         time.sleep(idle_sleep)
                         idle_sleep = min(idle_sleep * 2, self._IDLE_SLEEP_MAX)
 

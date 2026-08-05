@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Structured logging — LinkReporter, async handlers, route-keyed event dispatch."""
+"""Structured logging: LinkReporter, async handlers, route-keyed event dispatch."""
 
 import json
 import logging
@@ -260,14 +260,7 @@ class AsyncZenohHandler(AsyncHandler):
 
     @override
     def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str) -> None:
-        """Emits the log payload to Zenoh.
-
-        Args:
-            target (str): The Zenoh key expression.
-            payload (str): The JSON payload.
-            raw_payload (Any): The raw log record data.
-            route_key (str): The routing key (log type).
-        """
+        """Publish the log payload to the Zenoh key expression ``target``."""
         if self.session:
             try:
                 self.session.put(target, payload)
@@ -300,17 +293,10 @@ class AsyncHTTPHandler(AsyncHandler):
 
     @override
     def _transport_emit(self, target: str, payload: str, raw_payload: Any, route_key: str) -> None:
-        """Emits the log payload via HTTP POST/PUT with bounded retry.
+        """Emit the log payload via HTTP POST/PUT with bounded retry.
 
         Retries timeouts, connection errors, and 5xx responses with exponential
-        backoff. 4xx responses are fatal — raised immediately so the worker logs
-        them once and moves on.
-
-        Args:
-            target (str): The target URL.
-            payload (str): The JSON string payload.
-            raw_payload (Any): The raw log record data.
-            route_key (str): The routing key (log type).
+        backoff. 4xx responses are fatal: raised immediately.
         """
         method = requests.put if route_key == "lifecycle_status" else requests.post
         json_data = raw_payload if isinstance(raw_payload, dict) else None
@@ -321,7 +307,7 @@ class AsyncHTTPHandler(AsyncHandler):
             try:
                 resp = method(target, json=json_data, data=data, headers=self.headers, timeout=self.timeout)
                 if resp.status_code < 500:
-                    # 2xx success or 4xx fatal — raise_for_status handles both.
+                    # 2xx success or 4xx fatal: raise_for_status handles both.
                     resp.raise_for_status()
                     return
                 retryable_err = requests.HTTPError(f"{resp.status_code} {resp.reason}")
@@ -334,7 +320,7 @@ class AsyncHTTPHandler(AsyncHandler):
 
 
 class CleanFormatter(logging.Formatter):
-    """Formatter for machine-readable transports — serialises dict records as JSON."""
+    """Formatter for machine-readable transports: serialises dict records as JSON."""
 
     @override
     def format(self, record: logging.LogRecord) -> str:
@@ -345,7 +331,7 @@ class CleanFormatter(logging.Formatter):
 
 
 class PrettyFormatter(logging.Formatter):
-    """Formatter for console output — prefixes records with severity-icon emoji."""
+    """Formatter for console output: prefixes records with severity-icon emoji."""
 
     ICONS = {logging.INFO: "ℹ️", logging.WARNING: "⚠️", logging.ERROR: "⛔️", logging.CRITICAL: "📛"}
 
@@ -367,16 +353,7 @@ class PrettyFormatter(logging.Formatter):
 def setup_logging(
     logging_config: Any = None, reporting_config: Any = None, zenoh_session: Any = None
 ) -> logging.Logger:
-    """Configures the root logger and the special reporter logger.
-
-    Args:
-        logging_config (Any): Configuration for general logging.
-        reporting_config (Any): Configuration for status reporting.
-        zenoh_session (Any): Optional Zenoh session for transport.
-
-    Returns:
-        logging.Logger: The configured root logger.
-    """
+    """Configure the root logger and the ``link.reporter`` logger."""
     _configure_logger(None, logging_config, zenoh_session)
     _configure_logger("link.reporter", reporting_config, zenoh_session)
     return logging.getLogger()
@@ -385,14 +362,9 @@ def setup_logging(
 def rebuild_handlers(logging_config: Any, reporting_config: Any, zenoh_session: Any = None) -> None:
     """Tear down existing handlers and reattach from new configs.
 
-    Safe to call while pipelines are running — the root logger reference is
-    preserved; only its handler set is swapped. AsyncHandler worker threads
+    Safe to call while pipelines are running: the logger references are
+    preserved and only the handler set is swapped. AsyncHandler worker threads
     are stopped via `.close()` before the handlers are dropped.
-
-    Args:
-        logging_config: New `LoggingConfig` (or dict).
-        reporting_config: New `ReportingConfig` (or dict).
-        zenoh_session: Optional Zenoh session, reused across the swap.
     """
     for lg_name in (None, "link.reporter"):
         lg = logging.getLogger(lg_name)

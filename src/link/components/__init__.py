@@ -1,4 +1,4 @@
-"""Pipeline components — sources, sinks, and the registry that wires them up."""
+"""Pipeline components: sources, sinks, and the registry that wires them up."""
 
 from . import (
     basic,

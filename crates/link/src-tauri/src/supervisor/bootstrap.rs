@@ -6,13 +6,13 @@
 //! `versions/<v>/` into the install root, and write the `current` pointer.
 //!
 //! Failure mapping:
-//!   * exit 2 — reached a server but the op failed: bad SHA, missing asset,
-//!     disk-full, malformed tarball.
-//!   * exit 3 — couldn't reach the network at all (DNS / connect / no route);
-//!     lets the host UI show an offline-specific "retry once connected".
+//!   * exit 2: reached a server but the op failed (bad SHA, missing asset,
+//!     disk-full, malformed tarball).
+//!   * exit 3: couldn't reach the network at all (DNS/connect/no route), so the
+//!     host UI can show an offline-specific "retry once connected".
 //!
-//! Launcher-side mirror of `swap_bundle` in `src/link/app/updater.py` —
-//! reimplemented in Rust so the launcher stays a single self-contained binary.
+//! Reimplements `swap_bundle` from `src/link/app/updater.py` in Rust so the
+//! launcher stays a single self-contained binary.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
@@ -35,7 +35,7 @@ const USER_AGENT: &str = concat!("locai-link-launcher/", env!("CARGO_PKG_VERSION
 const HTTP_TIMEOUT_SECS: u64 = 60;
 const DOWNLOAD_PROGRESS_EVERY_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Bootstrap exit codes — part of the host-integration contract.
+/// Bootstrap exit codes, part of the host-integration contract.
 pub const EXIT_BOOTSTRAP_FAILED: u8 = 2;
 pub const EXIT_BOOTSTRAP_NO_INTERNET: u8 = 3;
 
@@ -286,12 +286,10 @@ fn resolve_expected_sha(asset: &AssetTarget) -> Result<String, BootstrapError> {
     resolve_expected_sha_with(asset, http_get_string)
 }
 
-/// The checksum-source decision, with the body fetcher injected so the
-/// branches are testable without a network. checksums.txt first; the .sha256
-/// sidecar covers pre-transition releases and mirrors. A NoInternet fetch
-/// propagates immediately (keeps the offline exit code truthful); any other
-/// checksums failure (unreachable file, or our asset absent from it) falls
-/// back to the sidecar when one exists.
+/// The checksum-source decision, with the body fetcher injected so the branches
+/// are testable without a network. checksums.txt first, then the .sha256
+/// sidecar. A NoInternet fetch propagates immediately to keep the offline exit
+/// code truthful; any other checksums failure falls back to the sidecar.
 fn resolve_expected_sha_with(
     asset: &AssetTarget,
     fetch: impl Fn(&str) -> Result<String, BootstrapError>,
@@ -306,11 +304,11 @@ fn resolve_expected_sha_with(
                         asset.asset_name
                     )))
                 }
-                None => {} // present but no matching line — try the sidecar
+                None => {} // present but no matching line; try the sidecar
             },
             Err(e @ BootstrapError::NoInternet(_)) => return Err(e),
             Err(e @ BootstrapError::Operation(_)) if asset.sha256_url.is_none() => return Err(e),
-            Err(BootstrapError::Operation(_)) => {} // unreachable — try the sidecar
+            Err(BootstrapError::Operation(_)) => {} // unreachable; try the sidecar
         }
     }
     match &asset.sha256_url {
@@ -375,9 +373,9 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Extract the tarball's `versions/<v>/` subtree into `target`. Entries
-/// outside it (e.g. the launcher binary at the root) are ignored — the
-/// running launcher comes from the host installer and isn't auto-updated.
+/// Extract the tarball's `versions/<v>/` subtree into `target`. Entries outside
+/// it (e.g. the launcher binary at the root) are ignored; the running launcher
+/// comes from the host installer and isn't auto-updated.
 fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
     if target.exists() {
         // A previous failed bootstrap may have left a partial dir; nuke it.
@@ -400,10 +398,9 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         .map_err(|e| format!("iterate tarball entries: {e}"))?
     {
         let mut entry = entry.map_err(|e| format!("tarball entry: {e}"))?;
-        // Reject unsafe entry types (symlinks, hard links) before we
-        // touch the filesystem. A malicious release could otherwise
-        // point a symlink outside `target` and a later Regular write
-        // would follow it.
+        // Reject unsafe entry types (symlinks, hard links) before touching the
+        // filesystem: a malicious release could point a symlink outside `target`
+        // that a later write would follow.
         let etype = entry.header().entry_type();
         if etype.is_symlink() || etype.is_hard_link() {
             return Err(format!(
@@ -429,11 +426,9 @@ fn extract_tarball(archive: &Path, target: &Path) -> Result<(), String> {
         if version_dir.as_os_str() != target_name.as_str() {
             continue;
         }
-        // Anchor the destination: reject any Normal-only descent that
-        // includes ParentDir, RootDir, or Prefix components. This is
-        // the belt-and-braces check against zip-slip; combined with
-        // the strict `versions/<v>/` prefix filter above, the archive
-        // simply cannot escape `target`.
+        // Anchor the destination: reject any path with ParentDir, RootDir, or
+        // Prefix components. Belt-and-braces against zip-slip on top of the
+        // strict `versions/<v>/` prefix filter above.
         let rel_parts: Vec<std::path::Component> = parts.collect();
         for comp in &rel_parts {
             if !matches!(
@@ -491,11 +486,10 @@ fn write_current_pointer(install_root: &Path, version: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// Remove `path` iff it's a plain file (not a symlink) — used to clean
-/// up a stale text pointer after writing a symlink. On case-insensitive
-/// filesystems (macOS APFS/HFS+ default) the pointer path and the
-/// symlink path resolve to the same inode; a naked remove_file would
-/// delete the symlink we just wrote.
+/// Remove `path` iff it's a plain file (not a symlink), to clean up a stale text
+/// pointer after writing a symlink. On case-insensitive filesystems the pointer
+/// and symlink paths share an inode, so a naked remove_file would delete the
+/// symlink just written.
 fn remove_if_regular_file(path: &Path) {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if !meta.file_type().is_symlink() {
@@ -504,9 +498,8 @@ fn remove_if_regular_file(path: &Path) {
     }
 }
 
-/// Symmetric guard for the reverse case — remove `path` iff it's
-/// actually a symlink. See [`remove_if_regular_file`] for the case-
-/// insensitive-filesystem rationale.
+/// Symmetric guard for the reverse case: remove `path` iff it's actually a
+/// symlink. See [`remove_if_regular_file`] for the case-insensitive rationale.
 fn remove_if_symlink(path: &Path) {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {

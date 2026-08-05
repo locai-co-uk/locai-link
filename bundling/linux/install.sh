@@ -16,7 +16,7 @@
 #     ├── current -> versions/vX.Y.Z     (OTA-swappable symlink)
 #     ├── manifest.json                  (from the runtime bundle)
 #     ├── boot.json                      (channel config)
-#     ├── configs/                       (session state — setup writes here)
+#     ├── configs/                       (session state; setup writes here)
 #     ├── logs/                          (runtime + tray stdout/stderr)
 #     ├── systemd/*.service              (staged; activated on Finish)
 #     └── uninstall.sh
@@ -57,7 +57,7 @@ ICONS_SRC=""       # dir with 32x32.png / 128x128.png / 128x128@2x.png
 BOOT_JSON=""
 
 resolve_paths() {
-    # Case 1 — extracted tarball: install.sh sits next to bundle/ (which already
+    # Case 1 (extracted tarball): install.sh sits next to bundle/ (which already
     # contains the merged `locai-link` binary) + boot.json + systemd/ +
     # applications/ + icons/. Fall through if no match.
     if [[ -d "$SCRIPT_DIR/bundle" && -f "$SCRIPT_DIR/bundle/locai-link" ]]; then
@@ -69,7 +69,7 @@ resolve_paths() {
         return
     fi
 
-    # Case 2 — local repo checkout. Expects `build.py` (runtime bundle under
+    # Case 2 (local repo checkout). Expects `build.py` (runtime bundle under
     # dist/locai-link/) + `cargo tauri build --no-bundle` (the locai-link binary).
     local repo_root
     repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -125,7 +125,7 @@ if [[ -n "$MERGED_BIN" ]]; then
     install -m 0755 "$MERGED_BIN" "$INSTALL_ROOT/locai-link"
 fi
 
-# 3. boot.json — channel config, read by the app on first start.
+# 3. boot.json: channel config, read by the app on first start.
 install -m 0644 "$BOOT_JSON" "$INSTALL_ROOT/boot.json"
 
 # 4. Uninstaller (invoked by the tray Preferences → Advanced button
@@ -142,14 +142,14 @@ log "locai-link binary + boot.json + uninstall.sh installed"
 # --- systemd unit (staged, not activated) -----------------------------
 # Stage the single .service under $INSTALL_ROOT/systemd/; the app copies it into
 # the user's systemd domain on Finish, per the "Start at login" toggle. Staged
-# (not written to ~/.config/systemd/user/ now) so the toggle controls behaviour —
+# (not written to ~/.config/systemd/user/ now) so the toggle controls behaviour;
 # enabling at install time would ignore it.
 install -m 0644 "$UNITS_DIR/locai-link-companion.service" "$INSTALL_ROOT/systemd/"
 log "systemd unit staged at $INSTALL_ROOT/systemd/"
 
 # --- .desktop entries -------------------------------------------------
 # Menu integration so "Locai Link" is discoverable in the app launcher.
-# Exec= is `systemctl --user start locai-link-companion.service` —
+# Exec= is `systemctl --user start locai-link-companion.service`,
 # idempotent: starts the companion if down, no-op if already running.
 mkdir -p "$DESKTOP_DIR"
 # Substitute `@HOME@` with the real home dir at copy time: the .desktop spec
@@ -195,7 +195,7 @@ fi
 
 # --- Launch Locai Link (via the service) ------------------------------
 # Install + start the single unit NOW so systemd owns the one process and
-# `Restart=` keeps it alive. This is the ONLY launch path — no nohup — so there's
+# `Restart=` keeps it alive. This is the ONLY launch path (no nohup) so there's
 # never a second, un-managed instance to fight over (that orphaned the
 # supervisor before). The app opens the setup wizard on first run (no registered
 # device); the supervisor idles until Finish registers + re-arms it. The setup

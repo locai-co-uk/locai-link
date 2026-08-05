@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Zenoh Python API wrapper — session setup and pub/sub helpers."""
+"""Zenoh Python API wrapper: session setup and pub/sub helpers."""
 
 import json
 import logging
@@ -20,18 +20,14 @@ class ZenohClient:
     """Manages the Zenoh session from direct configuration arguments."""
 
     def __init__(self, args: dict[str, Any] | None = None):
-        """Initialises the ZenohClient.
-
-        Args:
-            args (dict[str, Any] | None): Dictionary from config.transport.args.
-        """
+        """Initialises the ZenohClient from config.transport.args."""
         self.args = args or {}
         self._session: "zenoh.Session | None" = None
         self._zenoh_config = self._build_config()
 
     def _build_config(self) -> "zenoh.Config":
         """Translates args into Zenoh's internal configuration format."""
-        import zenoh  # lazy — triggers the native DLL load only when Zenoh is actually used
+        import zenoh  # lazy: triggers the native DLL load only when Zenoh is actually used
 
         z_conf = zenoh.Config()
         cfg = TransportArgs(**self.args)
@@ -49,7 +45,7 @@ class ZenohClient:
             else:
                 z_conf.insert_json5("connect/endpoints", ep_json)
 
-        # 3. TLS — gated on endpoint scheme, not mode (a router that federates
+        # 3. TLS: gated on endpoint scheme, not mode (a router that federates
         # to a cloud router still dials outbound TLS). Absent/"auto" `tls_root_ca`
         # falls back to certifi (ISRG Root X1 covers the GCE Let's Encrypt cert);
         # set an explicit path only for private/self-signed CAs.
@@ -65,7 +61,7 @@ class ZenohClient:
                 json.dumps(tls_root_ca),
             )
 
-        # 4. usrpwd auth — username = device_id, password = api_key (or test cred).
+        # 4. usrpwd auth: username = device_id, password = api_key (or test cred).
         username = cfg.username
         password = cfg.password
         if username and password and uses_tls:
@@ -76,19 +72,17 @@ class ZenohClient:
 
         return z_conf
 
-    # zenoh.open() returns before the client has actually connected to the
-    # router. Publishing (e.g. the startup "online" lifecycle report) into a
-    # not-yet-connected client-mode session is silently dropped — no route,
-    # no error. On fast links the connection is up in time; on slower ones
-    # (observed on macOS) the first report is lost and the device shows
-    # offline while later telemetry still lands. Wait for a connected router
-    # before returning, bounded so a genuinely offline start still proceeds.
+    # zenoh.open() returns before the client has connected to the router, and
+    # publishing into a not-yet-connected client-mode session is silently dropped
+    # (no route, no error), so the startup "online" report can be lost while later
+    # telemetry still lands. Wait (bounded) for a connected router before returning,
+    # so a genuinely offline start still proceeds.
     _ROUTER_WAIT_SECONDS = 5.0
     _ROUTER_POLL_SECONDS = 0.1
 
     def get_session(self) -> "zenoh.Session":
         """Returns the active session, opening it if necessary."""
-        import zenoh  # lazy — see module docstring
+        import zenoh  # lazy: see module docstring
 
         if self._session:
             return self._session
@@ -121,7 +115,7 @@ class ZenohClient:
                     return
             except (AttributeError, TypeError) as e:
                 # The probe API is absent/incompatible: never resolvable, so
-                # don't spin the full bound — proceed immediately.
+                # don't spin the full bound, proceed immediately.
                 logger.debug(f"Zenoh readiness probe unsupported, proceeding: {e}")
                 return
             except Exception as e:

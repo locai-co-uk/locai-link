@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""OTA update logic — covers both install shapes.
+"""OTA update logic covering both install shapes.
 
 Source install (``curl … | bash`` deployments): pulls latest code via git +
 refreshes dependencies and plugin binaries. Entry point: ``pull_and_update``.
@@ -30,7 +30,7 @@ Bundled-install layout this module operates on::
 
 The launcher is the stable entry point the OS service starts; it follows the
 ``current`` pointer and exec's the runtime there. That indirection is what
-makes A/B updates safe — we extract the new version next to the old, flip
+makes A/B updates safe: we extract the new version next to the old, flip
 the pointer atomically, and the next launch picks it up.
 """
 
@@ -64,15 +64,14 @@ logger = logging.getLogger(__name__)
 
 
 class _HttpGetter(Protocol):
-    """Minimal .get() surface — accepts a real ``requests.Session``, the
-    ``requests`` module itself, or a test stub. All three are called with
-    the same keyword arguments."""
+    """Minimal .get() surface: a real ``requests.Session``, the ``requests``
+    module itself, or a test stub, all called with the same keyword args."""
 
     def get(self, url: str, **kwargs: Any) -> Any: ...
 
 
 # ===========================================================================
-# Source-install OTA — git-based, used when running from a cloned repo.
+# Source-install OTA: git-based, used when running from a cloned repo.
 # ===========================================================================
 
 DEFAULT_BRANCH = constants.DEFAULT_BRANCH
@@ -83,14 +82,7 @@ def _command_exists(name: str) -> bool:
 
 
 def get_current_branch(repo_dir: Path) -> str | None:
-    """Returns the current git branch name, or None if it cannot be determined.
-
-    Args:
-        repo_dir (Path): The path to the git repository.
-
-    Returns:
-        str | None: The current branch name.
-    """
+    """Current git branch name, or None if it cannot be determined."""
     result = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=repo_dir,
@@ -102,14 +94,7 @@ def get_current_branch(repo_dir: Path) -> str | None:
 
 
 def get_local_version(repo_dir: Path) -> str | None:
-    """Reads the version string from pyproject.toml.
-
-    Args:
-        repo_dir (Path): The path to the project root.
-
-    Returns:
-        str | None: The version string, or None if not found.
-    """
+    """Version string from pyproject.toml, or None if not found."""
     toml_path = repo_dir / "pyproject.toml"
     if not toml_path.exists():
         return None
@@ -123,17 +108,11 @@ def get_local_version(repo_dir: Path) -> str | None:
 
 
 def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
-    """Pulls the latest code from the remote, stashing any local changes.
+    """Pull the latest code from the remote, stashing any local changes.
 
-    Args:
-        repo_dir (Path): The path to the git repository.
-        branch (str): The default branch to pull from (overridden if on a dev branch).
-
-    Returns:
-        bool: True if the codebase was updated, False if already up to date.
-
-    Raises:
-        RuntimeError: If git is not available or the pull fails irrecoverably.
+    ``branch`` is overridden if the checkout is on a dev branch. Returns True if
+    the codebase was updated, False if already up to date. Raises RuntimeError if
+    git is unavailable or the pull fails irrecoverably.
     """
     if not _command_exists("git"):
         raise RuntimeError("git is required for updates but was not found.")
@@ -212,20 +191,13 @@ def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
 
 
 def reinstall_plugin_binaries(repo_dir: Path, config: AgentConfig) -> None:
-    """Re-runs install.py only for plugins referenced by the active config.
+    """Re-run install.py only for plugins referenced by the active config.
 
     Each plugin declares its component type(s) via `[project.entry-points."locai.plugins"]`
-    in its `pyproject.toml`. A plugin is installed only if at least one of those
+    in its `pyproject.toml`; a plugin is installed only if one of those
     entry-point names appears as `source.type` or `sink.type` in the config's
-    pipelines. Built-in component types (http_poll, http_post, command, etc.)
-    have no plugin dir and are silently skipped.
-
-    Plugins use tag-based caching internally, so re-runs for active plugins are
-    cheap when versions haven't changed.
-
-    Args:
-        repo_dir: The path to the project root.
-        config: The active agent config — determines which plugins to refresh.
+    pipelines. Built-in component types have no plugin dir and are skipped.
+    Plugins use tag-based caching, so re-runs are cheap when versions are unchanged.
     """
     plugins_dir = repo_dir / "plugins"
     if not plugins_dir.exists():
@@ -277,11 +249,11 @@ def _plugin_entry_point_names(plugin_dir: Path) -> set[str]:
 
 
 # ===========================================================================
-# Bundle OTA — download / verify / extract / flip / GC for PyInstaller bundles.
+# Bundle OTA: download / verify / extract / flip / GC for PyInstaller bundles.
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Layout constants — single source of truth for the on-disk shape
+# Layout constants: single source of truth for the on-disk shape
 # ---------------------------------------------------------------------------
 
 VERSIONS_DIR = "versions"
@@ -373,7 +345,7 @@ class ReleaseInfo:
     tag: str  # the raw tag, e.g. "v1.0.16"
     asset_name: str  # full filename including the version suffix and extension
     download_url: str
-    sha256_url: str | None  # sibling .sha256 — None if release didn't ship one
+    sha256_url: str | None  # sibling .sha256; None if release didn't ship one
     checksums_url: str | None = None  # release-wide checksums.txt; preferred over the sidecar
 
 
@@ -381,15 +353,11 @@ class ReleaseInfo:
 class BootConfig:
     """Mirror of ``boot.json`` written by host installers for the fetch-on-first-launch path.
 
-    Carried here for completeness; the actual bootstrap consumption (used when
-    a host installer ships only the supervisor binary + boot.json and the
-    bundle is downloaded on first launch) lives in the Rust supervisor under
-    ``crates/link/src-tauri/src/supervisor/``. Field shape (name,
-    optional/required) must match the Rust ``BootConfig`` in
-    ``crates/link/src-tauri/src/supervisor/boot.rs`` and its
-    mirror in ``crates/link/src-tauri/src/shared/install.rs`` — kept in lockstep because a
-    host installer that writes fields the Python side drops is a schema
-    drift bug.
+    Carried here for completeness; the bootstrap consumption lives in the Rust
+    supervisor. Field shape (name, optional/required) must stay in lockstep with
+    the Rust ``BootConfig`` in ``crates/link/src-tauri/src/supervisor/boot.rs``
+    and its mirror in ``crates/link/src-tauri/src/shared/install.rs``, since a
+    host installer writing fields the Python side drops is a schema-drift bug.
     """
 
     host_app: str
@@ -403,7 +371,7 @@ class BootConfig:
 
 
 ProgressFn = Callable[[int, int], None]
-"""``progress(bytes_done, bytes_total)`` — ``bytes_total`` is 0 when unknown."""
+"""``progress(bytes_done, bytes_total)``; ``bytes_total`` is 0 when unknown."""
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +630,7 @@ def verify(
 ) -> None:
     """Verify a downloaded bundle. Raises ``VerifyFailed`` on mismatch.
 
-    SHA check is mandatory — pass either the literal hex digest or a URL to a
+    SHA check is mandatory: pass either the literal hex digest or a URL to a
     sibling ``.sha256`` file (the format GitHub Actions publishes). Platform
     signature is best-effort and dispatches by OS:
         - macOS: ``codesign --verify --deep --strict`` over the extracted
@@ -681,9 +649,8 @@ def verify(
         raise VerifyFailed(f"SHA256 mismatch: expected {expected_sha256}, got {actual}")
 
     # Platform-signature dispatch is intentionally a no-op for the tarball
-    # itself. The macOS codesign check happens against the extracted bundle
-    # — see verify_extracted_macos. This keeps the function callable for the
-    # download path on all platforms.
+    # itself; the macOS codesign check runs against the extracted bundle (see
+    # verify_extracted_macos). Keeps the function callable on all platforms.
     if platform == "win32":
         # Documented for v1: SHA is the only integrity gate; Authenticode
         # check requires a signed binary, which we don't have a cert for yet.
@@ -769,7 +736,7 @@ def _hash_sha256(path: Path) -> str:
 def extract(archive: Path, dest: Path) -> None:
     """Extract a release archive's version payload into ``dest``.
 
-    The release tarball is a full installer package — it wraps the bundle as
+    The release tarball is a full installer package: it wraps the bundle as
     ``<name>/bundle/versions/<v>/`` alongside install.sh + icons at the root.
     For OTA we only want that inner payload dir (the one holding the runtime);
     the launcher, pointer, and installer scripts already exist in the deployed
@@ -870,7 +837,7 @@ def _resolve_pointer(root: Path, link_name: str, file_name: str) -> Path | None:
 def flip_current(root: Path, new_version: str) -> None:
     """Point ``current`` at ``versions/<new_version>``, demote the old to ``previous``.
 
-    Preserves the pointer *shape* — if the install was using a CURRENT pointer
+    Preserves the pointer *shape*: if the install was using a CURRENT pointer
     file (Windows-without-developer-mode fallback chosen at build time), the
     new pointer is written the same way. Otherwise a symlink is used.
     """
@@ -900,7 +867,7 @@ def _install_uses_symlink(root: Path) -> bool:
         return True
     if (root / CURRENT_POINTER_FILE).is_file():
         return False
-    # Fresh install with no current yet — prefer symlink, the OS will tell us
+    # Fresh install with no current yet: prefer symlink; the OS will tell us
     # if it isn't allowed and `_write_pointer` falls back.
     return sys.platform != "win32"
 
@@ -934,7 +901,7 @@ def _write_pointer(
         with tempfile.TemporaryDirectory(dir=root) as td:
             tmp = Path(td) / "link.tmp"
             tmp.symlink_to(Path(VERSIONS_DIR) / version, target_is_directory=True)
-            # Move into the parent dir under a unique name first — symlinks
+            # Move into the parent dir under a unique name first: symlinks
             # cannot be atomically replaced across directories on every fs,
             # but os.replace within the same dir is atomic on POSIX.
             staged = root / f".{link_name}.tmp"
@@ -967,7 +934,7 @@ def _write_pointer(
 def health_check(runtime_path: Path, *, timeout: float = 30.0) -> bool:
     """Spawn ``runtime_path --self-check`` and return True on a clean exit 0.
 
-    Captures stderr for log forwarding on failure. Does not raise — the caller
+    Captures stderr for log forwarding on failure. Does not raise; the caller
     decides what to do on a False result (typically: skip the flip, GC the
     staged version).
     """
@@ -1108,7 +1075,7 @@ def check_update_available(
         override = os.environ.get("LOCAI_LATEST_VERSION") if _ota_overrides_allowed() else None
         latest = override or latest_version_from_control(control_base_url or DEFAULT_CONTROL_API_BASE)
         return (_version_gt(latest, manifest.version), latest)
-    except Exception as e:  # noqa: BLE001 — never let the check crash the agent
+    except Exception as e:  # noqa: BLE001 - never let the check crash the agent
         logger.debug(f"update check failed: {e}")
         return (False, None)
 
@@ -1137,7 +1104,7 @@ def bundle_asset_available(install_root: Path | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Whole-app OTA — swap the changed UI app (the single desktop app)
+# Whole-app OTA: swap the changed UI app (the single desktop app)
 # ---------------------------------------------------------------------------
 
 _APP_COMPANION = "companion"
@@ -1155,9 +1122,8 @@ def _ui_app_payload_name(key: str) -> str:
 def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
     """Installed app copy the OTA can update. On macOS this is the install-root
     copy (user-owned, so the user-context OTA can replace it); the LaunchAgent
-    runs that copy. The /Applications copy is pkg-managed for discoverability —
-    the OTA can't rewrite it (writing inside /Applications needs admin) so it's
-    left alone and refreshed on the next pkg install."""
+    runs that copy. The /Applications copy is pkg-managed for discoverability and
+    left alone (writing there needs admin), refreshed on the next pkg install."""
     if sys.platform == "darwin":
         return [install_root / "Locai Link.app"]
     if sys.platform == "win32":
@@ -1176,7 +1142,7 @@ def _remove_legacy_setup_assistant(install_root: Path) -> None:
     """Remove the pre-merge standalone Setup Assistant left on disk by an
     upgrade-in-place OTA (onboarding is now a window of the main app). The pkg
     postinstall + uninstaller cover the reinstall/uninstall paths; this covers
-    OTA-only devices. Best-effort — a leftover is harmless (no LaunchAgent
+    OTA-only devices. Best-effort: a leftover is harmless (no LaunchAgent
     targets it). LEGACY-SA-CLEANUP: remove once no pre-merge install remains."""
     targets: list[Path] = []
     if sys.platform == "darwin":
@@ -1298,13 +1264,13 @@ def _restart_companion_macos(force_reload: bool = False) -> None:
         try:
             return subprocess.run(["launchctl", *args], check=False, timeout=10).returncode
         except subprocess.TimeoutExpired:
-            return 1  # treat a hang as failure and move on — never block the update
+            return 1  # treat a hang as failure and move on; never block the update
 
     # Non-destructive first: kickstart a live service in place. When the plist
     # just changed, skip this so we reload the corrected definition below.
     ok = False if force_reload else _lc("kickstart", "-k", service) == 0
     if not ok:
-        # Not reachable in this domain — refresh the registration and retry.
+        # Not reachable in this domain: refresh the registration and retry.
         _lc("bootout", service)
         _lc("bootstrap", f"gui/{uid}", str(plist))
         # bootstrap with RunAtLoad already starts the (correct) binary; kickstart
@@ -1341,8 +1307,8 @@ def _reinstall_url() -> str:
 
 def _companion_installed_version(install_root: Path) -> str | None:
     """Version of the running companion .app (macOS), or None if unknown. Checks
-    the install-root copy first — that's the one the LaunchAgent runs and the OTA
-    updates — so drift reflects the live UI, not the pkg-managed /Applications copy."""
+    the install-root copy first (the one the LaunchAgent runs and the OTA
+    updates) so drift reflects the live UI, not the pkg-managed /Applications copy."""
     if sys.platform != "darwin":
         return None
     import plistlib
@@ -1363,7 +1329,7 @@ def _companion_installed_version(install_root: Path) -> str | None:
 
 def _companion_running_version(install_root: Path) -> str | None:
     """Version the *running* companion published at launch (state file), or None
-    when absent (pre-fix companion). This reflects the live process — unlike the
+    when absent (pre-fix companion). Reflects the live process, unlike the
     on-disk bundle, which reads new right after a swap even if the old companion
     is still running because the relaunch silently failed."""
     marker = install_root / constants.STATE_SUBDIR / constants.COMPANION_RUNNING_VERSION_MARKER
@@ -1376,7 +1342,7 @@ def _companion_running_version(install_root: Path) -> str | None:
 
 def _notify_reinstall_required(version: str, url: str) -> None:
     """Best-effort local notification that a reinstall is needed to finish the
-    update. Names the download URL but does not open it — no outbound navigation
+    update. Names the download URL but does not open it; no outbound navigation
     happens without the user choosing to act."""
     msg = f"Couldn't finish updating to {version}. Reinstall from {url} to finish."
     title = "Locai Link update incomplete"
@@ -1465,7 +1431,7 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
             time.sleep(_DRIFT_SETTLE_SECONDS)
         running = _companion_running_version(root)
         companion_version = running or _companion_installed_version(root)
-        # Only the running-version path has a relaunch race — give a just-
+        # Only the running-version path has a relaunch race: give a just-
         # relaunched companion a moment to publish its version before deciding
         # it's stale, so we don't fire a false prompt during the relaunch window.
         settle = 0
@@ -1529,7 +1495,7 @@ def swap_changed_ui_apps(
     swapped: list[str] = []
     for key, new_hash in new_apps.items():
         if old_apps.get(key) == new_hash:
-            continue  # unchanged — don't disturb the running app
+            continue  # unchanged; don't disturb the running app
         try:
             name = _ui_app_payload_name(key)
             src = _locate_in_payload(staging, name)
