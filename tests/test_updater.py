@@ -93,7 +93,7 @@ def _serve_dir(directory: Path):
         thread.join(timeout=2)
 
 
-# --- discover_install_root / read_manifest / read_boot_config ---
+# --- discover_install_root / read_manifest ---
 
 
 def test_discover_install_root_via_current_symlink(tmp_path):
@@ -146,26 +146,6 @@ def test_read_manifest_missing_field(tmp_path):
     (tmp_path / updater.CURRENT_LINK).symlink_to(Path(updater.VERSIONS_DIR) / "1.0.0", target_is_directory=True)
     with pytest.raises(ManifestMalformed):
         updater.read_manifest(tmp_path)
-
-
-def test_read_boot_config_present(tmp_path):
-    (tmp_path / updater.BOOT_NAME).write_text(
-        json.dumps(
-            {
-                "host_app": "host-app",
-                "plugin_set": ["llm"],
-                "channel": "stable",
-                "asset_repo": "locai-co-uk/locai-link",
-            }
-        )
-    )
-    cfg = updater.read_boot_config(tmp_path)
-    assert cfg is not None
-    assert cfg.host_app == "host-app"
-
-
-def test_read_boot_config_absent(tmp_path):
-    assert updater.read_boot_config(tmp_path) is None
 
 
 # --- latest_release_for ---

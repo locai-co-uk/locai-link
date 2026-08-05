@@ -165,27 +165,6 @@ class ReleaseInfo:
     checksums_url: str | None = None  # release-wide checksums.txt; preferred over the sidecar
 
 
-@dataclasses.dataclass(frozen=True)
-class BootConfig:
-    """Mirror of ``boot.json`` written by host installers for the fetch-on-first-launch path.
-
-    Carried here for completeness; the bootstrap consumption lives in the Rust
-    supervisor. Field shape (name, optional/required) must stay in lockstep with
-    the Rust ``BootConfig`` in ``crates/link/src-tauri/src/supervisor/boot.rs``
-    and its mirror in ``crates/link/src-tauri/src/shared/install.rs``, since a
-    host installer writing fields the Python side drops is a schema-drift bug.
-    """
-
-    host_app: str
-    plugin_set: list[str]
-    channel: str
-    asset_repo: str
-    # Optional direct download URL. When present, the launcher skips the
-    # GitHub Releases API and downloads from this URL directly. Useful
-    # for air-gapped mirrors and CI stubs.
-    asset_url: str | None = None
-
-
 ProgressFn = Callable[[int, int], None]
 """``progress(bytes_done, bytes_total)``; ``bytes_total`` is 0 when unknown."""
 
@@ -237,49 +216,6 @@ def read_manifest(root: Path) -> Manifest:
         )
     except KeyError as exc:
         raise ManifestMalformed(f"{path}: missing field {exc}") from exc
-
-
-def read_boot_config(root: Path) -> BootConfig | None:
-    """Parse ``<root>/boot.json`` if present. Returns None otherwise.
-
-    Field types are validated strictly (no silent coercion) so a
-    malformed ``boot.json`` fails here rather than later during OTA,
-    and so the Python side stays in lockstep with the Rust launcher's
-    stricter serde deserialisation.
-    """
-    path = root / BOOT_NAME
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ManifestMalformed(f"{path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ManifestMalformed(f"{path}: expected a JSON object, got {type(data).__name__}")
-
-    def _require_str(key: str, default: str | None = None) -> str:
-        raw = data.get(key, default)
-        if raw is None:
-            raise ManifestMalformed(f"{path}: missing required string field {key!r}")
-        if not isinstance(raw, str):
-            raise ManifestMalformed(f"{path}: {key!r} must be a string, got {type(raw).__name__}")
-        return raw
-
-    plugin_set_raw = data.get("plugin_set", [])
-    if not isinstance(plugin_set_raw, list) or not all(isinstance(p, str) for p in plugin_set_raw):
-        raise ManifestMalformed(f"{path}: 'plugin_set' must be a list of strings")
-
-    asset_url_raw = data.get("asset_url")
-    if asset_url_raw is not None and not isinstance(asset_url_raw, str):
-        raise ManifestMalformed(f"{path}: 'asset_url' must be a string or absent, got {type(asset_url_raw).__name__}")
-
-    return BootConfig(
-        host_app=_require_str("host_app"),
-        plugin_set=list(plugin_set_raw),
-        channel=_require_str("channel", DEFAULT_CHANNEL),
-        asset_repo=_require_str("asset_repo", DEFAULT_RELEASES_REPO),
-        asset_url=asset_url_raw,
-    )
 
 
 # ---------------------------------------------------------------------------
