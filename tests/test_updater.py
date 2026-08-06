@@ -230,6 +230,25 @@ def test_latest_release_for_picks_matching_asset():
     assert info.sha256_url is not None and info.sha256_url.endswith(".sha256")
 
 
+@pytest.mark.parametrize("machine", ["x86_64", "amd64"])
+def test_platform_tag_maps_intel_to_x64(monkeypatch, machine):
+    """Guards the x86_64/amd64->x64 rename (the resolver tests inject platform_tag,
+    so they'd pass even if this regressed)."""
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(updater.platform, "machine", lambda: machine)
+    assert updater._platform_tag() == "linux-x64"
+
+
+def test_latest_release_for_resolves_shape_based_x64_asset():
+    """The shape-based x64 naming (locai-link-<shape>-<os>-x64-v<ver>) resolves —
+    the scheme release.yml publishes and updater._platform_tag now produces."""
+    stem = "locai-link-headless"
+    payload = _fake_release_payload(stem, "1.3.0", platform_tag="linux-x64")
+    session = _StubSession({"https://api.github.com/repos/foo/bar/releases/latest": payload})
+    info = updater.latest_release_for(stem, repo="foo/bar", session=session, platform_tag="linux-x64")
+    assert info.asset_name == "locai-link-headless-linux-x64-v1.3.0.tar.gz"
+
+
 def test_latest_release_for_ignores_other_platform_assets():
     # A release carries every platform's asset; an install must match only its own.
     stem = "locai-link-llm-stt"

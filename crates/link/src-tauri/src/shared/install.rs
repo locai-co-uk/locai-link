@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Schema of `boot.json`. `host_app`/`channel` are schema-only (written by
-/// installers for later telemetry/rollout routing); the supervisor's
-/// `asset_basename` (supervisor/boot.rs) reads `plugin_set`/`asset_repo`/`asset_url`.
+/// Schema of `boot.json`. `host_app`/`channel`/`plugin_set` are schema-only
+/// (written by installers for telemetry/rollout); the supervisor's
+/// `asset_basename` (supervisor/boot.rs) derives the fetch name from
+/// `shape` + `asset_repo`/`asset_url`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     pub host_app: String,
+    /// Build shape (`desktop` | `headless`) — drives the bootstrap asset name.
+    #[serde(default = "default_shape")]
+    pub shape: String,
     #[serde(default)]
     pub plugin_set: Vec<String>,
     #[serde(default = "default_channel")]
@@ -24,6 +28,10 @@ pub struct BootConfig {
 
 fn default_channel() -> String {
     "stable".to_string()
+}
+
+fn default_shape() -> String {
+    "desktop".to_string()
 }
 
 /// Currently-installed version of Link, as the launcher would see it.

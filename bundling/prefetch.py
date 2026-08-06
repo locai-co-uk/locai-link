@@ -21,6 +21,8 @@ import platform
 from pathlib import Path
 from types import ModuleType
 
+from manifest import platform_tag as _platform_tag
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -163,12 +165,6 @@ def _load_install_module(plugin: str, build_cache_dir: Path) -> ModuleType:
     # setattr keeps pyright quiet about the dynamic plugin-local global.
     setattr(module, "BUILD_CACHE_DIR", build_cache_dir)
     return module
-
-
-def _platform_tag(os_name: str, machine: str) -> str:
-    arch = "arm64" if machine.lower() in ("arm64", "aarch64") else "x86_64"
-    os_slug = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(os_name, os_name.lower())
-    return f"{os_slug}-{arch}"
 
 
 def prefetch_language_model(dest_root: Path) -> Path:

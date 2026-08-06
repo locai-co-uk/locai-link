@@ -135,13 +135,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            platform_tag: linux-x86_64
+            platform_tag: linux-x64
             archive_ext: tar.gz
           - os: windows-latest
-            platform_tag: windows-x86_64
+            platform_tag: windows-x64
             archive_ext: zip
           - os: macos-latest
-            # GitHub-hosted macos-latest is arm64; x86_64 needs a separate runner.
+            # GitHub-hosted macos-latest is arm64; x64 needs a separate runner.
             platform_tag: macos-arm64
             archive_ext: tar.gz
     steps:
@@ -168,7 +168,9 @@ jobs:
 
       - name: Build bundle
         shell: bash
-        run: uv run python bundling/build.py --plugins language_model audio_transcriber
+        # Desktop shape with engines bundled in (--prefetch). Headless is the
+        # separate bundle-headless job (no --prefetch: engines fetched on demand).
+        run: uv run python bundling/build.py --shape desktop --prefetch --plugins language_model audio_transcriber
 
       - name: Read asset basename from manifest
         id: manifest
@@ -419,7 +421,7 @@ jobs:
           # fetch targets the asset this build actually is.
           python3 bundling/gen_boot_json.py \
             --manifest "$STAGING/current/manifest.json" \
-            --template bundling/pkg/boot.json \
+            --template bundling/boot.json \
             --output "$STAGING/boot.json"
 
           # Companion menubar .app — the user-facing "Locai Link" in
@@ -519,10 +521,10 @@ jobs:
           EOF
 
           # Stable-named copy for the permanent "latest" download URL.
-          # Version- and plugin-agnostic so the URL never changes across releases:
-          #   .../releases/latest/download/locai-link-macos-arm64.pkg
-          # Assumes one canonical bundle per platform per release.
-          STABLE_NAME="locai-link-macos-arm64.pkg"
+          # Shape- + platform-scoped, version-agnostic so the URL never changes:
+          #   .../releases/latest/download/locai-link-desktop-macos-arm64.pkg
+          # One canonical bundle per shape per platform per release.
+          STABLE_NAME="${ASSET_BASE}-macos-arm64.pkg"
           cp "$SIGNED_PKG" "release-assets/$STABLE_NAME"
           python - <<EOF > "release-assets/${STABLE_NAME}.sha256"
           import hashlib, pathlib
@@ -570,7 +572,7 @@ jobs:
         shell: bash
         env:
           ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
-          STABLE: locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
+          STABLE: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -598,7 +600,7 @@ jobs:
         shell: bash
         env:
           ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
-          STABLE: locai-link-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
+          STABLE: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -631,9 +633,73 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Headless shape: supervisor-only (no tray), engines fetched on demand. A flat
+  # install-root tarball that scripts/install.sh extracts (--strip-components=1).
+  # Separate from `bundle` so the desktop pkg/notarize path is untouched.
+  # Linux-only for now: a macOS headless binary would be unsigned, and Gatekeeper
+  # blocks curl-installed unsigned binaries — so macOS (and Windows) headless are
+  # follow-ups once headless-binary signing lands.
+  bundle-headless:
+    name: Bundle headless on ${{ matrix.os }}
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform_tag: linux-x64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.checkout_ref }}
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Sync deps
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+      - name: Build headless bundle
+        shell: bash
+        run: uv run python bundling/build.py --shape headless --plugins language_model audio_transcriber
+      - name: Package headless tarball
+        # pack.sh (headless) builds the --no-default-features binary + the flat
+        # install-root tarball, named locai-link-headless-<os>-<arch>-v<ver>.tar.gz.
+        shell: bash
+        env:
+          STABLE: locai-link-headless-${{ matrix.platform_tag }}.tar.gz
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          bash bundling/linux/pack.sh --release
+          BUILT=$(ls dist/locai-link-headless-${{ matrix.platform_tag }}-*.tar.gz | head -1)
+          [ -n "$BUILT" ] || { echo "::error::headless tarball not produced for ${{ matrix.platform_tag }}"; exit 1; }
+          cp "$BUILT" "release-assets/$(basename "$BUILT")"
+          cp "$BUILT" "release-assets/${STABLE}"
+          for f in "release-assets/$(basename "$BUILT")" "release-assets/${STABLE}"; do
+            python - "$f" > "${f}.sha256" <<'PY'
+          import hashlib, pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")
+          PY
+          done
+          ls -lah release-assets/
+      - name: Upload headless assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-headless-${{ runner.os }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
   attach:
     name: Attach assets to release
-    needs: [release, bundle]
+    needs: [release, bundle, bundle-headless]
     # Run even if one bundle matrix leg failed — the surviving legs
     # still produced usable artifacts and shouldn't be held hostage.
     # `release` still has to succeed (no tag = nothing to attach to).

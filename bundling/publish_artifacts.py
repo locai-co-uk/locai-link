@@ -147,11 +147,15 @@ def rebuild_manifest(store_dir: Path) -> Path:
                     ] = {"path": rel, "sha256": _sha256(art), "size": art.stat().st_size}
     # Per-engine default version, so a device resolves what to fetch from the
     # manifest instead of re-pinning versions in the runtime. Prefer the pinned
-    # ENGINE_VERSIONS (what publish fetched); fall back to a version present.
+    # The default version MUST be the ENGINE_VERSIONS pin — never guessed. A
+    # lexical sort of build tags is wrong (b9999 > b10000), so a missing/unmatched
+    # pin is a publish bug that would ship a stale engine as the default.
     defaults: dict[str, str] = {}
     for name, versions in manifest.get(CAPABILITY_ENGINES, {}).items():
         pin = ENGINE_VERSIONS.get(name)
-        defaults[name] = pin if (pin is not None and pin in versions) else sorted(versions)[-1]
+        if pin is None or pin not in versions:
+            raise SystemExit(f"no pinned ENGINE_VERSIONS entry for engine {name!r} (present: {sorted(versions)})")
+        defaults[name] = pin
     if defaults:
         manifest["defaults"] = {CAPABILITY_ENGINES: defaults}
 

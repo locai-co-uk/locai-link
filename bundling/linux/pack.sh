@@ -2,21 +2,23 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 #
-# Locally assemble the Linux release tarball.
+# Assemble a release tarball. Desktop is Linux-only here (systemd + .desktop; the
+# desktop macOS .pkg is built in release.yml). Headless is OS-agnostic — a flat
+# install-root tarball — so this runs on Linux + macOS CI runners for that shape.
 #
 # Produces the same shape CI produces on tag push, so you can exercise the
 # "extract + install.sh" path without cutting a release.
 #
-# Prereqs (run these first in the repo root):
-#     uv run python bundling/build.py --plugins <plugin-set>
-#     ( cd crates/link && npm run tauri build -- --no-bundle )
+# Prereq (run this first in the repo root):
+#     uv run python bundling/build.py --shape <desktop|headless> --plugins <plugin-set>
 #
-# Plugin selection is read from dist/locai-link/manifest.json (written by
-# build.py); the tarball is labelled for whatever plugins the bundle has;
-# no separate --plugins flag here.
+# Shape + asset name are read from dist/locai-link/manifest.json (written by
+# build.py); pack.sh then builds the matching Rust binary itself (desktop = the
+# Tauri app; headless = --no-default-features), so the feature can't diverge from
+# the bundle's shape. No separate --shape/--plugins flag here.
 #
 # Output layout (inside the tarball):
-#     locai-link-<code>-linux-x86_64-<version>/
+#     locai-link-<shape>-linux-<x64|arm64>-<version>/
 #     ├── bundle/                       (dist/locai-link/ + the locai-link binary)
 #     ├── boot.json
 #     ├── systemd/*.service
@@ -25,7 +27,7 @@
 #     └── uninstall.sh
 #
 # Usage:
-#     ./bundling/linux/pack.sh                        # → dist/locai-link-<code>-linux-x86_64-<ver>-DEV.tar.gz
+#     ./bundling/linux/pack.sh                        # → dist/locai-link-<shape>-linux-<arch>-<ver>-DEV.tar.gz
 #     ./bundling/linux/pack.sh --output /tmp/foo.tar.gz
 set -euo pipefail
 
@@ -66,32 +68,62 @@ err() {
 
 BUNDLE_DIR="$REPO_ROOT/dist/locai-link"
 TAURI_DIR="$REPO_ROOT/crates/target/release"
-BOOT_JSON="$REPO_ROOT/bundling/pkg/boot.json"
+BOOT_JSON="$REPO_ROOT/bundling/boot.json"
 MANIFEST="$BUNDLE_DIR/current/manifest.json"
 
-[[ -f "$MANIFEST" ]]             || err "manifest.json not at $MANIFEST — run \`uv run python bundling/build.py --plugins …\` first."
-[[ -f "$TAURI_DIR/locai-link" ]] || err "locai-link binary not at $TAURI_DIR — run \`cargo tauri build --no-bundle\` in crates/link."
-[[ -f "$BOOT_JSON" ]]            || err "boot.json not at $BOOT_JSON."
+[[ -f "$MANIFEST" ]]  || err "manifest.json not at $MANIFEST — run \`uv run python bundling/build.py --shape <shape> --plugins …\` first."
+[[ -f "$BOOT_JSON" ]] || err "boot.json not at $BOOT_JSON."
 
-# --- Derive the asset name from manifest.json ------------------------
-# manifest.json is the single source of truth for bundle contents (build.py
-# wrote it from the compiled plugin set), so the tarball label can't diverge
-# from what's inside; a separate flag-based list could mislabel.
+# --- Derive the asset name + shape from manifest.json ----------------
+# manifest.json is the single source of truth (build.py wrote asset_name from
+# the shape), so the tarball label AND the Rust feature we build below both come
+# from the one shape and can't diverge.
 
-read -r ASSET_STEM VERSION < <(python3 -c '
+read -r ASSET_STEM VERSION SHAPE < <(python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
-print(m["asset_name"], "v" + m["version"])
+print(m["asset_name"], "v" + m["version"], m.get("shape", "desktop"))
 ' "$MANIFEST")
 
-[[ -n "$ASSET_STEM" && -n "$VERSION" ]] || err "manifest.json missing asset_name/version fields"
+[[ -n "$ASSET_STEM" && -n "$VERSION" && -n "$SHAPE" ]] || err "manifest.json missing asset_name/version/shape fields"
+case "$SHAPE" in
+    desktop|headless) ;;
+    *) err "unsupported bundle shape: $SHAPE" ;;
+esac
+
+# Build the Rust binary with the feature matching the shape — desktop = the Tauri
+# app (tray + setup); headless = supervisor only (--no-default-features). Both
+# land at $TAURI_DIR/locai-link, so staging can't pick the wrong feature.
+log "building locai-link ($SHAPE)…"
+if [[ "$SHAPE" == "headless" ]]; then
+    ( cd "$REPO_ROOT/crates" && cargo build -p locai-link --no-default-features --release )
+else
+    # npm ci first: a fresh checkout has no crates/link/node_modules for the frontend build.
+    ( cd "$REPO_ROOT/crates/link" && npm ci && npm run tauri build -- --no-bundle )
+fi
+[[ -f "$TAURI_DIR/locai-link" ]] || err "locai-link binary not at $TAURI_DIR after build"
+
+case "$(uname -m)" in
+    x86_64|amd64)  ARCH="x64" ;;
+    arm64|aarch64) ARCH="arm64" ;;
+    *) err "unsupported architecture: $(uname -m)" ;;
+esac
+case "$(uname -s)" in
+    Linux)  OS="linux" ;;
+    Darwin) OS="macos" ;;
+    # Windows would emit locai-link.exe (not handled here); headless Windows is a follow-up.
+    *) err "unsupported OS: $(uname -s) (pack.sh does Linux + macOS-headless)" ;;
+esac
+# Desktop packaging is Linux-only here (systemd + .desktop); the desktop macOS
+# .pkg is built in release.yml. Headless is OS-agnostic (flat install-root tarball).
+[[ "$SHAPE" == "desktop" && "$OS" != "linux" ]] && err "desktop pack is Linux-only (macOS uses the .pkg in release.yml)"
 
 # Local packs get a -DEV suffix so a hand-built tarball can't be mistaken
 # for the canonical CI release output. --release drops the suffix.
 if [[ $RELEASE -eq 1 ]]; then
-    NAME="${ASSET_STEM}-linux-x86_64-${VERSION}"
+    NAME="${ASSET_STEM}-${OS}-${ARCH}-${VERSION}"
 else
-    NAME="${ASSET_STEM}-linux-x86_64-${VERSION}-DEV"
+    NAME="${ASSET_STEM}-${OS}-${ARCH}-${VERSION}-DEV"
 fi
 OUTPUT="${OUTPUT:-$REPO_ROOT/dist/${NAME}.tar.gz}"
 
@@ -106,36 +138,39 @@ trap 'rm -rf "$STAGE"' EXIT
 ROOT="$STAGE/$NAME"
 mkdir -p "$ROOT"
 
-# 1. Runtime bundle (versions/ + current + manifest) from build.py.
-mkdir -p "$ROOT/bundle"
-cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
+# boot.json is generated from the manifest for both shapes.
+gen_boot() {
+    python3 "$REPO_ROOT/bundling/gen_boot_json.py" \
+        --manifest "$MANIFEST" --template "$BOOT_JSON" --output "$1"
+    chmod 0644 "$1"
+}
 
-# 2. The single `locai-link` binary (supervisor + tray) lives at the install
-# root; stage it inside bundle/ so install.sh's `cp -a bundle/.` lays it down.
-install -m 0755 "$TAURI_DIR/locai-link" "$ROOT/bundle/locai-link"
-
-# 2b. App content hashes for whole-app OTA, written to the tarball's
-# manifest so swap_bundle re-swaps a UI app only when its source changed.
-python3 "$REPO_ROOT/bundling/inject_app_hashes.py" \
-    --manifest "$ROOT/bundle/current/manifest.json" --repo-root "$REPO_ROOT"
-
-# 3. boot.json + systemd + .desktop entries + icons + install/uninstall.
-# plugin_set is injected from manifest.json so the launcher's first-launch
-# fetch targets this build's asset, not the static template.
-python3 "$REPO_ROOT/bundling/gen_boot_json.py" \
-    --manifest "$MANIFEST" --template "$BOOT_JSON" --output "$ROOT/boot.json"
-chmod 0644 "$ROOT/boot.json"
-mkdir -p "$ROOT/systemd" "$ROOT/applications" "$ROOT/icons"
-install -m 0644 "$SCRIPT_DIR/systemd/"*.service         "$ROOT/systemd/"
-install -m 0644 "$SCRIPT_DIR/applications/"*.desktop    "$ROOT/applications/"
-# Icons come from the companion crate. The install.sh reshuffles these into
-# hicolor sizes at install time.
-ICONS_SRC="$REPO_ROOT/crates/link/src-tauri/icons"
-for name in 32x32.png 128x128.png 128x128@2x.png; do
-    [[ -f "$ICONS_SRC/$name" ]] && install -m 0644 "$ICONS_SRC/$name" "$ROOT/icons/$name"
-done
-install -m 0755 "$SCRIPT_DIR/install.sh"                "$ROOT/install.sh"
-install -m 0755 "$SCRIPT_DIR/uninstall.sh"              "$ROOT/uninstall.sh"
+if [[ "$SHAPE" == "headless" ]]; then
+    # Flat install-root layout: scripts/install.sh strips the <NAME>/ wrapper and
+    # lays these straight into the install root, then does the service setup
+    # itself — so no in-tarball install.sh / systemd / icons here.
+    cp -a "$BUNDLE_DIR"/. "$ROOT/"
+    install -m 0755 "$TAURI_DIR/locai-link" "$ROOT/locai-link"
+    gen_boot "$ROOT/boot.json"
+else
+    # Desktop: bundle/ (laid down by the in-tarball install.sh) + units + icons.
+    mkdir -p "$ROOT/bundle"
+    cp -a "$BUNDLE_DIR"/. "$ROOT/bundle/"
+    install -m 0755 "$TAURI_DIR/locai-link" "$ROOT/bundle/locai-link"
+    # App content hashes for whole-app OTA (UI apps); desktop-only.
+    python3 "$REPO_ROOT/bundling/inject_app_hashes.py" \
+        --manifest "$ROOT/bundle/current/manifest.json" --repo-root "$REPO_ROOT"
+    gen_boot "$ROOT/boot.json"
+    mkdir -p "$ROOT/systemd" "$ROOT/applications" "$ROOT/icons"
+    install -m 0644 "$SCRIPT_DIR/systemd/"*.service         "$ROOT/systemd/"
+    install -m 0644 "$SCRIPT_DIR/applications/"*.desktop    "$ROOT/applications/"
+    ICONS_SRC="$REPO_ROOT/crates/link/src-tauri/icons"
+    for name in 32x32.png 128x128.png 128x128@2x.png; do
+        [[ -f "$ICONS_SRC/$name" ]] && install -m 0644 "$ICONS_SRC/$name" "$ROOT/icons/$name"
+    done
+    install -m 0755 "$SCRIPT_DIR/install.sh"                "$ROOT/install.sh"
+    install -m 0755 "$SCRIPT_DIR/uninstall.sh"              "$ROOT/uninstall.sh"
+fi
 
 # --- Tar ---------------------------------------------------------------
 

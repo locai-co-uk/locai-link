@@ -186,7 +186,9 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fetch_verified "$TARBALL_URL" "$TMP/headless.tar.gz" "$ASSET"
 
 mkdir -p "$INSTALL_ROOT" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/state" "$INSTALL_ROOT/engines"
-tar -xzf "$TMP/headless.tar.gz" -C "$INSTALL_ROOT"
+# The headless tarball wraps a flat install-root under a top <name>/ dir;
+# strip it so locai-link + versions/ + current + boot.json land at the root.
+tar -xzf "$TMP/headless.tar.gz" -C "$INSTALL_ROOT" --strip-components=1
 [ -x "$BIN" ] || chmod +x "$BIN" 2>/dev/null || true
 [ -f "$BIN" ] || err "headless binary not found at $BIN after extract"
 

@@ -1,20 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Plugin code + asset-name conventions and manifest.json writer.
+"""Shape/asset-name conventions and manifest.json writer.
 
 Asset name shape::
 
-    locai-link-<plugin-codes>-<os>-<arch>-v<version>.<ext>
+    locai-link-<shape>-<os>-<arch>-v<version>.<ext>
 
-Where ``<plugin-codes>`` is the canonical-ordered, hyphen-joined codes for
-the plugins compiled into the bundle. Examples::
+Where ``<shape>`` is the build shape (``desktop`` | ``headless``), ``<os>`` is
+``macos``/``linux``/``windows`` and ``<arch>`` is ``x64``/``arm64``. Examples::
 
-    locai-link-llm-linux-x86_64-v1.0.14.tar.gz
-    locai-link-llm-stt-linux-x86_64-v1.0.14.tar.gz
+    locai-link-desktop-macos-arm64-v1.3.0.pkg
+    locai-link-headless-linux-x64-v1.3.0.tar.gz
 
-We only bundle plugins that have a code below. Bare (zero-plugin) bundles
-aren't a thing; that's the source-install path (``curl … | bash``).
+The plugin set is recorded inside ``manifest.json`` (not the filename); the
+standard set is fixed per release, so shape is the naming axis. ``PLUGIN_CODES``
+below stay for that metadata + boot.json's ``plugin_set``.
 """
 
 from __future__ import annotations
@@ -43,44 +44,58 @@ PLUGIN_ORDER: tuple[str, ...] = (
 )
 
 
-def derive_asset_name(plugins: list[str] | tuple[str, ...]) -> str:
-    """Translate a plugin list into the canonical asset-name stem.
+# Build shapes. `desktop` = tray/setup app (ui feature, engines baked);
+# `headless` = supervisor-only (no ui, engines fetched on demand).
+SHAPES: tuple[str, ...] = ("desktop", "headless")
 
-    Raises ``SystemExit`` on an empty list or any plugin with no code;
-    bundling without a code is unsupported by design (forces the convention
-    conversation when a new plugin is added).
-    """
-    if not plugins:
-        raise SystemExit("No plugins selected — bare bundles aren't a release shape, use the source install path.")
-    unknown = [p for p in plugins if p not in PLUGIN_CODES]
-    if unknown:
-        raise SystemExit(
-            f"Plugins missing an asset-name code: {', '.join(unknown)}. "
-            f"Add an entry to PLUGIN_CODES in bundling/manifest.py before bundling."
-        )
-    codes = [PLUGIN_CODES[p] for p in PLUGIN_ORDER if p in plugins]
-    return "locai-link-" + "-".join(codes)
+
+def asset_stem(shape: str) -> str:
+    """Canonical asset-name stem for a build shape: ``locai-link-<shape>``."""
+    if shape not in SHAPES:
+        raise SystemExit(f"Unknown shape {shape!r}; expected one of {', '.join(SHAPES)}.")
+    return f"locai-link-{shape}"
+
+
+_ARCH_TAGS = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}
+_OS_TAGS = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}
+
+
+def platform_tag(os_name: str, machine: str) -> str:
+    """Canonical ``<os>-<arch>`` asset segment. ``arch`` is ``x64``/``arm64``
+    (unified with the engine store + headless installer). The single source of
+    truth for the platform tag — release.yml, pack.sh, prefetch, and the OTA
+    resolver (updater._platform_tag) all agree with this. Rejects unknown
+    arch/os so a build can't mislabel (e.g. armv7l as x64) and ship an
+    unrunnable bundle."""
+    arch = _ARCH_TAGS.get(machine.lower())
+    if arch is None:
+        raise SystemExit(f"Unsupported architecture: {machine!r} (expected {', '.join(sorted(_ARCH_TAGS))}).")
+    os_slug = _OS_TAGS.get(os_name)
+    if os_slug is None:
+        raise SystemExit(f"Unsupported OS: {os_name!r} (expected {', '.join(_OS_TAGS)}).")
+    return f"{os_slug}-{arch}"
 
 
 def write_manifest(
     bundle_dir: Path,
     plugins: list[str] | tuple[str, ...],
     repo_root: Path,
+    shape: str,
 ) -> Path:
     """Write ``manifest.json`` into the bundle root.
 
     Read-only metadata describing what was built. Not consumed by the
-    running agent (that reads ``configs/agent.json``). Useful for bug
-    reports, telemetry (agent can report the manifest at registration),
-    and integrity checks.
+    running agent (that reads ``configs/agent.json``). ``asset_name`` is the
+    shape-based OTA stem (updater resolves ``<asset_name>-<platform_tag>-v<ver>``).
+    The plugin set is recorded here, not in the filename.
     """
-    asset_name = derive_asset_name(plugins)
-    # Same canonical ordering as derive_asset_name so two CI runs with the
-    # plugins passed in different orders produce byte-identical manifest.json.
+    # Canonical ordering so two CI runs with the plugins passed in different
+    # orders produce byte-identical manifest.json.
     canonical = [p for p in PLUGIN_ORDER if p in set(plugins)]
     manifest = {
         "manifest_version": MANIFEST_VERSION,
-        "asset_name": asset_name,
+        "asset_name": asset_stem(shape),
+        "shape": shape,
         "version": _read_root_version(repo_root),
         "git_sha": _git_sha(repo_root),
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

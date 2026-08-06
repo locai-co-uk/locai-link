@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Tests for bundling/manifest.py — asset-name derivation + manifest writing."""
+"""Tests for bundling/manifest.py — shape/platform-tag helpers + manifest writing."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from manifest import (
     MANIFEST_VERSION,
     PLUGIN_CODES,
     PLUGIN_ORDER,
-    derive_asset_name,
+    SHAPES,
+    asset_stem,
+    platform_tag,
     write_manifest,
 )
 
@@ -21,45 +23,54 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
-# derive_asset_name
+# asset_stem + platform_tag  (the single source of truth for asset naming)
 # ---------------------------------------------------------------------------
 
 
-def test_single_plugin():
-    assert derive_asset_name(["language_model"]) == "locai-link-llm"
+def test_asset_stem_by_shape():
+    assert asset_stem("desktop") == "locai-link-desktop"
+    assert asset_stem("headless") == "locai-link-headless"
 
 
-def test_two_plugins_in_canonical_order():
-    assert derive_asset_name(["language_model", "audio_transcriber"]) == "locai-link-llm-stt"
-
-
-def test_two_plugins_input_order_doesnt_matter():
-    """Asset name is deterministic regardless of input order."""
-    a = derive_asset_name(["language_model", "audio_transcriber"])
-    b = derive_asset_name(["audio_transcriber", "language_model"])
-    assert a == b == "locai-link-llm-stt"
-
-
-def test_stt_only():
-    assert derive_asset_name(["audio_transcriber"]) == "locai-link-stt"
-
-
-def test_empty_plugin_list_fails():
+def test_asset_stem_rejects_unknown_shape():
     with pytest.raises(SystemExit) as exc:
-        derive_asset_name([])
-    assert "bare bundles" in str(exc.value).lower()
+        asset_stem("bogus")
+    assert "shape" in str(exc.value).lower()
 
 
-def test_unknown_plugin_fails_with_actionable_message():
+@pytest.mark.parametrize(
+    "os_name,machine,expected",
+    [
+        ("Linux", "x86_64", "linux-x64"),
+        ("Linux", "amd64", "linux-x64"),
+        ("Linux", "aarch64", "linux-arm64"),
+        ("Darwin", "arm64", "macos-arm64"),
+        ("Windows", "AMD64", "windows-x64"),
+    ],
+)
+def test_platform_tag(os_name, machine, expected):
+    assert platform_tag(os_name, machine) == expected
+
+
+def test_platform_tag_rejects_unknown_arch():
+    # armv7l must NOT silently label as x64 (would ship an unrunnable bundle).
     with pytest.raises(SystemExit) as exc:
-        derive_asset_name(["language_model", "not_real"])
-    msg = str(exc.value)
-    assert "not_real" in msg
-    assert "PLUGIN_CODES" in msg  # tells you where to fix it
+        platform_tag("Linux", "armv7l")
+    assert "architecture" in str(exc.value).lower()
+
+
+def test_platform_tag_rejects_unknown_os():
+    with pytest.raises(SystemExit):
+        platform_tag("Plan9", "x86_64")
+
+
+def test_shapes_known():
+    assert set(SHAPES) == {"desktop", "headless"}
 
 
 def test_plugin_codes_and_order_are_consistent():
-    """Every plugin in PLUGIN_ORDER has a code, and vice versa."""
+    """Every plugin in PLUGIN_ORDER has a code, and vice versa (still used for
+    the manifest plugin_set metadata + boot.json)."""
     assert set(PLUGIN_CODES.keys()) == set(PLUGIN_ORDER)
 
 
@@ -68,34 +79,31 @@ def test_plugin_codes_and_order_are_consistent():
 # ---------------------------------------------------------------------------
 
 
-def test_write_manifest_single_plugin(tmp_path):
-    target = write_manifest(tmp_path, ["language_model"], REPO_ROOT)
+def test_write_manifest_headless(tmp_path):
+    target = write_manifest(tmp_path, ["language_model"], REPO_ROOT, "headless")
     data = json.loads(target.read_text())
     assert data["manifest_version"] == MANIFEST_VERSION
-    assert data["asset_name"] == "locai-link-llm"
+    assert data["asset_name"] == "locai-link-headless"
+    assert data["shape"] == "headless"
     assert [p["name"] for p in data["plugins"]] == ["language_model"]
     assert data["version"] and isinstance(data["version"], str)
     assert data["built_at"].endswith("Z")
 
 
-def test_write_manifest_two_plugins(tmp_path):
-    target = write_manifest(tmp_path, ["language_model", "audio_transcriber"], REPO_ROOT)
+def test_write_manifest_desktop_two_plugins(tmp_path):
+    target = write_manifest(tmp_path, ["language_model", "audio_transcriber"], REPO_ROOT, "desktop")
     data = json.loads(target.read_text())
-    assert data["asset_name"] == "locai-link-llm-stt"
+    assert data["asset_name"] == "locai-link-desktop"
+    assert data["shape"] == "desktop"
     plugin_names = [p["name"] for p in data["plugins"]]
     assert "language_model" in plugin_names
     assert "audio_transcriber" in plugin_names
     assert all(p["version"] for p in data["plugins"])
 
 
-def test_write_manifest_rejects_empty(tmp_path):
+def test_write_manifest_rejects_unknown_shape(tmp_path):
     with pytest.raises(SystemExit):
-        write_manifest(tmp_path, [], REPO_ROOT)
-
-
-def test_write_manifest_rejects_unknown_plugin(tmp_path):
-    with pytest.raises(SystemExit):
-        write_manifest(tmp_path, ["language_model", "image_classifier"], REPO_ROOT)
+        write_manifest(tmp_path, ["language_model"], REPO_ROOT, "bogus")
 
 
 # ---------------------------------------------------------------------------

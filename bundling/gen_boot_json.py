@@ -3,21 +3,16 @@
 
 """Render the final ``boot.json`` for a package.
 
-``boot.json``'s ``plugin_set`` must match what the bundle actually contains,
-because the launcher derives the first-launch fetch asset name from it
-(``locai-link-<codes>-<os>-<arch>``). Shipping a static ``plugin_set`` means any
-build that isn't the hardcoded profile fetches a non-existent asset on
-bootstrap.
-
-This takes the static template (host_app / channel / asset_repo) and injects
-``plugin_set`` derived from the bundle's ``manifest.json`` plugins, mapped to
-short codes via the single source of truth in ``manifest.py`` (PLUGIN_CODES).
+``boot.json``'s ``shape`` must match the bundle, because the launcher derives the
+first-launch fetch asset name from it (``locai-link-<shape>-<os>-<arch>``). This
+injects ``shape`` (and ``plugin_set`` as metadata) from the bundle's
+``manifest.json`` into the static template (host_app / channel / asset_repo).
 
 Usage::
 
     python3 bundling/gen_boot_json.py \\
         --manifest dist/locai-link/current/manifest.json \\
-        --template bundling/pkg/boot.json \\
+        --template bundling/boot.json \\
         --output   <staging>/boot.json
 """
 
@@ -49,10 +44,16 @@ def main() -> None:
 
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     boot = json.loads(Path(args.template).read_text(encoding="utf-8"))
+    # Legacy manifests without a shape default to desktop; anything else must be
+    # a known shape, else boot.json would request an asset no release publishes.
+    shape = manifest.get("shape", "desktop")
+    if shape not in ("desktop", "headless"):
+        raise SystemExit(f"Unsupported bundle shape in manifest: {shape!r}")
+    boot["shape"] = shape
     boot["plugin_set"] = plugin_set_from_manifest(manifest)
 
     Path(args.output).write_text(json.dumps(boot, indent=2) + "\n", encoding="utf-8")
-    print(f"boot.json written to {args.output} (plugin_set={boot['plugin_set']})")
+    print(f"boot.json written to {args.output} (shape={boot['shape']}, plugin_set={boot['plugin_set']})")
 
 
 if __name__ == "__main__":

@@ -16,35 +16,18 @@ pub use crate::shared::BootConfig;
 
 const BOOT_JSON: &str = "boot.json";
 
-/// Canonical order of plugin codes in the asset name; the tarball is named in
-/// this order. MUST mirror `PLUGIN_ORDER` in `bundling/manifest.py`.
-const PLUGIN_ORDER: &[&str] = &["llm", "stt"];
-
 impl BootConfig {
-    /// Derive the tarball asset-name stem from `plugin_set`, matching
-    /// `bundling/build.py`: `locai-link-<codes-in-canonical-order>-<os>-<arch>`
-    /// (e.g. `locai-link-llm-stt-linux-x86_64`). Version + extension appended later.
+    /// Derive the tarball asset-name stem from `shape`, matching
+    /// `bundling/manifest.py` (`asset_stem` + `platform_tag`):
+    /// `locai-link-<shape>-<os>-<arch>` (e.g. `locai-link-headless-linux-x64`).
+    /// Version + extension appended later.
     pub fn asset_basename(&self) -> String {
-        let codes: Vec<&str> = PLUGIN_ORDER
-            .iter()
-            .copied()
-            .filter(|code| self.plugin_set.iter().any(|p| p == code))
-            .collect();
-        let unknown: Vec<&String> = self
-            .plugin_set
-            .iter()
-            .filter(|p| !PLUGIN_ORDER.contains(&p.as_str()))
-            .collect();
-        // Unknown plugins land at the end in input order, so a bad name
-        // surfaces later via the release-asset lookup rather than being dropped.
-        let mut joined: Vec<String> = codes.iter().map(|s| (*s).to_string()).collect();
-        joined.extend(unknown.into_iter().cloned());
-        let plugins = if joined.is_empty() {
-            "base".to_string()
-        } else {
-            joined.join("-")
-        };
-        format!("locai-link-{}-{}-{}", plugins, target_os(), target_arch())
+        format!(
+            "locai-link-{}-{}-{}",
+            self.shape,
+            target_os(),
+            target_arch()
+        )
     }
 }
 
@@ -71,7 +54,7 @@ fn target_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "arm64"
     } else if cfg!(target_arch = "x86_64") {
-        "x86_64"
+        "x64"
     } else {
         "unknown"
     }
@@ -144,38 +127,23 @@ mod tests {
     }
 
     #[test]
-    fn asset_basename_uses_canonical_plugin_order() {
+    fn asset_basename_uses_shape() {
         let b: BootConfig =
-            serde_json::from_str(r#"{"host_app":"X","plugin_set":["stt","llm"],"asset_repo":"r"}"#)
+            serde_json::from_str(r#"{"host_app":"X","shape":"headless","asset_repo":"r"}"#)
                 .unwrap();
-        // PLUGIN_ORDER hardcodes "llm" before "stt" to mirror
-        // bundling/manifest.py — same name regardless of input order.
         assert!(
-            b.asset_basename().starts_with("locai-link-llm-stt-"),
+            b.asset_basename().starts_with("locai-link-headless-"),
             "got: {}",
             b.asset_basename()
         );
     }
 
     #[test]
-    fn asset_basename_unknown_plugins_appended_in_order() {
-        let b: BootConfig =
-            serde_json::from_str(r#"{"host_app":"X","plugin_set":["zzz","llm"],"asset_repo":"r"}"#)
-                .unwrap();
-        // Known plugin first, unknown trailing.
+    fn asset_basename_defaults_shape_to_desktop() {
+        // boot.json without a shape (older installers) defaults to desktop.
+        let b: BootConfig = serde_json::from_str(r#"{"host_app":"X","asset_repo":"r"}"#).unwrap();
         assert!(
-            b.asset_basename().starts_with("locai-link-llm-zzz-"),
-            "got: {}",
-            b.asset_basename()
-        );
-    }
-
-    #[test]
-    fn asset_basename_empty_plugins_uses_base() {
-        let b: BootConfig =
-            serde_json::from_str(r#"{"host_app":"X","plugin_set":[],"asset_repo":"r"}"#).unwrap();
-        assert!(
-            b.asset_basename().starts_with("locai-link-base-"),
+            b.asset_basename().starts_with("locai-link-desktop-"),
             "got: {}",
             b.asset_basename()
         );

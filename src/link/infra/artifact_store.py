@@ -28,6 +28,7 @@ on demand at first use.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import json
@@ -280,7 +281,10 @@ def _extract(archive: Path, dest_dir: Path) -> None:
                     src = tf.extractfile(m)
                     if src is not None:
                         out = dest_dir / Path(m.name).name
-                        out.write_bytes(src.read())
+                        # Stream, don't read() the whole member: engine .so's are
+                        # large and edge devices are memory-constrained.
+                        with src, open(out, "wb") as fh:
+                            shutil.copyfileobj(src, fh)
                         out.chmod(0o755)
             for m in tf.getmembers():
                 if m.issym():
@@ -296,7 +300,8 @@ def _extract(archive: Path, dest_dir: Path) -> None:
                 if member.endswith("/"):
                     continue
                 out = dest_dir / Path(member).name
-                out.write_bytes(zf.read(member))
+                with zf.open(member) as src, open(out, "wb") as fh:
+                    shutil.copyfileobj(src, fh)
                 if not sys.platform.startswith("win"):
                     out.chmod(0o755)
     else:
@@ -323,6 +328,33 @@ def fetch_variant(variant: Variant, cache_dir: Path, *, base: str | None = None)
     return archive
 
 
+@contextlib.contextmanager
+def _engine_lock(lock_path: Path):
+    """Best-effort cross-process exclusive lock so two first-use fetches of the same
+    engine don't clobber each other. No-ops where flock is unavailable (Windows /
+    unusual fs); the marker recheck under the lock still prevents double work."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        try:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        yield
+
+
+def _atomic_swap(staging: Path, dest: Path) -> None:
+    """Replace ``dest`` with ``staging`` via atomic renames, so a reader never sees
+    a half-extracted or mixed-version engine dir."""
+    old = dest.parent / f".{dest.name}.old"
+    shutil.rmtree(old, ignore_errors=True)
+    if dest.exists():
+        os.replace(dest, old)
+    os.replace(staging, dest)
+    shutil.rmtree(old, ignore_errors=True)
+
+
 def ensure_engine(
     name: str,
     version: str | None = None,
@@ -335,19 +367,33 @@ def ensure_engine(
     """Ensure engine ``name`` is present + verified under ``dest_dir``, fetching it
     from the store on demand. ``version`` defaults to the manifest's per-engine
     default, so a headless device need not pin versions. Returns ``dest_dir``.
-    Idempotent: skips the network when a matching, verified archive is already
-    installed. The lazy first-use entry point for a no-bundled-engines install."""
+    Idempotent, and a locked + atomic transaction: concurrent first-use calls
+    can't corrupt the dir, and a version change swaps in a clean dir (no stale
+    files). The lazy first-use entry point for a no-bundled-engines install."""
     if dest_dir is None:
         raise ValueError("dest_dir is required")
     manifest = manifest or fetch_manifest(base)
     variant = manifest.variant(CAPABILITY_ENGINES, name, version, arch)
     marker = dest_dir / ".artifact-sha256"
-    if dest_dir.is_dir() and marker.exists() and marker.read_text(encoding="utf-8").strip() == variant.sha256:
+
+    def _installed() -> bool:
+        return dest_dir.is_dir() and marker.exists() and marker.read_text(encoding="utf-8").strip() == variant.sha256
+
+    if _installed():
         return dest_dir  # already installed at this exact artifact
-    cache_dir = dest_dir.parent / f".{dest_dir.name}-cache"
-    archive = fetch_variant(variant, cache_dir, base=base)
-    _extract(archive, dest_dir)
-    marker.write_text(variant.sha256, encoding="utf-8")
-    archive.unlink(missing_ok=True)
+
+    dest_dir.parent.mkdir(parents=True, exist_ok=True)
+    with _engine_lock(dest_dir.parent / f".{dest_dir.name}.lock"):
+        if _installed():
+            return dest_dir  # another process installed it while we waited
+        cache_dir = dest_dir.parent / f".{dest_dir.name}-cache"
+        archive = fetch_variant(variant, cache_dir, base=base)
+        # Extract into a fresh staging dir, then atomically swap it into place.
+        staging = dest_dir.parent / f".{dest_dir.name}.staging"
+        shutil.rmtree(staging, ignore_errors=True)
+        _extract(archive, staging)
+        (staging / ".artifact-sha256").write_text(variant.sha256, encoding="utf-8")
+        _atomic_swap(staging, dest_dir)
+        archive.unlink(missing_ok=True)
     logger.info(f"engine {name}@{version} ready at {dest_dir}")
     return dest_dir

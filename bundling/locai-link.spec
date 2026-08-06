@@ -21,7 +21,9 @@ REPO_ROOT = SPEC_DIR.parent
 
 
 def _platform_tag() -> str:
-    arch = "arm64" if _pf.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    # Mirrors bundling/manifest.py::platform_tag (arch token x64/arm64). Kept
+    # standalone: a PyInstaller .spec shouldn't import project modules.
+    arch = "arm64" if _pf.machine().lower() in ("arm64", "aarch64") else "x64"
     os_slug = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[_pf.system()]
     return f"{os_slug}-{arch}"
 
@@ -64,12 +66,8 @@ PLUGIN_SPEC = {
 }
 
 
+# Empty is valid: a naked build (no --plugins) bundles just the runtime.
 raw_selection = os.environ.get("LOCAI_BUNDLE_PLUGINS", "").strip()
-if not raw_selection:
-    raise SystemExit(
-        "LOCAI_BUNDLE_PLUGINS is empty. This spec is meant to be invoked by "
-        "bundling/build.py, which sets the variable from --plugins."
-    )
 selected = [p.strip() for p in raw_selection.split(",") if p.strip()]
 unknown = [p for p in selected if p not in PLUGIN_SPEC]
 if unknown:

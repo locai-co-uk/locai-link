@@ -91,7 +91,7 @@ resolve_paths() {
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
         ICONS_SRC="$repo_root/crates/link/src-tauri/icons"
-        BOOT_JSON="$repo_root/bundling/pkg/boot.json"
+        BOOT_JSON="$repo_root/bundling/boot.json"
         return
     fi
 
