@@ -87,9 +87,10 @@ link_cli() {
     on_path "$CLI_DIR" || log "note: $CLI_DIR is not on PATH; add it, or run $CLI_DIR/locai directly."
 }
 
-# Install + (re)start the per-user service (idempotent). Carries the engine base
-# and, on a first registration, any provided key (consumed once; a session then
-# takes precedence, so the key is inert afterwards).
+# Install + (re)start the per-user service (idempotent). The unit is keyless
+# (`locai run`): the supervisor idles until a session exists and then runs the
+# agent, so registration happens out-of-band via `locai register` (no key is ever
+# written into the unit).
 install_service() {
     os="$(uname -s)"
     if [ "$os" = "Linux" ]; then
@@ -98,7 +99,7 @@ install_service() {
         {
             echo "[Unit]"; echo "Description=Locai Link (headless)"; echo "After=network-online.target"; echo ""
             echo "[Service]"
-            echo "ExecStart=$BIN run --headless${REG_KIND:+ $REG_KIND $REG_KEY}"
+            echo "ExecStart=$BIN run"
             [ -n "${LOCAI_ARTIFACT_BASE:-}" ] && echo "Environment=LOCAI_ARTIFACT_BASE=$LOCAI_ARTIFACT_BASE"
             echo "Restart=on-failure"; echo "WorkingDirectory=$INSTALL_ROOT"; echo ""
             echo "[Install]"; echo "WantedBy=default.target"
@@ -113,9 +114,7 @@ install_service() {
             echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
             echo '<plist version="1.0"><dict>'
             echo "  <key>Label</key><string>$LABEL</string>"
-            printf '  <key>ProgramArguments</key><array><string>%s</string><string>run</string><string>--headless</string>' "$BIN"
-            [ -n "$REG_KIND" ] && printf '<string>%s</string><string>%s</string>' "$REG_KIND" "$REG_KEY"
-            echo '</array>'
+            printf '  <key>ProgramArguments</key><array><string>%s</string><string>run</string></array>\n' "$BIN"
             [ -n "${LOCAI_ARTIFACT_BASE:-}" ] && echo "  <key>EnvironmentVariables</key><dict><key>LOCAI_ARTIFACT_BASE</key><string>$LOCAI_ARTIFACT_BASE</string></dict>"
             echo "  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
             echo "</dict></plist>"
@@ -124,6 +123,13 @@ install_service() {
         launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
         launchctl bootstrap "gui/$uid" "$PLIST"
     fi
+}
+
+# One-shot out-of-band registration (unattended installs that supply a key via
+# env). Writes the session; the idle service auto-picks it up within a poll.
+register_now() {
+    log "registering this device with your key..."
+    "$BIN" register "$REG_KIND" "$REG_KEY" || err "registration failed; re-run: locai register $REG_KIND <KEY>"
 }
 
 logs_cmd() {
@@ -157,12 +163,14 @@ if [ -f "$BIN" ] && [ "$FORCE" != 1 ]; then
     if has_session; then
         log "Locai Link is already installed and registered; the service is running."
         log "  update:  locai update    (or re-run with --force to reinstall in place)"
-        summary
+    elif [ -n "$REG_KEY" ]; then
+        register_now
+        log "registered; the service will start the agent shortly."
     else
         log "Locai Link is installed but not registered yet."
         register_steps
-        summary
     fi
+    summary
     exit 0
 fi
 
@@ -187,8 +195,10 @@ install_service
 
 if has_session; then
     log "reinstalled; existing registration preserved."
-    summary
+elif [ -n "$REG_KEY" ]; then
+    register_now
+    log "registered; the service will start the agent shortly."
 else
     register_steps
-    summary
 fi
+summary

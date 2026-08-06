@@ -58,6 +58,14 @@ pub fn run_supervisor() -> ExitCode {
     }
 }
 
+/// Headless service entry (`locai run`): supervise the runtime forever, idling
+/// until the device is registered (a session appears under `configs/`) and
+/// auto-starting it then.
+pub fn run_service() -> ExitCode {
+    supervise_forever(SupervisorControl::running());
+    ExitCode::from(2)
+}
+
 /// In-process control of the runtime child for the desktop (`ui`) build. The
 /// tray/preferences send Start/Stop/Restart and read status; `supervise_forever`
 /// honours them. Cloneable (Arc) so it can live in Tauri managed state.

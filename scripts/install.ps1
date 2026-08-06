@@ -85,11 +85,25 @@ if ($env:LOCAI_ARTIFACT_BASE) {
 }
 
 # Register a per-user Scheduled Task: run at logon, restart on failure, no admin.
-$action  = New-ScheduledTaskAction -Execute $bin -Argument "run --headless" -WorkingDirectory $InstallRoot
+# Keyless (`run`): the supervisor idles until a session exists; registration is
+# out-of-band via `locai register`, so no key is written into the task.
+$action  = New-ScheduledTaskAction -Execute $bin -Argument "run" -WorkingDirectory $InstallRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName $Label -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $Label
 
-Log "installed. Onboard this device by following the login prompt in the log:"
-Log "  Get-Content -Wait (Join-Path '$InstallRoot' 'logs\*.log')"
+# Unattended installs can supply a key via env -> one-shot register now (the idle
+# service picks up the session). Otherwise print the register command.
+if ($env:LOCAI_REGISTRATION_KEY) {
+    Log "registering this device with your key..."
+    & $bin register --registration-key $env:LOCAI_REGISTRATION_KEY
+} elseif ($env:LOCAI_FLEET_KEY) {
+    Log "enrolling this device with your fleet key..."
+    & $bin register --fleet-key $env:LOCAI_FLEET_KEY
+} else {
+    Log "installed. Register this device with a key from Control:"
+    Log "  locai register --registration-key <KEY>     # single device"
+    Log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+    Log "then confirm:  locai status"
+}

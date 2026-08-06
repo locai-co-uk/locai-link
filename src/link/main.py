@@ -6,7 +6,6 @@
 import argparse
 import logging
 import os
-import platform
 import shutil
 import sys
 import tomllib
@@ -14,7 +13,11 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from link import constants
-from link.app.onboarding import FLEET_MARKER_PATH, activate_device, enroll_device, register_device
+from link.app.onboarding import (
+    FLEET_MARKER_PATH,
+    enroll_device,
+    register_with_key,
+)
 from link.app.runtime import AgentRuntime
 from link.app.state import StateManager
 from link.app.updater import (
@@ -86,24 +89,7 @@ def run(args: argparse.Namespace):
         api_url = args.api_url or constants.DEFAULT_API_URL
         if args.registration_key:
             try:
-                if args.device_name and (args.email or args.token):
-                    agent_config = register_device(
-                        name=args.device_name,
-                        reg_key=args.registration_key,
-                        api_url=api_url,
-                        email=args.email,
-                        password=args.password,
-                        token=args.token,
-                    )
-                elif args.device_id:
-                    agent_config = activate_device(
-                        device_id=args.device_id,
-                        reg_key=args.registration_key,
-                        api_url=api_url,
-                    )
-                else:
-                    logger.critical("Onboarding requires (--device-name AND --email/--token) OR (--device-id)")
-                    sys.exit(1)
+                agent_config = register_with_key(reg_key=args.registration_key, api_url=api_url)
                 state_manager.bootstrap(agent_config)
             except Exception as e:
                 logger.critical(f"Onboarding failed: {e}", exc_info=True)
@@ -131,12 +117,9 @@ def run(args: argparse.Namespace):
                 logger.critical(f"Default Config Load Failed: {e}")
                 sys.exit(1)
 
-    # --- PHASE 2: DEPLOYMENT ---
-    if args.headless:
-        _deploy_service(cwd)
-        return
-
-    # --- PHASE 3: RUNTIME ---
+    # --- PHASE 2: RUNTIME ---
+    # The OS service unit + Rust supervisor is the daemon; the runtime just runs
+    # the agent in the foreground (no self-deploy).
     logger.info(f"Starting Agent (Device: {agent_config.identity.device_id})...")
 
     # A. Infrastructure Initialization
@@ -203,23 +186,7 @@ def register(args: argparse.Namespace) -> int:
         if args.fleet_key:
             agent_config = enroll_device(fleet_key=args.fleet_key, api_url=api_url)
         elif args.registration_key:
-            if args.device_id:
-                agent_config = activate_device(
-                    device_id=args.device_id, reg_key=args.registration_key, api_url=api_url
-                )
-            elif args.email or args.token:
-                agent_config = register_device(
-                    name=args.device_name or platform.node(),
-                    reg_key=args.registration_key,
-                    api_url=api_url,
-                    email=args.email,
-                    token=args.token,
-                )
-            else:
-                logger.critical(
-                    "--registration-key needs --email/--token (new device) or --device-id (re-activation)."
-                )
-                return 1
+            agent_config = register_with_key(reg_key=args.registration_key, api_url=api_url)
         else:
             logger.critical("Provide --registration-key or --fleet-key to register a headless device.")
             return 1
@@ -413,35 +380,6 @@ def _apply_update_and_reexec() -> None:
     sys.exit(42)
 
 
-def _deploy_service(cwd: Path) -> None:
-    """Install the agent as a service."""
-    logger.info("Deploying Agent Service...")
-
-    python_exe = cwd / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-    cmd = f"{python_exe} main.py run"
-
-    svc_env: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
-
-    agent = ServiceManager(
-        "locai-link",
-        cmd,
-        "Loc.ai Agent",
-        str(cwd),
-        env_vars=svc_env,
-    )
-
-    try:
-        if agent.is_installed():
-            agent.stop()
-            agent.uninstall()
-
-        agent.install(start_now=True)
-        logger.info("Service deployed. It will pick up the current configuration automatically.")
-    except Exception as e:
-        logger.critical(f"Service deployment failed: {e}")
-        sys.exit(1)
-
-
 def stop():
     """Stops all services."""
     for svc in ["locai-link", "zenohd"]:
@@ -562,34 +500,20 @@ def main():
     # Lifecycle
     run_p = subparsers.add_parser("run", help="Runs the agent.")
     run_p.add_argument("--config", help="Path to a config file OR a session state file.")
-    run_p.add_argument(
-        "--headless",
-        action="store_true",
-        help="Run as a background service (no foreground process).",
-    )
-    run_p.add_argument("--registration-key", help="One-time key for onboarding.")
-    run_p.add_argument("--device-name", help="Device name for onboarding.")
-    run_p.add_argument("--device-id", help="Existing device ID for re-activation.")
-    run_p.add_argument("--email", help="Platform email for authentication.")
-    run_p.add_argument("--password", help="Platform password (prompted securely if omitted).")
-    run_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email/password).")
-    run_p.add_argument("--api-url", help="Override API URL.")
+    run_p.add_argument("--registration-key", help="Registration key from Control (key-only onboarding).")
     run_p.add_argument(
         "--fleet-key",
         help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
     )
+    run_p.add_argument("--api-url", help="Override API URL.")
 
     # One-shot registration for a running headless service: writes the session
-    # and exits; the idle service then picks it up. Key-driven only -
-    # --registration-key (new device, or re-activation with --device-id) or
-    # --fleet-key (org enrollment). No interactive sign-in on headless.
+    # and exits; the idle service then picks it up. Machine-bound and key-driven
+    # (like fleet enrollment) - the key is the credential and Control assigns the
+    # device id/name. --registration-key (single device) or --fleet-key (org).
     reg_p = subparsers.add_parser("register", help="Register this device with a key, then exit.")
-    reg_p.add_argument("--registration-key", help="Registration key from Control (new device).")
+    reg_p.add_argument("--registration-key", help="Registration key from Control (single device).")
     reg_p.add_argument("--fleet-key", help="Org-scoped fleet key; accepts the key or file:<path>.")
-    reg_p.add_argument("--device-id", help="Existing device ID for re-activation (with --registration-key).")
-    reg_p.add_argument("--device-name", help="Device name for onboarding (default: hostname).")
-    reg_p.add_argument("--email", help="Platform email, if the registration-key path needs user auth.")
-    reg_p.add_argument("--token", help="Pre-obtained JWT token (alternative to --email).")
     reg_p.add_argument("--api-url", help="Override API URL.")
 
     subparsers.add_parser("status", help="Show registration, service, and update status.")
