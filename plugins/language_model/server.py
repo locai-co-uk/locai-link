@@ -88,7 +88,7 @@ class ModelServer:
             try:
                 from link.app import engines
 
-                return engines.binary_path("llama-cpp")
+                return engines.binary_path("llama-cpp", binary_name)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"on-demand engine fetch unavailable: {e}")
 

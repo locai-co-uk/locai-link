@@ -24,14 +24,6 @@ from link.app import artifact_store
 
 logger = logging.getLogger(__name__)
 
-# The server binary each engine provides, per platform. The serving path looks
-# for this name inside the provisioned dir.
-ENGINE_BINARY = {
-    "llama-cpp": ("llama-server.exe", "llama-server"),
-    "llama-swap": ("llama-swap.exe", "llama-swap"),
-    "whisper-cpp": ("whisper-server.exe", "whisper-server"),
-}
-
 
 def _install_root(install_root: Path | None) -> Path:
     if install_root is not None:
@@ -59,13 +51,14 @@ def provision(name: str, *, install_root: Path | None = None, base: str | None =
     return dest
 
 
-def binary_path(name: str, *, install_root: Path | None = None, base: str | None = None) -> Path:
+def binary_path(name: str, binary: str, *, install_root: Path | None = None, base: str | None = None) -> Path:
     """Provision engine ``name`` and return the full path to its server binary.
-    Raises if the expected binary is not in the fetched archive."""
-    win, unix = ENGINE_BINARY[name]
+
+    ``binary`` is the server filename the calling plugin declares (already
+    platform-resolved, e.g. ``llama-server`` / ``llama-server.exe``), so core
+    holds no per-engine knowledge. Raises if it is not in the fetched archive."""
     bin_dir = provision(name, install_root=install_root, base=base)
-    for candidate in (unix, win):
-        p = bin_dir / candidate
-        if p.exists():
-            return p
-    raise artifact_store.ArtifactStoreError(f"engine {name} provisioned but no server binary found in {bin_dir}")
+    p = bin_dir / binary
+    if p.exists():
+        return p
+    raise artifact_store.ArtifactStoreError(f"engine {name} provisioned but {binary} not found in {bin_dir}")

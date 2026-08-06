@@ -202,22 +202,27 @@ def register(args: argparse.Namespace) -> int:
     try:
         if args.fleet_key:
             agent_config = enroll_device(fleet_key=args.fleet_key, api_url=api_url)
-        elif args.device_id:
-            if not args.registration_key:
-                logger.critical("--device-id re-activation requires --registration-key")
+        elif args.registration_key:
+            if args.device_id:
+                agent_config = activate_device(
+                    device_id=args.device_id, reg_key=args.registration_key, api_url=api_url
+                )
+            elif args.email or args.token:
+                agent_config = register_device(
+                    name=args.device_name or platform.node(),
+                    reg_key=args.registration_key,
+                    api_url=api_url,
+                    email=args.email,
+                    token=args.token,
+                )
+            else:
+                logger.critical(
+                    "--registration-key needs --email/--token (new device) or --device-id (re-activation)."
+                )
                 return 1
-            agent_config = activate_device(
-                device_id=args.device_id, reg_key=args.registration_key, api_url=api_url
-            )
         else:
-            # reg_key None -> sign in (device flow), mint a key, then register.
-            agent_config = register_device(
-                name=args.device_name or platform.node(),
-                reg_key=args.registration_key,
-                api_url=api_url,
-                email=args.email,
-                token=args.token,
-            )
+            logger.critical("Provide --registration-key or --fleet-key to register a headless device.")
+            return 1
         state_manager.bootstrap(agent_config)
     except Exception as e:
         logger.critical(f"Registration failed: {e}", exc_info=True)
@@ -574,16 +579,17 @@ def main():
         help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
     )
 
-    # Interactive one-shot registration for a running headless service. Signs in
-    # (device flow), mints a key, writes the session, and exits; the service then
-    # picks it up. --fleet-key / --device-id cover unattended + re-activation.
-    reg_p = subparsers.add_parser("register", help="Register this device, then exit.")
-    reg_p.add_argument("--device-name", help="Device name for onboarding (default: hostname).")
-    reg_p.add_argument("--registration-key", help="Pre-minted key; skips interactive sign-in.")
+    # One-shot registration for a running headless service: writes the session
+    # and exits; the idle service then picks it up. Key-driven only -
+    # --registration-key (new device, or re-activation with --device-id) or
+    # --fleet-key (org enrollment). No interactive sign-in on headless.
+    reg_p = subparsers.add_parser("register", help="Register this device with a key, then exit.")
+    reg_p.add_argument("--registration-key", help="Registration key from Control (new device).")
     reg_p.add_argument("--fleet-key", help="Org-scoped fleet key; accepts the key or file:<path>.")
-    reg_p.add_argument("--device-id", help="Existing device ID for re-activation.")
-    reg_p.add_argument("--email", help="Platform email (device flow used if omitted).")
-    reg_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email).")
+    reg_p.add_argument("--device-id", help="Existing device ID for re-activation (with --registration-key).")
+    reg_p.add_argument("--device-name", help="Device name for onboarding (default: hostname).")
+    reg_p.add_argument("--email", help="Platform email, if the registration-key path needs user auth.")
+    reg_p.add_argument("--token", help="Pre-obtained JWT token (alternative to --email).")
     reg_p.add_argument("--api-url", help="Override API URL.")
 
     subparsers.add_parser("status", help="Show registration, service, and update status.")

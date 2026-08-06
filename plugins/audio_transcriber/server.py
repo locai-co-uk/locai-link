@@ -94,7 +94,7 @@ class WhisperServer:
             try:
                 from link.app import engines
 
-                return engines.binary_path("whisper-cpp")
+                return engines.binary_path("whisper-cpp", binary_name)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"on-demand engine fetch unavailable: {e}")
 

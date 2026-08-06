@@ -134,10 +134,10 @@ register_steps() {
     if [ -n "$REG_KEY" ]; then
         log "Registering with your key (no browser needed). Confirm with:  locai status"
     else
-        log "To register this device, follow the login prompt the service prints:"
-        log "  1. watch the log:  $(logs_cmd)"
-        log "  2. open the URL it shows, sign in to Control, and enter the code"
-        log "  3. confirm:        locai status"
+        log "This device is not registered yet. Register it with a key from Control:"
+        log "  locai register --registration-key <KEY>     # single device"
+        log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+        log "then confirm:  locai status"
     fi
 }
 

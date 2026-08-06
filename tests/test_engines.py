@@ -36,7 +36,7 @@ def test_provision_uses_per_engine_dir(tmp_path, monkeypatch):
 
 def test_binary_path_resolves_server(tmp_path, monkeypatch):
     monkeypatch.setattr(engines.artifact_store, "ensure_engine", _fake_ensure("whisper-server"))
-    bp = engines.binary_path("whisper-cpp", install_root=tmp_path)
+    bp = engines.binary_path("whisper-cpp", "whisper-server", install_root=tmp_path)
     assert bp == tmp_path / "engines" / "whisper-cpp" / "whisper-server"
 
 
@@ -44,7 +44,7 @@ def test_binary_path_raises_when_missing(tmp_path, monkeypatch):
     # ensure_engine "succeeds" but drops no recognised binary.
     monkeypatch.setattr(engines.artifact_store, "ensure_engine", _fake_ensure("not-a-server"))
     with pytest.raises(engines.artifact_store.ArtifactStoreError):
-        engines.binary_path("llama-cpp", install_root=tmp_path)
+        engines.binary_path("llama-cpp", "llama-server", install_root=tmp_path)
 
 
 def test_install_root_env_override(tmp_path, monkeypatch):

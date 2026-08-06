@@ -141,7 +141,7 @@ def test_headless_first_use_chain(served_store, tmp_path, monkeypatch):
     from link.app import engines
 
     monkeypatch.setattr(store, "platform_arch", lambda: "linux-x64")
-    bp = engines.binary_path("llama-cpp", install_root=tmp_path)
+    bp = engines.binary_path("llama-cpp", "llama-server", install_root=tmp_path)
     assert bp == tmp_path / "engines" / "llama-cpp" / "llama-server"
     assert bp.is_file()
 
