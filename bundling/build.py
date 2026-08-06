@@ -91,12 +91,19 @@ def ensure_plugins_installed(plugins: tuple[str, ...]) -> None:
         )
 
 
-def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
+def run_pyinstaller(plugins: tuple[str, ...], prefetch: bool) -> Path:
     if not _have("pyinstaller"):
         raise SystemExit("pyinstaller not found. Run `uv sync --extra dev` first.")
     dist_dir = REPO_ROOT / "dist"
     build_dir = REPO_ROOT / "build"
-    env = {**os.environ, "LOCAI_BUNDLE_PLUGINS": ",".join(plugins)}
+    # LOCAI_BUNDLE_PREFETCH tells the spec whether to bake engine binaries into
+    # the bundle. Without it, engines are fetched on demand, so a plugin can be
+    # selected (its Python code ships) with no prefetched binaries present.
+    env = {
+        **os.environ,
+        "LOCAI_BUNDLE_PLUGINS": ",".join(plugins),
+        "LOCAI_BUNDLE_PREFETCH": "1" if prefetch else "0",
+    }
     cmd = [
         "pyinstaller",
         "--noconfirm",
@@ -154,7 +161,7 @@ def _ship_migration_finisher(versioned_dir: Path) -> None:
     """Ship the macOS migration finisher alongside the runtime so it is version-
     matched and present at ``<install_root>/current/finish-migration.sh`` after an
     OTA. The runtime runs it (via an admin prompt) to finish a pre-merge -> merged
-    transition. Small + harmless on platforms that never invoke it."""
+    transition. Only staged for the macOS desktop build (see the call site)."""
     src = SPEC_DIR / "finish-migration.sh"
     if not src.is_file():
         logger.warning(f"migration finisher not found at {src}; skipping")
@@ -241,12 +248,15 @@ def main() -> None:
     else:
         logger.info("== Engines fetched on demand from the artifact store (not bundled) ==")
     ensure_plugins_installed(plugins)
-    bundle_dir = run_pyinstaller(plugins)
+    bundle_dir = run_pyinstaller(plugins, prefetch)
 
     version = _read_root_version()
     logger.info(f"== Version: {version} ==")
     versioned_dir = restructure_to_versioned_layout(bundle_dir, version)
-    _ship_migration_finisher(versioned_dir)
+    # The migration finisher is macOS-desktop-only (pre-merge -> merged transition).
+    # It has nothing to act on in a headless bundle or on Linux, so don't ship it there.
+    if _pf.system() == "Darwin" and shape == "desktop":
+        _ship_migration_finisher(versioned_dir)
     manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT, shape)
 
     install_root = bundle_dir

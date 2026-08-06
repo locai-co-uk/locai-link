@@ -14,7 +14,10 @@
 enum Launch {
     /// `run` = the long-lived supervised service (idles until registered).
     Service,
-    /// Any other subcommand (register/status/update/…) = one-shot passthrough.
+    /// A lifecycle op handled natively (start/stop/restart/uninstall), shared
+    /// with the desktop shape; carries the subcommand name.
+    Lifecycle(&'static str),
+    /// A runtime subcommand (register/status/update/…) = one-shot passthrough.
     OneShot,
     /// No-arg or flag-style launch (e.g. `-psn_…`) = the desktop app.
     App,
@@ -23,6 +26,10 @@ enum Launch {
 fn classify_launch(first: Option<&str>) -> Launch {
     match first {
         Some("run") => Launch::Service,
+        Some("start") => Launch::Lifecycle("start"),
+        Some("stop") => Launch::Lifecycle("stop"),
+        Some("restart") => Launch::Lifecycle("restart"),
+        Some("uninstall") => Launch::Lifecycle("uninstall"),
         Some(arg) if !arg.starts_with('-') => Launch::OneShot,
         _ => Launch::App,
     }
@@ -37,6 +44,7 @@ fn main() -> std::process::ExitCode {
     let first = first.as_ref().map(|a| a.to_string_lossy());
     match classify_launch(first.as_deref()) {
         Launch::Service => link_lib::supervisor::run_service(),
+        Launch::Lifecycle(cmd) => link_lib::lifecycle::run(cmd),
         Launch::OneShot => link_lib::supervisor::run_supervisor(),
         Launch::App => {
             link_lib::run();
@@ -53,6 +61,7 @@ fn main() -> std::process::ExitCode {
     let first = first.as_ref().map(|a| a.to_string_lossy());
     match classify_launch(first.as_deref()) {
         Launch::Service => link_lib::supervisor::run_service(),
+        Launch::Lifecycle(cmd) => link_lib::lifecycle::run(cmd),
         _ => link_lib::supervisor::run_supervisor(),
     }
 }
@@ -67,17 +76,16 @@ mod tests {
     }
 
     #[test]
-    fn subcommands_are_one_shot() {
-        for cmd in [
-            "register",
-            "status",
-            "update",
-            "install-plugin",
-            "self-check",
-            "stop",
-            "reset",
-        ] {
+    fn runtime_subcommands_are_one_shot() {
+        for cmd in ["register", "status", "update", "install-plugin", "self-check", "reset"] {
             assert_eq!(classify_launch(Some(cmd)), Launch::OneShot, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_subcommands_are_native() {
+        for cmd in ["start", "stop", "restart", "uninstall"] {
+            assert_eq!(classify_launch(Some(cmd)), Launch::Lifecycle(cmd), "{cmd}");
         }
     }
 

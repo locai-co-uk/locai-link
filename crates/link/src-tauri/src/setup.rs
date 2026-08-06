@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 use crate::shared::{
-    deregister_device, installed_version, read_boot_json, read_identity, read_session_identity,
-    BootConfig,
+    installed_version, read_boot_json, read_session_identity, BootConfig,
 };
 
 // Overridable at build time via `LOCAI_CONTROL_API_URL` (dev builds); unset
@@ -1208,22 +1207,11 @@ pub fn apply_pending_update() -> Result<(), String> {
     Ok(())
 }
 
-/// Best-effort device self-deregister before uninstall.
-///
-/// Reads the device identity from the session and asks Control to delete this
-/// device, so its dashboard row is removed instead of lingering as offline.
-/// Never fails the uninstall: a 404 (already gone) is treated as success; any
-/// error (offline, or a rejected key → 401) is logged and swallowed. The
-/// uninstaller's local wipe is the source of truth.
+/// Best-effort device self-deregister before uninstall. Shared with the headless
+/// shape via `crate::lifecycle` so there is one implementation.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn best_effort_deregister() {
-    match read_identity(&PathBuf::from(resolve_install_root())) {
-        Some(id) => match deregister_device(&id) {
-            Ok(()) => eprintln!("[setup] device deregistered from Control"),
-            Err(e) => eprintln!("[setup] deregister failed (continuing uninstall): {e}"),
-        },
-        None => eprintln!("[setup] no device identity found; skipping deregister"),
-    }
+    crate::lifecycle::deregister(&PathBuf::from(resolve_install_root()));
 }
 
 /// Fire the uninstaller (setup splash or Preferences danger zone).

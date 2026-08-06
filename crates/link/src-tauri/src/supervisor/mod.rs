@@ -191,6 +191,9 @@ pub fn supervise_forever(control: SupervisorControl) {
     };
     let poll = Duration::from_millis(200);
     let mut backoff = Duration::from_secs(1);
+    // Log the "waiting for registration" state once per idle stretch, so a
+    // foreground run (and the journal) shows it's idling, not stuck.
+    let mut awaiting_reg_logged = false;
 
     loop {
         if !control.want_running() {
@@ -204,10 +207,15 @@ pub fn supervise_forever(control: SupervisorControl) {
         // config-less runtime would exit 0 and latch the supervisor stopped.
         // Idle until `finish_setup` registers and re-arms.
         if crate::shared::read_identity(&install_root).is_none() {
+            if !awaiting_reg_logged {
+                eprintln!("[supervisor] not registered yet; idling until `locai register` runs");
+                awaiting_reg_logged = true;
+            }
             control.set_running(false);
             std::thread::sleep(poll);
             continue;
         }
+        awaiting_reg_logged = false;
 
         let version = match resolve_current_version(&install_root) {
             Some(v) => v,

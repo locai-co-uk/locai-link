@@ -29,12 +29,12 @@ set -eu
 
 BINARY_BASE="${LOCAI_BINARY_BASE:-https://github.com/locai-co-uk/locai-link/releases/latest/download}"
 INSTALL_ROOT="${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}"
-UNINSTALL_URL="https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/uninstall.sh"
-LABEL="uk.co.locai.link.headless"
+LABEL="uk.co.locai.link.headless"      # macOS launchd label (reverse-DNS)
+UNIT="locai-link-headless.service"     # Linux systemd unit (kebab, parity with desktop)
 BIN="$INSTALL_ROOT/locai-link"
 
-log() { printf '[locai-headless] %s\n' "$*"; }
-err() { printf '[locai-headless] ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '%s\n' "$*"; }
+err() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 FORCE=0
 for a in "$@"; do [ "$a" = "--force" ] && FORCE=1; done
@@ -75,7 +75,7 @@ fetch_verified() {
     [ -n "$want" ] || err "no checksum for $asset in checksums.txt"
     got="$(sha256sum "$dest" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$dest" | cut -d' ' -f1)"
     [ "$want" = "$got" ] || err "checksum mismatch for $asset (want $want, got $got)"
-    log "checksum verified against checksums.txt"
+    log "checksum verified"
 }
 
 # Put the `locai` CLI on PATH (idempotent). Linux -> ~/.local/bin; macOS ->
@@ -103,9 +103,10 @@ install_service() {
             [ -n "${LOCAI_ARTIFACT_BASE:-}" ] && echo "Environment=LOCAI_ARTIFACT_BASE=$LOCAI_ARTIFACT_BASE"
             echo "Restart=on-failure"; echo "WorkingDirectory=$INSTALL_ROOT"; echo ""
             echo "[Install]"; echo "WantedBy=default.target"
-        } > "$UNIT_DIR/$LABEL.service"
+        } > "$UNIT_DIR/$UNIT"
         systemctl --user daemon-reload
-        systemctl --user enable --now "$LABEL.service"
+        # >/dev/null: hide systemctl's "Created symlink ..." line; keep failures.
+        systemctl --user enable --now "$UNIT" >/dev/null 2>&1 || err "failed to enable the service"
         loginctl enable-linger "$(id -un)" 2>/dev/null || true
     elif [ "$os" = "Darwin" ]; then
         PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"; mkdir -p "$HOME/Library/LaunchAgents"
@@ -132,28 +133,23 @@ register_now() {
     "$BIN" register "$REG_KIND" "$REG_KEY" || err "registration failed; re-run: locai register $REG_KIND <KEY>"
 }
 
-logs_cmd() {
-    if [ "$(uname -s)" = "Linux" ]; then echo "journalctl --user -u $LABEL -f"; else echo "tail -f $INSTALL_ROOT/logs/*.log"; fi
-}
-
-register_steps() {
-    if [ -n "$REG_KEY" ]; then
-        log "Registering with your key (no browser needed). Confirm with:  locai status"
-    else
-        log "This device is not registered yet. Register it with a key from Control:"
-        log "  locai register --registration-key <KEY>     # single device"
-        log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
-        log "then confirm:  locai status"
-    fi
-}
-
-summary() {
+installed_note() {
     log ""
-    log "Locai Link (headless) is installed and the service is running."
-    log "  cli:       locai --help   |   locai status"
-    log "  update:    locai update"
-    log "  logs:      $(logs_cmd)"
-    log "  uninstall: curl -fsSL $UNINSTALL_URL | sh"
+    log "Locai Link is installed and the service is running."
+}
+
+# Shown only when the device still needs a key.
+register_hint() {
+    log ""
+    log "This device isn't connected yet. Register it with a key from Control:"
+    log "  locai register --registration-key <KEY>     # single device"
+    log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+}
+
+footer() {
+    log ""
+    log "Check it with 'locai status', or 'locai --help' for all commands."
+    log "To uninstall: locai uninstall"
 }
 
 # --- re-run handling: do not clobber an existing install -------------
@@ -161,16 +157,17 @@ if [ -f "$BIN" ] && [ "$FORCE" != 1 ]; then
     link_cli
     install_service   # idempotent: ensure it's up
     if has_session; then
-        log "Locai Link is already installed and registered; the service is running."
-        log "  update:  locai update    (or re-run with --force to reinstall in place)"
+        installed_note
+        log "Already registered (re-run with --force to reinstall in place)."
     elif [ -n "$REG_KEY" ]; then
         register_now
-        log "registered; the service will start the agent shortly."
+        installed_note
+        log "This device is now connected."
     else
-        log "Locai Link is installed but not registered yet."
-        register_steps
+        installed_note
+        register_hint
     fi
-    summary
+    footer
     exit 0
 fi
 
@@ -196,11 +193,14 @@ link_cli
 install_service
 
 if has_session; then
-    log "reinstalled; existing registration preserved."
+    installed_note
+    log "Existing registration preserved."
 elif [ -n "$REG_KEY" ]; then
     register_now
-    log "registered; the service will start the agent shortly."
+    installed_note
+    log "This device is now connected."
 else
-    register_steps
+    installed_note
+    register_hint
 fi
-summary
+footer

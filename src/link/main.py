@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""CLI entry point: dispatches run, stop, reset, self-check, install-plugin subcommands."""
+"""CLI entry point: dispatches run, register, status, update, reset, self-check,
+install-plugin. Lifecycle ops (start/stop/restart/uninstall) are handled natively
+by the Rust binary (crate::lifecycle), shared with the desktop shape."""
 
 import argparse
 import logging
@@ -210,35 +212,55 @@ def _health_get(path: str, timeout: float = 3.0):
 
 
 def status(args: argparse.Namespace) -> int:
-    """Print registration, service, version, and update state; exit 0."""
+    """Print device details, registration, service, version, and update state; exit 0."""
+    import platform
+
     import requests
+
+    from link.utils.version import resolve_agent_version
+
+    installed = resolve_agent_version() or "unknown"
+    print(f"Version:      {installed}")
+    print(f"Host:         {platform.node()} ({platform.system().lower()}/{platform.machine()})")
 
     saved = StateManager().load_state()
     if saved is None:
         print("Registration: not registered (run `locai register`).")
     else:
         try:
-            device_id = AgentConfig(**saved).identity.device_id
-            print(f"Registration: registered (device {device_id}).")
+            ident = AgentConfig(**saved).identity
+            print(f"Device:       {ident.device_name} ({ident.device_id})")
+            print("Registration: registered.")
+            if ident.api_url:
+                print(f"Control URL:  {ident.api_url}")
         except Exception:
             print("Registration: session present but unreadable.")
 
     try:
         health = _health_get("/healthz")
     except requests.exceptions.ConnectionError:
-        print("Service:      not running.")
+        # No health endpoint means the agent isn't up. Unregistered, that is by
+        # design (the supervisor idles until a session exists), not a fault.
+        if saved is None:
+            print("Service:      idle (awaiting registration).")
+        else:
+            print("Service:      not running.")
         return 0
     except Exception as e:  # noqa: BLE001
         print(f"Service:      unreachable ({type(e).__name__}).")
         return 0
 
-    print(f"Service:      running (version {health.get('version', 'unknown')}, up {health.get('uptime_seconds', 0)}s).")
+    # The running runtime's version can lag the installed one between an OTA
+    # flip and the service restart; surface it only when it actually differs.
+    running = health.get("version")
+    lag = f", running {running}" if running and running != installed else ""
+    print(f"Service:      running (up {health.get('uptime_seconds', 0)}s{lag}).")
     if health.get("currently_serving"):
         print(f"Serving:      {health.get('model_id') or 'yes'}")
     transport = health.get("transport") or {}
     if transport:
         conn = "connected" if transport.get("connected") else "disconnected"
-        print(f"Control:      {conn} ({transport.get('type')})")
+        print(f"Transport:    {conn} ({transport.get('type')})")
     if health.get("update_available"):
         print(f"Update:       available -> {health.get('latest_version')} (run `locai update`).")
     else:
@@ -495,10 +517,11 @@ def reset(hard: bool = False):
 def main():
     """CLI entry point: parses arguments and dispatches to subcommands."""
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command")
+    # metavar keeps hidden internal commands (below) out of the usage line.
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
-    # Lifecycle
-    run_p = subparsers.add_parser("run", help="Runs the agent.")
+    # Internal, hidden from --help
+    run_p = subparsers.add_parser("run")
     run_p.add_argument("--config", help="Path to a config file OR a session state file.")
     run_p.add_argument("--registration-key", help="Registration key from Control (key-only onboarding).")
     run_p.add_argument(
@@ -521,25 +544,32 @@ def main():
     update_p = subparsers.add_parser("update", help="Update the running service to the latest version.")
     update_p.add_argument("--force", action="store_true", help="Trigger even if no update has been detected yet.")
 
-    subparsers.add_parser("stop", help="Stops all running services.")
-    subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
+    # `--help` should list only what works in this build.
+    frozen = getattr(sys, "frozen", False)
 
-    # Self-check: minimal boot used by the OTA health check in bundle_updater.
-    subparsers.add_parser(
-        "self-check",
-        help="Boot to config+transport+plugins and exit 0 if healthy. Used by OTA rollback.",
-    )
+    # Lifecycle (start/stop/restart/uninstall):
+    if frozen:
+        subparsers.add_parser("start", help="Start the background service.")
+        subparsers.add_parser("stop", help="Stop the background service.")
+        subparsers.add_parser("restart", help="Restart the background service.")
+        subparsers.add_parser("uninstall", help="Deregister from Control and remove this installation.")
 
-    subparsers.add_parser("install-plugin", help="Installs a plugin.").add_argument("name")
+    # Internal, hidden from --help: the OTA health check invokes this after a
+    # runtime swap (boot to config+transport+plugins, exit 0 if healthy).
+    subparsers.add_parser("self-check")
+
+    # Dev-only: no-ops on a frozen deployed device (reset nukes the source repo;
+    # install-plugin pip-installs into a venv), so hidden there.
+    if not frozen:
+        subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
+        subparsers.add_parser("install-plugin", help="Installs a plugin.").add_argument("name")
 
     args = parser.parse_args()
 
-    if args.command == "stop":
-        stop()
+    if args.command == "run":
+        run(args)
     elif args.command == "reset":
         reset(args.hard)
-    elif args.command == "run":
-        run(args)
     elif args.command == "register":
         sys.exit(register(args))
     elif args.command == "status":

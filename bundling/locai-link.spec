@@ -73,6 +73,10 @@ unknown = [p for p in selected if p not in PLUGIN_SPEC]
 if unknown:
     raise SystemExit(f"Unknown plugins in LOCAI_BUNDLE_PLUGINS: {', '.join(unknown)}")
 
+# Engine binaries are baked in only for a --prefetch build; otherwise they are
+# fetched from the artifact store on first use, so a selected plugin ships its
+# Python code with no native binaries present.
+prefetch = os.environ.get("LOCAI_BUNDLE_PREFETCH") == "1"
 ARTIFACTS_DIR = SPEC_DIR / "_artifacts" / _platform_tag()
 
 datas = []
@@ -94,8 +98,8 @@ for name in selected:
     datas += collect_data_files(pkg, include_py_files=False)
     # Hidden imports — entry-point targets are loaded by string.
     hidden_imports += info["imports"]
-    # Native binaries — copied flat into the bundle root subdir.
-    if info["native_dir"]:
+    # Native binaries — baked in only for a --prefetch build (else fetched on demand).
+    if info["native_dir"] and prefetch:
         native_root = ARTIFACTS_DIR / info["native_dir"]
         if not native_root.is_dir():
             raise SystemExit(
