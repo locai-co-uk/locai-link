@@ -794,7 +794,7 @@ def test_stop_legacy_supervisor_macos(tmp_path, monkeypatch):
     agent_plist.write_text("<plist/>")
     monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
     monkeypatch.setattr(updater, "_home_for_uid", lambda uid: home)
-    popen_calls: list = []
+    popen_calls: list[Any] = []
     monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: popen_calls.append((args, kw)))
 
     updater._stop_legacy_supervisor_macos(tmp_path / "root")
@@ -820,7 +820,7 @@ def test_run_admin_finish_macos_prompts_once(tmp_path, monkeypatch):
         version = "1.3.0"
 
     monkeypatch.setattr(updater, "read_manifest", lambda r: _Man)
-    calls: list = []
+    calls: list[Any] = []
     monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: calls.append((args, kw)))
 
     updater._run_admin_finish_macos(root)

@@ -165,6 +165,7 @@ class AsyncHandler(logging.Handler):
     def emit(self, record):
         if self._stop_event.is_set():
             return
+        route_key = "logs"
         try:
             route_key = getattr(record, "route_key", "logs")
             context = getattr(record, "context", {})

@@ -3,9 +3,8 @@
 
 """Config schema for Loc.ai:Link agents.
 
-This module defines the canonical `AgentConfig` schema the backend sends to an
-agent during registration (`POST /devices/register-with-key`) and activation
-(`POST /agent/activate-with-key`). The top-level `AgentConfig` model below is
+This module defines the canonical `AgentConfig` schema the backend returns to an
+agent during registration/enrollment. The top-level `AgentConfig` model below is
 the contract between the control plane and the edge agent.
 
 Integrators (backend developers, operators writing config templates) should

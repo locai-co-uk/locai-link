@@ -111,7 +111,9 @@ class ZenohClient:
         deadline = time.monotonic() + self._ROUTER_WAIT_SECONDS
         while time.monotonic() < deadline:
             try:
-                if list(session.info().routers_zid()):
+                # info is a method on some zenoh versions, a property on others;
+                # both shapes are handled by the except below.
+                if list(session.info().routers_zid()):  # pyright: ignore[reportCallIssue]
                     return
             except (AttributeError, TypeError) as e:
                 # The probe API is absent/incompatible: never resolvable, so

@@ -7,13 +7,15 @@ test_artifact_store); here we test the mapping + resolution."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from link.app import engines
+from link.infra import engines
 
 
 def _fake_ensure(binary_name="llama-server"):
-    def _inner(name, dest_dir=None, base=None, **_kw):
+    def _inner(name, dest_dir: Path, base=None, **_kw):
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / binary_name).write_text("fake", encoding="utf-8")
         return dest_dir
@@ -24,7 +26,7 @@ def _fake_ensure(binary_name="llama-server"):
 def test_provision_uses_per_engine_dir(tmp_path, monkeypatch):
     seen = {}
 
-    def _capture(name, dest_dir=None, base=None, **_kw):
+    def _capture(name, dest_dir: Path, base=None, **_kw):
         seen.update(name=name, dest=dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
 

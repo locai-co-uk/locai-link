@@ -20,7 +20,7 @@ import logging
 import os
 from pathlib import Path
 
-from link.app import artifact_store
+from link.infra import artifact_store
 
 logger = logging.getLogger(__name__)
 

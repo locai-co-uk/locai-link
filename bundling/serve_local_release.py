@@ -72,7 +72,7 @@ def main() -> None:
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *_a) -> None:  # quiet
+        def log_message(self, format: str, *args: object) -> None:  # pyright: ignore[reportImplicitOverride]  quiet
             pass
 
         def do_GET(self) -> None:  # noqa: N802

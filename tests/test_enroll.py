@@ -21,7 +21,7 @@ def isolated_fleet_marker(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_runtime(mocker):
+def _no_runtime(mocker):  # pyright: ignore[reportUnusedFunction]  (autouse: discovered by decorator)
     """These tests exercise the onboarding ladder only; never start the runtime."""
     mocker.patch("link.main.AgentRuntime")
     mocker.patch("link.main.setup_logging")

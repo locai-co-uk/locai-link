@@ -25,12 +25,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from manifest import PLUGIN_CODES, PLUGIN_ORDER  # noqa: E402
 
 
-def plugin_set_from_manifest(manifest: dict) -> list[str]:
+def plugin_set_from_manifest(manifest: dict[str, Any]) -> list[str]:
     """Ordered short codes for the plugins listed in a bundle manifest."""
     names = {p.get("name") for p in manifest.get("plugins", []) if p.get("name")}
     unknown = names - set(PLUGIN_CODES)

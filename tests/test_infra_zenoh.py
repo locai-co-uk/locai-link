@@ -130,7 +130,7 @@ def test_get_session_waits_for_router_after_open(mocker):
 
     client = ZenohClient.__new__(ZenohClient)
     client._session = None
-    client._zenoh_config = object()
+    client._zenoh_config = object()  # pyright: ignore[reportAttributeAccessIssue]  # test poke
     wait = mocker.patch.object(client, "_wait_for_router")
 
     result = client.get_session()

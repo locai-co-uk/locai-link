@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import urllib.error
+from email.message import Message
 
 import pytest
 
@@ -20,31 +21,35 @@ except ImportError:  # flat layout (pytest prepend import mode)
 
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
+def _no_sleep(monkeypatch):  # pyright: ignore[reportUnusedFunction]  (autouse: discovered by decorator)
     monkeypatch.setattr(install.time, "sleep", lambda *_: None)
 
 
-def _fake_urlopen(*results):
-    """Return a urlopen stub that yields each result in turn.
+class _Opener:
+    """urlopen stub that yields each result in turn.
 
     A bytes result is served as the response body; an exception is raised.
     """
-    calls = {"n": 0}
 
-    def _open(url, timeout=None):
-        i = calls["n"]
-        calls["n"] += 1
-        item = results[min(i, len(results) - 1)]
+    def __init__(self, *results):
+        self._results = results
+        self.calls = {"n": 0}
+
+    def __call__(self, url, timeout=None):
+        i = self.calls["n"]
+        self.calls["n"] += 1
+        item = self._results[min(i, len(self._results) - 1)]
         if isinstance(item, Exception):
             raise item
         return io.BytesIO(item)
 
-    _open.calls = calls
-    return _open
+
+def _fake_urlopen(*results) -> _Opener:
+    return _Opener(*results)
 
 
 def _http_error(code: int) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError("http://x", code, "err", {}, None)
+    return urllib.error.HTTPError("http://x", code, "err", Message(), None)
 
 
 def test_success_writes_dest_and_cleans_partial(monkeypatch, tmp_path):

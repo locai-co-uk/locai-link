@@ -17,7 +17,7 @@ Two modes:
   That is the 459 CI publish job; the per-engine / per-platform asset recipe
   below is its source of truth.
 
-The store client (``link.app.artifact_store``) is the reader for what this writes.
+The store client (``link.infra.artifact_store``) is the reader for what this writes.
 
 whisper-cpp has no upstream *server* prebuilt for macOS (only an xcframework),
 so darwin variants must be built and dropped in via ``--from-dir`` until the
@@ -33,6 +33,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
+from typing import Any, TypedDict
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -55,7 +56,12 @@ ENGINE_VERSIONS = {
 # the cpu/portable build has no accel suffix and is the client's final fallback.
 # The client (artifact_store.variant_candidates) prefers an accel build when the
 # device has the hardware and the manifest carries it, else degrades to cpu.
-UPSTREAM = {
+class _EngineSpec(TypedDict):
+    base: str  # release URL base with a {tag} placeholder
+    assets: dict[str, str]  # variant -> upstream asset filename ({tag} placeholder)
+
+
+UPSTREAM: dict[str, _EngineSpec] = {
     "llama-cpp": {
         "base": "https://github.com/ggml-org/llama.cpp/releases/download/{tag}",
         "assets": {
@@ -126,7 +132,7 @@ def rebuild_manifest(store_dir: Path) -> Path:
     """Scan the store tree and (re)write ``index/manifest.v1.json`` atomically.
     The manifest is derived from what is on disk, so it can never drift from the
     artifacts. Written via a temp + os.replace so a reader never sees a partial."""
-    manifest: dict = {"schema": MANIFEST_SCHEMA}
+    manifest: dict[str, Any] = {"schema": MANIFEST_SCHEMA}
     for cap_dir in sorted(p for p in store_dir.iterdir() if p.is_dir() and p.name != "index"):
         for name_dir in sorted(p for p in cap_dir.iterdir() if p.is_dir()):
             for ver_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
@@ -142,10 +148,10 @@ def rebuild_manifest(store_dir: Path) -> Path:
     # Per-engine default version, so a device resolves what to fetch from the
     # manifest instead of re-pinning versions in the runtime. Prefer the pinned
     # ENGINE_VERSIONS (what publish fetched); fall back to a version present.
-    defaults: dict = {}
+    defaults: dict[str, str] = {}
     for name, versions in manifest.get(CAPABILITY_ENGINES, {}).items():
         pin = ENGINE_VERSIONS.get(name)
-        defaults[name] = pin if pin in versions else sorted(versions)[-1]
+        defaults[name] = pin if (pin is not None and pin in versions) else sorted(versions)[-1]
     if defaults:
         manifest["defaults"] = {CAPABILITY_ENGINES: defaults}
 

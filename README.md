@@ -10,33 +10,31 @@ Full documentation is at [docs.locai.co.uk](https://docs.locai.co.uk).
 
 ## Quick start
 
-The fastest way to get Link running is to download a pre-built binary from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest). No Python, git, or compilers required on the device. The macOS bundle is signed + notarised so it runs without Gatekeeper warnings.
+Two ways to run Link. **Headless** is a one-line install for servers and edge devices (no Python, git, or compilers). **Desktop** is the packaged app with a setup UI. Either way, get a registration key from [Control](https://locai.co.uk) and register the device.
 
-**macOS (Apple Silicon):**
+### Headless (servers, edge devices)
 
-```
-curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-macos-arm64-$TAG.tar.gz | tar -xz
-./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
-```
+The installer sets up the background service; you register out-of-band with the key.
 
-**Linux (x86_64):**
+**Linux / macOS:**
 
 ```
-curl -L https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-linux-x86_64-$TAG.tar.gz | tar -xz
-./locai-link/locai-link run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+curl -fsSL https://locai.co.uk/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 
 ```
-Invoke-WebRequest https://github.com/locai-co-uk/locai-link/releases/latest/download/locai-link-windows-x86_64-$TAG.zip -OutFile locai-link.zip
-Expand-Archive locai-link.zip
-.\locai-link\locai-link.exe run --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+irm https://locai.co.uk/install.ps1 | iex
 ```
 
-Replace `$TAG` with the version you want (e.g. `v1.0.12`); the URLs on the Releases page list the exact filenames. Each release also publishes a `.sha256` sidecar so you can verify the download (`sha256sum -c locai-link-…sha256`).
+You will now have the `locai` service installed on your machine. To register, run `locai register --registration-key "YOUR_REG_KEY"`. For a fleet, register with `--fleet-key` instead. To register unattended in one step, set `LOCAI_REGISTRATION_KEY` (or `LOCAI_FLEET_KEY`) before running the install command. Check status any time with `locai status`; update with `locai update`.
 
-If your Locai account was created via Google sign-in (no password set), the CLI automatically falls back to the OAuth 2.0 device authorization flow — it prints a short code and a URL, and you approve the device in your browser on any other device. See [Onboarding flow](#onboarding-flow) for the full picture.
+### Desktop (macOS)
+
+Download the signed + notarised app from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest) and follow the setup assistant. (Windows and Linux desktop builds follow later.)
+
+Onboarding is key-only and machine-bound: the registration key from Control is the credential, and Control binds the device to this machine and assigns its id and name. See [Onboarding flow](#onboarding-flow) for the full picture. To run from a git checkout instead, see [Build from source](#build-from-source).
 
 ## How Locai Link compares
 
@@ -48,20 +46,19 @@ If you need AI inference inside a regulated or air-gapped environment where publ
 
 ## Build from source
 
-The pre-built binaries above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
+The Quick start installers above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
 
 Clone the repo and onboard the device with a single `run`. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
 
 ```
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
-uv run main.py run \
-  --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+uv run main.py run --registration-key "YOUR_REG_KEY"
 ```
 
-`run` prompts interactively for anything you omit, including your platform password.
+The registration key is the only credential; Control assigns the device id and name from the machine.
 
-Enrolling with an org-scoped fleet key instead? Use `--fleet-key "YOUR_FLEET_KEY"` (accepts the key itself or `file:<path>`) with no device name, email, or registration key needed.
+Enrolling with an org-scoped fleet key instead? Use `--fleet-key "YOUR_FLEET_KEY"` (accepts the key itself or `file:<path>`).
 
 ### Plugin build prerequisites (source builds only)
 
@@ -96,27 +93,27 @@ uv pip install -e ".[dev]"    # dev extras: testing + docs tools
 Register a new device with a Registration Key from the Locai dashboard:
 
 ```
-uv run main.py run \
-  --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
+uv run main.py run --registration-key "YOUR_REG_KEY"
 ```
 
-You'll be prompted for your password (or pass `--token <JWT>` to skip). Add `--api-url "<url>"` when pointing at a non-production control plane.
-
-If your account has no password (e.g. Google sign-up), the CLI seamlessly switches to OAuth 2.0 Device Authorization (RFC 8628): you'll see a `XXXX-XXXX` code and a verification URL — open it in any browser, approve the device, and the CLI continues automatically.
+The key is the credential; Control binds the device to this machine and assigns its id and name. Add `--api-url "<url>"` when pointing at a non-production control plane.
 
 On subsequent runs, resume the saved session:
 
 ```
-uv run main.py run            # or --headless to install as a systemd/launchd/Windows service
+uv run main.py run
 ```
+
+Deploy as a background service (systemd/launchd/Windows) with the release installers under `scripts/`; register out-of-band with `locai register --registration-key <KEY>`.
 
 ### CLI reference
 
 | Command                 | Purpose                                                             |
 | ----------------------- | ------------------------------------------------------------------- |
-| `setup [--dev]`         | Install Python dependencies.                                        |
-| `run [options]`         | Resume an existing session, onboard a new device, or load a config. |
-| `install [options]`     | Full one-liner flow: clone repo → setup → register → run.           |
+| `run [options]`         | Resume an existing session, onboard with a key, or load a config.   |
+| `register [options]`    | Register this device with a key, write the session, and exit.       |
+| `status`                | Show registration, service, and update status.                      |
+| `update [--force]`      | Update the running service to the latest version.                   |
 | `stop`                  | Stop all running services (`locai-link`, `zenohd`).                 |
 | `reset [--hard]`        | Clean up venv, caches, and (with `--hard`) session files.           |
 | `install-plugin <name>` | Install a plugin by name.                                           |
@@ -196,10 +193,10 @@ flowchart TB
     %% Upstream to the control plane (over Zenoh), at layer granularity:
     %%  • Execution (pipeline sinks): telemetry + inference results (data plane)
     %%  • Application (LinkReporter): logs, status, model state, deployment progress
-    %%  • Application (Onboarding): device registration / activation (HTTP)
+    %%  • Application (Onboarding): device registration / enrollment (HTTP)
     Exec -->|Telemetry / Results| Cloud
     App -->|Logs / Status / Reports| Cloud
-    App -->|Register / Activate| Cloud
+    App -->|Register / Enroll| Cloud
 
     %% OTA bundles are pulled from GitHub Releases (not the control plane).
     Releases -->|Manifest / Payload| App
@@ -239,18 +236,11 @@ On startup without a session, the agent resolves identity in this order:
 
 1. **`--config <path>`** — load a specific session or raw config file.
 2. **Auto-resume** — load the most recent `configs/session_*.json`.
-3. **JIT onboarding** — with `--registration-key`, either register (`--device-name` + `--email`/`--token`) or re-activate (`--device-id`).
-4. **Factory defaults** — fall back to `configs/default_config.json`.
+3. **Key onboarding** — with `--registration-key` (single device) or `--fleet-key` (org-scoped), register/enroll with Control.
+4. **Fleet marker** — a previously fleet-enrolled device with no session fails loudly rather than re-bootstrapping as a fresh agent.
+5. **Factory defaults** — fall back to `configs/default_config.json`.
 
-Registration resolves an auth token via one of three paths:
-
-1. **`--token <JWT>`** — pre-obtained access token. No prompts. Use this for CI / unattended deployments.
-2. **`--email` + password** — the CLI prompts for the password via `getpass`, then calls `/auth/login`. Returns a JWT on success.
-3. **`--email` + device authorization** — fallback when the account has no password (e.g. Google SSO sign-up). The CLI prints a `XXXX-XXXX` code and a `/link` URL; the user approves on any device with a browser, and the CLI polls until the request is approved (or denied / expired). Implements OAuth 2.0 RFC 8628.
-
-The CLI tries path 2 first when `--email` is provided. If the backend signals `use_device_flow` (HTTP 409), it falls through to path 3 automatically — users with a password keep the snappy one-prompt experience; SSO-only users get the device flow without re-running the command.
-
-Once authenticated, the registration key is exchanged for a device ID and API key.
+Onboarding is key-only and machine-bound. The key is sent as the bearer credential (no user login); the CLI identifies the machine by its id hash and hostname, and Control assigns the device id and name and returns an API key plus the agent config. Re-running from the same machine is an idempotent retry that rotates the API key, so installer re-runs are safe.
 
 ## Plugins
 

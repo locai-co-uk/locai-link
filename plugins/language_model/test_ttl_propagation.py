@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,7 +32,7 @@ def _make_sm(monkeypatch, tmp_path) -> SwapManager:
     return sm
 
 
-def _models(sm: SwapManager) -> dict:
+def _models(sm: SwapManager) -> dict[str, Any]:
     return json.loads(sm._config_path.read_text())["models"]
 
 

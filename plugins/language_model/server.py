@@ -83,10 +83,10 @@ class ModelServer:
         # 3. On-demand fetch from the artifact store — only in a frozen bundle, so
         #    a headless install (no bundled engines) fetches at first use while
         #    dev/source runs keep the bin_dir/install.py path. Soft import: only the
-        #    bundled runtime exposes link.app.engines.
+        #    bundled runtime exposes link.infra.engines.
         if getattr(sys, "frozen", False):
             try:
-                from link.app import engines
+                from link.infra import engines
 
                 return engines.binary_path("llama-cpp", binary_name)
             except Exception as e:  # noqa: BLE001

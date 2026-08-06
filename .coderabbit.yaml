@@ -79,8 +79,8 @@ reviews:
         SECRETS & AUTH — flag as blocking:
         - Any hardcoded credential, registration key, API key, JWT, or environment-specific URL.
         - Any logging of secrets, tokens, passwords, or registration keys — even at debug level.
-        - Any change to the onboarding auth fallthrough (password -> device flow on HTTP 409
-          use_device_flow, or empty password -> device flow) that could break SSO-only onboarding.
+        - Any change to headless key/fleet onboarding (registration or fleet key sent as the
+          bearer, machine-bound register/enroll) that weakens the machine binding or logs the key.
 
         CODE QUALITY — flag all issues including nits:
         - Missing type hints on any function signature or return type.

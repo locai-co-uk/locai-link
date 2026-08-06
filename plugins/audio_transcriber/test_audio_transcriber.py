@@ -88,6 +88,7 @@ def test_whisper_serve_mode_lifecycle():
     pid = None
     try:
         assert agent.server.running, "Server failed to start — check whisper-server logs"
+        assert agent.server.process is not None
         pid = agent.server.process.pid
         assert psutil.pid_exists(pid), "Server process should exist"
 
@@ -103,6 +104,7 @@ def test_whisper_serve_mode_lifecycle():
         result = agent.transcribe(AUDIO_PATH)
         assert result is not None
         text = result["model_output"]
+        assert isinstance(text, str)
         print(f"[Whisper] Transcription: {text}")
         assert len(text) > 0
 
@@ -110,7 +112,9 @@ def test_whisper_serve_mode_lifecycle():
         assert result["model_type"] == "generation"
         assert result["sub_model_type"] == "audio_transcription"
         assert "model_output_duration" in result
-        assert result["model_output_metadata"]["source"] == "file"
+        metadata = result["model_output_metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["source"] == "file"
 
     finally:
         print("\n[Whisper] Stopping server...")
@@ -119,6 +123,7 @@ def test_whisper_serve_mode_lifecycle():
 
         if pid is not None:
             assert not psutil.pid_exists(pid), "Zombie process detected! Server did not exit cleanly."
+            assert agent.server.monitor_thread is not None
             assert not agent.server.monitor_thread.is_alive()
 
 

@@ -17,7 +17,7 @@ import threading
 import publish_artifacts as pub
 import pytest
 
-from link.app import artifact_store as store
+from link.infra import artifact_store as store
 
 
 def _make_engine_archive(dest, binary_name="llama-server", body=b"ELF-fake-binary"):
@@ -31,7 +31,8 @@ def _make_engine_archive(dest, binary_name="llama-server", body=b"ELF-fake-binar
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *_a):  # keep test output clean
+    # keep test output clean
+    def log_message(self, *_a):  # pyright: ignore[reportIncompatibleMethodOverride, reportImplicitOverride]
         pass
 
 
@@ -138,7 +139,7 @@ def test_headless_first_use_chain(served_store, tmp_path, monkeypatch):
     """The full headless first-use path with NOTHING mocked: engines.binary_path
     -> artifact_store -> served mock store -> engine binary on disk. This is what
     the serving path hits when a headless install has no bundled engine."""
-    from link.app import engines
+    from link.infra import engines
 
     monkeypatch.setattr(store, "platform_arch", lambda: "linux-x64")
     bp = engines.binary_path("llama-cpp", "llama-server", install_root=tmp_path)
