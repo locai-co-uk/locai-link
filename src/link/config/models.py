@@ -10,13 +10,13 @@ the contract between the control plane and the edge agent.
 Integrators (backend developers, operators writing config templates) should
 read this file top-to-bottom:
 
-- `AgentConfig`              : root object
-- `IdentityConfig`           : device credentials
-- `TransportConfig`          : data-plane transport (HTTP or Zenoh)
-- `LoggingConfig`            : log handler routing
-- `ReportingConfig`          : lifecycle/status handler routing
-- `PipelineConfig`           : a running source-to-sink dataflow
-- `GenericConfig`            : the building block used for sources, sinks, handlers
+- `AgentConfig`              — root object
+- `IdentityConfig`           — device credentials
+- `TransportConfig`          — data-plane transport (HTTP or Zenoh)
+- `LoggingConfig`            — log handler routing
+- `ReportingConfig`          — lifecycle/status handler routing
+- `PipelineConfig`           — a running source-to-sink dataflow
+- `GenericConfig`            — the building block used for sources, sinks, handlers
 
 Known component `type` values (sources, sinks, handlers) are enumerated in
 `docs/config-schema.md`. New values can be added by shipping a plugin that
@@ -70,26 +70,26 @@ class GenericConfig(BaseModel):
     Known `type` values shipped in-core:
 
     **Sources** (emit data):
-      - `clock_tick`      : periodic timestamp tick
-      - `random_gen`      : random-value generator
-      - `http_poll`       : poll an HTTP endpoint at a fixed interval
-      - `system_monitor`  : CPU/RAM/storage/temperature metrics
-      - `zenoh_sub`       : Zenoh subscription
+      - `clock_tick`      — periodic timestamp tick
+      - `random_gen`      — random-value generator
+      - `http_poll`       — poll an HTTP endpoint at a fixed interval
+      - `system_monitor`  — CPU/RAM/storage/temperature metrics
+      - `zenoh_sub`       — Zenoh subscription
 
     **Sinks** (consume data):
-      - `console`         : print to stdout
-      - `http_post`       : POST to an HTTP endpoint
-      - `command`         : dispatch to the agent's command handler
-      - `zenoh_pub`       : publish to a Zenoh topic
+      - `console`         — print to stdout
+      - `http_post`       — POST to an HTTP endpoint
+      - `command`         — dispatch to the agent's command handler
+      - `zenoh_pub`       — publish to a Zenoh topic
 
     **Logging/reporting handlers**:
-      - `console`         : print logs to stdout
-      - `http`            : async HTTP POST/PUT with route-keyed URLs
-      - `zenoh`           : async Zenoh publish with route-keyed topics
-      - `posthog`         : (optional) per-device PostHog events
-      - `hubspot`         : (optional) per-device HubSpot timeline events
+      - `console`         — print logs to stdout
+      - `http`            — async HTTP POST/PUT with route-keyed URLs
+      - `zenoh`           — async Zenoh publish with route-keyed topics
+      - `posthog`         — (optional) per-device PostHog events
+      - `hubspot`         — (optional) per-device HubSpot timeline events
 
-    Plugins can register additional `type` values; see `plugins/*/adapter.py`.
+    Plugins can register additional `type` values — see `plugins/*/adapter.py`.
     """
 
     model_config = ConfigDict(
@@ -178,9 +178,9 @@ class TransportConfig(GenericConfig):
 
     Two transports ship in-core:
 
-    - `http`  : no external dependency; pipelines use `http_poll` / `http_post`.
+    - `http`  — no external dependency; pipelines use `http_poll` / `http_post`.
       No `args` required.
-    - `zenoh` : peer-to-peer pub/sub via Eclipse Zenoh. Requires `args.endpoints`
+    - `zenoh` — peer-to-peer pub/sub via Eclipse Zenoh. Requires `args.endpoints`
       (list of router endpoints) and optionally `args.mode` (`peer` | `client`).
 
     Omitting `transport` from `AgentConfig` is equivalent to `{type: "http"}`.
@@ -218,10 +218,10 @@ class LoggingConfig(BaseModel):
     Routes Python log records from the agent to one or more sinks. Each handler
     is a `GenericConfig` whose `type` selects an implementation:
 
-    - `console` : print to stdout.
-    - `http`    : async POST to a URL. Required `args.url`. Optional `args.api_key`
+    - `console` — print to stdout.
+    - `http`    — async POST to a URL. Required `args.url`. Optional `args.api_key`
       (sent as `Authorization: Bearer …`).
-    - `zenoh`   : async publish to a topic. Required `args.topic`.
+    - `zenoh`   — async publish to a topic. Required `args.topic`.
 
     Any handler may set `args.level` (`"DEBUG" | "INFO" | "WARNING" | "ERROR"`)
     to override the parent `LoggingConfig.level` for that single handler. This
@@ -277,15 +277,15 @@ class ReportingConfig(BaseModel):
 
     Separate from `logging` because these handlers route *structured status*
     events (device online/offline, command completed, model state changed) to
-    route-keyed destinations, not free-text log records.
+    route-keyed destinations — not free-text log records.
 
     Each `http` handler supports route keys in its `args` to target different
     endpoints per event type:
 
-    - `lifecycle_status` : PUT for device online/offline
-    - `command_status`   : POST for command completion (placeholder `{cid}` is
+    - `lifecycle_status` — PUT for device online/offline
+    - `command_status`   — POST for command completion (placeholder `{cid}` is
        the command ID, substituted at emit time)
-    - `model_status`     : POST for model state (placeholder `{mid}` is the
+    - `model_status`     — POST for model state (placeholder `{mid}` is the
        model ID)
 
     Identity placeholders (`${identity.device_id}`, etc.) are resolved once at
@@ -341,12 +341,12 @@ class PipelineConfig(BaseModel):
 
     Common patterns:
 
-    - **Command polling**: `source: http_poll`, `sink: command`: fetches pending
+    - **Command polling**: `source: http_poll`, `sink: command` — fetches pending
       commands from the control plane and dispatches them to the runtime.
-    - **System metrics**: `source: system_monitor`, `sink: http_post`: periodic
+    - **System metrics**: `source: system_monitor`, `sink: http_post` — periodic
       telemetry to the control plane.
     - **Inference**: `source: <plugin_name>` (e.g. `language_model`), `sink:
-      http_post`: a plugin produces inference results; sink reports them.
+      http_post` — a plugin produces inference results; sink reports them.
 
     Set `active: true` to auto-start on boot. Pipelines can also be started and
     stopped via runtime commands (`START_MODEL_INFERENCE`, `STOP_MODEL_INFERENCE`).
@@ -421,7 +421,7 @@ class AgentConfig(BaseModel):
     and activation responses. The agent saves it as the initial session state
     and uses it as the source of truth for all subsequent operations.
 
-    Backend integrators should treat this model as the contract: all fields
+    Backend integrators should treat this model as the contract — all fields
     accept `${identity.*}` template placeholders for values that the agent fills
     in from the registration response. Unresolved placeholders in other
     namespaces (e.g. `{cid}`, `{mid}`) are preserved and substituted by runtime
