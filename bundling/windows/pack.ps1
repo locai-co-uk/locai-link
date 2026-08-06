@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Windows counterpart of bundling/linux/pack.sh for the HEADLESS shape: assemble
+# the flat install-root tarball that scripts/install.ps1 extracts. Shape + asset
+# name are read from dist/locai-link/current/manifest.json (written by build.py);
+# this then builds the matching --no-default-features locai-link.exe, so the
+# feature can't diverge from the bundle's shape.
+#
+# Output layout (inside the tarball, under a <name>/ wrapper install.ps1 strips):
+#     locai-link-headless-windows-<x64|arm64>-<version>/
+#     ├── locai-link.exe
+#     ├── boot.json
+#     └── versions/  current|CURRENT  (the runtime bundle)
+#
+# Prereq (repo root):  uv run python bundling/build.py --shape headless --plugins <set>
+#
+#     pwsh bundling/windows/pack.ps1            # -> dist/...-DEV.tar.gz
+#     pwsh bundling/windows/pack.ps1 -Release   # drop the -DEV suffix
+
+[CmdletBinding()]
+param(
+    [switch]$Release,
+    [string]$Output
+)
+$ErrorActionPreference = "Stop"
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
+
+$BundleDir = Join-Path $RepoRoot "dist\locai-link"
+$Manifest  = Join-Path $BundleDir "current\manifest.json"
+$BootJson  = Join-Path $RepoRoot "bundling\boot.json"
+
+if (-not (Test-Path $Manifest)) { throw "manifest.json not at $Manifest - run ``uv run python bundling/build.py --shape headless --plugins ...`` first." }
+if (-not (Test-Path $BootJson))  { throw "boot.json not at $BootJson." }
+
+# --- Derive asset name + shape from manifest (single source of truth) ---
+$m = Get-Content $Manifest -Raw | ConvertFrom-Json
+$assetStem = $m.asset_name
+$version   = "v$($m.version)"
+$shape     = if ($m.shape) { $m.shape } else { "desktop" }
+if (-not $assetStem -or -not $m.version) { throw "manifest.json missing asset_name/version" }
+if ($shape -ne "headless") { throw "windows pack.ps1 handles the headless shape only (got '$shape'); desktop Windows is the tauri bundle." }
+
+# --- Build the matching Rust binary (headless = no tray/setup) ---
+Write-Host "[pack] building locai-link.exe (headless)..."
+Push-Location (Join-Path $RepoRoot "crates")
+try {
+    cargo build -p locai-link --no-default-features --release
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+} finally { Pop-Location }
+$bin = Join-Path $RepoRoot "crates\target\release\locai-link.exe"
+if (-not (Test-Path $bin)) { throw "locai-link.exe not at $bin after build" }
+
+switch ($env:PROCESSOR_ARCHITECTURE) {
+    "AMD64" { $arch = "x64" }
+    "ARM64" { $arch = "arm64" }
+    default { throw "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
+}
+$name = "$assetStem-windows-$arch-$version"
+if (-not $Release) { $name = "$name-DEV" }
+if (-not $Output) { $Output = Join-Path $RepoRoot "dist\$name.tar.gz" }
+Write-Host "[pack] asset name:  $name"
+Write-Host "[pack] output:      $Output"
+
+# --- Stage the flat install root, then tar (same <name>/ wrapper as Linux) ---
+$stage = Join-Path ([System.IO.Path]::GetTempPath()) ("locai-pack-" + [System.Guid]::NewGuid())
+$root  = Join-Path $stage $name
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+try {
+    Copy-Item -Recurse -Force (Join-Path $BundleDir "*") $root
+    Copy-Item -Force $bin (Join-Path $root "locai-link.exe")
+    python (Join-Path $RepoRoot "bundling\gen_boot_json.py") --manifest $Manifest --template $BootJson --output (Join-Path $root "boot.json")
+    if ($LASTEXITCODE -ne 0) { throw "gen_boot_json.py failed" }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Output) | Out-Null
+    tar -czf $Output -C $stage $name
+    if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+} finally {
+    Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+}
+Write-Host "[pack] wrote $Output"

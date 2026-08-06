@@ -24,8 +24,8 @@ $BinaryBase  = if ($env:LOCAI_BINARY_BASE)  { $env:LOCAI_BINARY_BASE }  else { "
 $InstallRoot = if ($env:LOCAI_INSTALL_ROOT) { $env:LOCAI_INSTALL_ROOT } else { Join-Path $env:LOCALAPPDATA "Locai" }
 $Label       = "uk.co.locai.link.headless"
 
-function Log($m) { Write-Host "[locai-headless] $m" }
-function Die($m) { Write-Error "[locai-headless] ERROR: $m"; exit 1 }
+function Log($m) { Write-Host $m }
+function Die($m) { Write-Error $m; exit 1 }
 
 # Detect platform-arch (only Windows x64/arm64 published today).
 $machine = $env:PROCESSOR_ARCHITECTURE
@@ -56,11 +56,12 @@ try {
     $want = ($line.Line -split '\s+')[0].Trim().ToLower()
     $got  = (Get-FileHash -Algorithm SHA256 $tarball).Hash.ToLower()
     if ($want -ne $got) { Die "checksum mismatch for $asset (want $want, got $got)" }
-    Log "checksum verified against checksums.txt"
+    Log "checksum verified"
 
     New-Item -ItemType Directory -Force -Path $InstallRoot, (Join-Path $InstallRoot "logs"), (Join-Path $InstallRoot "engines") | Out-Null
-    # tar ships with Windows 10+; extract the payload (binary + no-engine runtime).
-    tar -xzf $tarball -C $InstallRoot
+    # tar ships with Windows 10+. --strip-components=1 drops the <name>/ wrapper so
+    # locai-link.exe + versions/ + boot.json land at the install-root top (matches install.sh).
+    tar -xzf $tarball -C $InstallRoot --strip-components=1
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
@@ -93,17 +94,24 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -Re
 Register-ScheduledTask -TaskName $Label -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $Label
 
+Log ""
+Log "Locai Link is installed and the service is running."
+
 # Unattended installs can supply a key via env -> one-shot register now (the idle
-# service picks up the session). Otherwise print the register command.
+# service picks up the session). Otherwise show how to register.
 if ($env:LOCAI_REGISTRATION_KEY) {
-    Log "registering this device with your key..."
     & $bin register --registration-key $env:LOCAI_REGISTRATION_KEY
+    Log "This device is now connected."
 } elseif ($env:LOCAI_FLEET_KEY) {
-    Log "enrolling this device with your fleet key..."
     & $bin register --fleet-key $env:LOCAI_FLEET_KEY
+    Log "This device is now connected."
 } else {
-    Log "installed. Register this device with a key from Control:"
+    Log ""
+    Log "This device isn't connected yet. Register it with a key from Control:"
     Log "  locai register --registration-key <KEY>     # single device"
     Log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
-    Log "then confirm:  locai status"
 }
+
+Log ""
+Log "Check it with 'locai status', or 'locai --help' for all commands."
+Log "To uninstall: locai uninstall"

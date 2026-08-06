@@ -634,11 +634,10 @@ jobs:
           retention-days: 14
 
   # Headless shape: supervisor-only (no tray), engines fetched on demand. A flat
-  # install-root tarball that scripts/install.sh extracts (--strip-components=1).
+  # install-root tarball that scripts/install.{sh,ps1} extract (--strip-components=1).
   # Separate from `bundle` so the desktop pkg/notarize path is untouched.
-  # Linux-only for now: a macOS headless binary would be unsigned, and Gatekeeper
-  # blocks curl-installed unsigned binaries — so macOS (and Windows) headless are
-  # follow-ups once headless-binary signing lands.
+  # Linux + Windows for now; macOS headless is a follow-up: an unsigned binary
+  # trips Gatekeeper on curl-installed binaries, so it waits on headless signing.
   bundle-headless:
     name: Bundle headless on ${{ matrix.os }}
     needs: release
@@ -649,6 +648,8 @@ jobs:
         include:
           - os: ubuntu-latest
             platform_tag: linux-x64
+          - os: windows-latest
+            platform_tag: windows-x64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -667,16 +668,24 @@ jobs:
       - name: Build headless bundle
         shell: bash
         run: uv run python bundling/build.py --shape headless --plugins language_model audio_transcriber
-      - name: Package headless tarball
-        # pack.sh (headless) builds the --no-default-features binary + the flat
-        # install-root tarball, named locai-link-headless-<os>-<arch>-v<ver>.tar.gz.
+      # Each packer builds the --no-default-features binary + the flat install-root
+      # tarball, named locai-link-headless-<os>-<arch>-v<ver>.tar.gz.
+      - name: Package headless tarball (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash bundling/linux/pack.sh --release
+      - name: Package headless tarball (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./bundling/windows/pack.ps1 -Release
+      - name: Collect + checksum
+        # bash runs on the Windows runner via git-bash; tar/python are on PATH.
         shell: bash
         env:
           STABLE: locai-link-headless-${{ matrix.platform_tag }}.tar.gz
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          bash bundling/linux/pack.sh --release
           BUILT=$(ls dist/locai-link-headless-${{ matrix.platform_tag }}-*.tar.gz | head -1)
           [ -n "$BUILT" ] || { echo "::error::headless tarball not produced for ${{ matrix.platform_tag }}"; exit 1; }
           cp "$BUILT" "release-assets/$(basename "$BUILT")"
