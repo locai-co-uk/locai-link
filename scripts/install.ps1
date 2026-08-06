@@ -3,12 +3,15 @@
 #
 # Headless Locai Link installer for Windows, single line:
 #
-#     irm https://get.locai.co.uk/headless.ps1 | iex
+#     irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.ps1 | iex
+#
+# The script (this file) is served from the repo via raw.githubusercontent; the
+# builds + checksums.txt it pulls live on GitHub Releases.
 #
 # Installs the stripped headless build (supervisor only, no tray/setup, NO engines
 # bundled) per-user, registers it to run in the background, and leaves engines to
 # be pulled on demand from the artifact store at first use. Mirrors
-# install-headless.sh (Linux/macOS). Uses a per-user Scheduled Task so no admin is
+# install.sh (Linux/macOS). Uses a per-user Scheduled Task so no admin is
 # needed; a real SCM service (`sc.exe create`, admin) is the alternative for a
 # machine that must serve before any user logs in.
 #
@@ -17,7 +20,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$BinaryBase  = if ($env:LOCAI_BINARY_BASE)  { $env:LOCAI_BINARY_BASE }  else { "https://get.locai.co.uk/headless" }
+$BinaryBase  = if ($env:LOCAI_BINARY_BASE)  { $env:LOCAI_BINARY_BASE }  else { "https://github.com/locai-co-uk/locai-link/releases/latest/download" }
 $InstallRoot = if ($env:LOCAI_INSTALL_ROOT) { $env:LOCAI_INSTALL_ROOT } else { Join-Path $env:LOCALAPPDATA "Locai" }
 $Label       = "uk.co.locai.link.headless"
 
@@ -32,23 +35,28 @@ switch ($machine) {
     default { Die "unsupported architecture: $machine" }
 }
 $platform = "windows-$arch"
-$tarballUrl = if ($env:LOCAI_HEADLESS_URL) { $env:LOCAI_HEADLESS_URL } else { "$BinaryBase/locai-link-headless-$platform.tar.gz" }
+$asset = "locai-link-headless-$platform.tar.gz"
+$tarballUrl = if ($env:LOCAI_HEADLESS_URL) { $env:LOCAI_HEADLESS_URL } else { "$BinaryBase/$asset" }
+$checksumsUrl = if ($env:LOCAI_CHECKSUMS_URL) { $env:LOCAI_CHECKSUMS_URL } else { "$BinaryBase/checksums.txt" }
 Log "platform: $platform"
 Log "install root: $InstallRoot"
 
-# Fetch + checksum-verify (bootstrap trust): the pulled binary is what everything
-# else trusts, so verify its sha256 against the published .sha256 first.
+# Fetch + checksum-verify (bootstrap trust): the tarball is what everything else
+# trusts, so verify its sha256 against the release-wide checksums.txt first.
 $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ([System.Guid]::NewGuid()))
 try {
     $tarball = Join-Path $tmp "headless.tar.gz"
     Log "downloading $tarballUrl"
     Invoke-WebRequest -Uri $tarballUrl -OutFile $tarball
-    try { Invoke-WebRequest -Uri "$tarballUrl.sha256" -OutFile "$tarball.sha256" }
-    catch { Die "no .sha256 for $tarballUrl - refusing to install an unverified binary" }
-    $want = (Get-Content "$tarball.sha256").Split(" ")[0].Trim()
+    $sums = Join-Path $tmp "checksums.txt"
+    try { Invoke-WebRequest -Uri $checksumsUrl -OutFile $sums }
+    catch { Die "no checksums.txt at $checksumsUrl - refusing to install unverified" }
+    $line = Select-String -Path $sums -Pattern ([regex]::Escape($asset)) | Select-Object -First 1
+    if (-not $line) { Die "no checksum for $asset in checksums.txt" }
+    $want = ($line.Line -split '\s+')[0].Trim().ToLower()
     $got  = (Get-FileHash -Algorithm SHA256 $tarball).Hash.ToLower()
-    if ($want -ne $got) { Die "checksum mismatch (want $want, got $got)" }
-    Log "checksum verified"
+    if ($want -ne $got) { Die "checksum mismatch for $asset (want $want, got $got)" }
+    Log "checksum verified against checksums.txt"
 
     New-Item -ItemType Directory -Force -Path $InstallRoot, (Join-Path $InstallRoot "logs"), (Join-Path $InstallRoot "engines") | Out-Null
     # tar ships with Windows 10+; extract the payload (binary + no-engine runtime).

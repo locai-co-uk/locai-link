@@ -34,7 +34,9 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import time
@@ -90,7 +92,7 @@ def platform_arch() -> str:
     if sys.platform.startswith("linux"):
         system = "linux"
     elif sys.platform == "darwin":
-        system = "darwin"
+        system = "macos"
     elif sys.platform in ("win32", "cygwin"):
         system = "windows"
     else:
@@ -103,6 +105,54 @@ def platform_arch() -> str:
     else:
         raise ArtifactStoreError(f"unsupported architecture: {machine}")
     return f"{system}-{arch}"
+
+
+def _cuda_major() -> int | None:
+    """CUDA major version from nvcc or nvidia-smi, or None. Best-effort."""
+    for cmd, pat in ((["nvcc", "--version"], r"release\s+(\d+)\."), (["nvidia-smi"], r"CUDA Version:\s*(\d+)\.")):
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+            m = re.search(pat, out)
+            if m:
+                return int(m.group(1))
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
+def _has_gpu() -> bool:
+    return shutil.which("nvidia-smi") is not None or shutil.which("rocm-smi") is not None
+
+
+def accel_suffixes() -> list[str]:
+    """Accel-variant suffixes for this device, most-preferred first, the cpu
+    baseline ("") always last. Mirrors the plugin prebuilt selection: Windows
+    prefers a CUDA build then Vulkan; Linux prefers Vulkan when a GPU is present;
+    macOS ships Metal in the base build (no suffix). The manifest decides which of
+    these actually exist for a given engine; the client just orders preference."""
+    if sys.platform == "darwin":
+        return [""]
+    is_arm = platform.machine().lower() in ("arm64", "aarch64")
+    sfx: list[str] = []
+    if sys.platform in ("win32", "cygwin"):
+        cu = _cuda_major()
+        if cu:
+            sfx.append("-cuda-13.3" if cu >= 13 else "-cuda-12.4")
+        if _has_gpu():
+            sfx.append("-vulkan")
+    elif sys.platform.startswith("linux") and not is_arm and _has_gpu():
+        sfx.append("-vulkan")
+    sfx.append("")  # cpu / portable baseline, always the final fallback
+    return sfx
+
+
+def variant_candidates() -> list[str]:
+    """Ordered ``<platform-arch>[-<accel>]`` tokens to try against the manifest,
+    best-accel first and the cpu baseline last."""
+    base = platform_arch()
+    return [f"{base}{s}" for s in accel_suffixes()]
 
 
 @dataclass(frozen=True)
@@ -136,17 +186,22 @@ class Manifest:
             raise VariantNotFound(f"no default version for {capability}/{name} in manifest") from None
 
     def variant(self, capability: str, name: str, version: str | None = None, arch: str | None = None) -> Variant:
+        """Resolve the artifact for this device. With ``arch`` given, that exact
+        variant is required; otherwise the device's ordered ``variant_candidates``
+        (best accel first, cpu baseline last) are tried and the first present wins,
+        so a GPU box gets the GPU build when published and degrades to cpu when not."""
         version = version or self.default_version(capability, name)
-        arch = arch or platform_arch()
-        try:
-            rec = self._data[capability][name][version][arch]
-        except (KeyError, TypeError):
-            raise VariantNotFound(f"{capability}/{name}/{version}/{arch} not in manifest") from None
-        path = rec.get("path")
-        sha = rec.get("sha256")
-        if not path or not sha:
-            raise ManifestError(f"manifest entry for {capability}/{name}/{version}/{arch} missing path/sha256")
-        return Variant(path=path, sha256=sha, size=rec.get("size"))
+        candidates = [arch] if arch else variant_candidates()
+        for cand in candidates:
+            try:
+                rec = self._data[capability][name][version][cand]
+            except (KeyError, TypeError):
+                continue
+            path, sha = rec.get("path"), rec.get("sha256")
+            if not path or not sha:
+                raise ManifestError(f"manifest entry {capability}/{name}/{version}/{cand} missing path/sha256")
+            return Variant(path=path, sha256=sha, size=rec.get("size"))
+        raise VariantNotFound(f"{capability}/{name}/{version}: none of {candidates} in manifest")
 
 
 def _http_get(url: str, timeout: int, max_bytes: int | None = None) -> bytes:

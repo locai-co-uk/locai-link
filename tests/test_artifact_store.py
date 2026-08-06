@@ -62,7 +62,7 @@ def test_platform_arch(monkeypatch):
     assert store.platform_arch() == "linux-x64"
     monkeypatch.setattr(store.sys, "platform", "darwin")
     monkeypatch.setattr(store.platform, "machine", lambda: "arm64")
-    assert store.platform_arch() == "darwin-arm64"
+    assert store.platform_arch() == "macos-arm64"
     monkeypatch.setattr(store.sys, "platform", "win32")
     monkeypatch.setattr(store.platform, "machine", lambda: "AMD64")
     assert store.platform_arch() == "windows-x64"
@@ -144,3 +144,38 @@ def test_headless_first_use_chain(served_store, tmp_path, monkeypatch):
     bp = engines.binary_path("llama-cpp", install_root=tmp_path)
     assert bp == tmp_path / "engines" / "llama-cpp" / "llama-server"
     assert bp.is_file()
+
+
+def test_variant_candidates_prefer_accel_then_cpu(monkeypatch):
+    # A GPU linux box: candidates are [vulkan, cpu], best first.
+    monkeypatch.setattr(store.sys, "platform", "linux")
+    monkeypatch.setattr(store.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(store, "_has_gpu", lambda: True)
+    assert store.variant_candidates() == ["linux-x64-vulkan", "linux-x64"]
+
+    base = {"schema": 1, "defaults": {"engines": {"llama-cpp": "b10289"}}}
+    cpu_only = store.Manifest(
+        {**base, "engines": {"llama-cpp": {"b10289": {"linux-x64": {"path": "cpu", "sha256": "s"}}}}}
+    )
+    assert cpu_only.variant("engines", "llama-cpp").path == "cpu"  # falls back to cpu
+    with_vulkan = store.Manifest(
+        {
+            **base,
+            "engines": {
+                "llama-cpp": {
+                    "b10289": {
+                        "linux-x64": {"path": "cpu", "sha256": "s"},
+                        "linux-x64-vulkan": {"path": "vk", "sha256": "s"},
+                    }
+                }
+            },
+        }
+    )
+    assert with_vulkan.variant("engines", "llama-cpp").path == "vk"  # prefers accel when present
+
+
+def test_variant_candidates_cpu_only_without_gpu(monkeypatch):
+    monkeypatch.setattr(store.sys, "platform", "linux")
+    monkeypatch.setattr(store.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(store, "_has_gpu", lambda: False)
+    assert store.variant_candidates() == ["linux-x64"]

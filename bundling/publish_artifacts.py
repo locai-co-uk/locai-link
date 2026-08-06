@@ -50,18 +50,24 @@ ENGINE_VERSIONS = {
 }
 
 # Upstream asset recipe: how to build each store variant from an upstream release
-# asset. {name: {version-fmt-url-base, platform-arch: asset-filename}}. The
-# {tag} placeholder is the pinned version. One baseline variant per platform-arch
-# (CPU/portable); GPU builds (vulkan/cuda/metal) are a later multi-variant refinement.
+# asset. {name: {version-fmt-url-base, variant: asset-filename}}. The {tag}
+# placeholder is the pinned version. The variant key is <platform-arch>[-<accel>];
+# the cpu/portable build has no accel suffix and is the client's final fallback.
+# The client (artifact_store.variant_candidates) prefers an accel build when the
+# device has the hardware and the manifest carries it, else degrades to cpu.
 UPSTREAM = {
     "llama-cpp": {
         "base": "https://github.com/ggml-org/llama.cpp/releases/download/{tag}",
         "assets": {
             "linux-x64": "llama-{tag}-bin-ubuntu-x64.tar.gz",
+            "linux-x64-vulkan": "llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz",
             "linux-arm64": "llama-{tag}-bin-ubuntu-arm64.tar.gz",
-            "darwin-x64": "llama-{tag}-bin-macos-x64.tar.gz",
-            "darwin-arm64": "llama-{tag}-bin-macos-arm64.tar.gz",
+            "macos-x64": "llama-{tag}-bin-macos-x64.tar.gz",
+            "macos-arm64": "llama-{tag}-bin-macos-arm64.tar.gz",
             "windows-x64": "llama-{tag}-bin-win-cpu-x64.zip",
+            "windows-x64-vulkan": "llama-{tag}-bin-win-vulkan-x64.zip",
+            "windows-x64-cuda-12.4": "llama-{tag}-bin-win-cuda-12.4-x64.zip",
+            "windows-x64-cuda-13.3": "llama-{tag}-bin-win-cuda-13.3-x64.zip",
         },
     },
     "llama-swap": {
@@ -69,8 +75,8 @@ UPSTREAM = {
         "assets": {
             "linux-x64": "llama-swap_{tag}_linux_amd64.tar.gz",
             "linux-arm64": "llama-swap_{tag}_linux_arm64.tar.gz",
-            "darwin-x64": "llama-swap_{tag}_darwin_amd64.tar.gz",
-            "darwin-arm64": "llama-swap_{tag}_darwin_arm64.tar.gz",
+            "macos-x64": "llama-swap_{tag}_darwin_amd64.tar.gz",
+            "macos-arm64": "llama-swap_{tag}_darwin_arm64.tar.gz",
             "windows-x64": "llama-swap_{tag}_windows_amd64.zip",
         },
     },

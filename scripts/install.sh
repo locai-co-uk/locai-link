@@ -4,7 +4,10 @@
 #
 # Headless Locai Link installer (Linux + macOS), single line:
 #
-#     curl -fsSL https://get.locai.co.uk/headless.sh | sh
+#     curl -fsSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.sh | sh
+#
+# The script (this file) is served from the repo via raw.githubusercontent; the
+# builds + checksums.txt it pulls live on GitHub Releases.
 #
 # Installs the stripped headless build (supervisor only, no tray/setup, NO engines
 # bundled) per-user, wires it as a background service, and leaves engines to be
@@ -15,13 +18,15 @@
 # Config (env overrides, all optional):
 #   LOCAI_HEADLESS_URL    full URL to the headless tarball (default: resolved
 #                         from LOCAI_BINARY_BASE + detected platform-arch)
-#   LOCAI_BINARY_BASE     base for the tarball + .sha256 (default: the release CDN)
+#   LOCAI_BINARY_BASE     base for the tarball + checksums.txt (default: the GitHub
+#                         Releases latest/download path)
+#   LOCAI_CHECKSUMS_URL   full URL to checksums.txt (default: LOCAI_BINARY_BASE/checksums.txt)
 #   LOCAI_ARTIFACT_BASE   engine artifact store base, baked into the service env so
 #                         on-demand engine fetches resolve (default: the prod CDN)
 #   LOCAI_INSTALL_ROOT    install dir (default: ~/.local/share/locai)
 set -eu
 
-BINARY_BASE="${LOCAI_BINARY_BASE:-https://get.locai.co.uk/headless}"
+BINARY_BASE="${LOCAI_BINARY_BASE:-https://github.com/locai-co-uk/locai-link/releases/latest/download}"
 INSTALL_ROOT="${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}"
 LABEL="uk.co.locai.link.headless"
 
@@ -33,8 +38,8 @@ detect_platform() {
     os="$(uname -s)"; machine="$(uname -m)"
     case "$os" in
         Linux)  plat="linux" ;;
-        Darwin) plat="darwin" ;;
-        *) err "unsupported OS: $os (headless supports Linux and macOS; Windows uses install-headless.ps1)" ;;
+        Darwin) plat="macos" ;;
+        *) err "unsupported OS: $os (headless supports Linux and macOS; Windows uses install.ps1)" ;;
     esac
     case "$machine" in
         x86_64|amd64) arch="x64" ;;
@@ -45,31 +50,34 @@ detect_platform() {
 }
 
 # --- fetch + checksum-verify (bootstrap trust) -----------------------
-# The binary we pull is what everything else trusts, so verify its sha256 against
-# the published .sha256 before running it. (Signing/notarisation is layered on top
+# The tarball is what everything else trusts, so verify its sha256 against the
+# release-wide checksums.txt before unpacking. (Signing/notarisation layers on
 # per-OS; this is the transport-integrity floor.)
 fetch_verified() {
-    url="$1"; dest="$2"
+    url="$1"; dest="$2"; asset="$3"
     log "downloading $url"
     curl -fsSL "$url" -o "$dest" || err "download failed: $url"
-    if curl -fsSL "$url.sha256" -o "$dest.sha256" 2>/dev/null; then
-        want="$(cut -d' ' -f1 < "$dest.sha256")"
-        got="$(shasum -a 256 "$dest" 2>/dev/null | cut -d' ' -f1 || sha256sum "$dest" | cut -d' ' -f1)"
-        [ "$want" = "$got" ] || err "checksum mismatch for $url (want $want, got $got)"
-        log "checksum verified"
-    else
-        err "no .sha256 for $url — refusing to install an unverified binary"
-    fi
+    sums="$TMP/checksums.txt"
+    curl -fsSL "$CHECKSUMS_URL" -o "$sums" 2>/dev/null \
+        || err "no checksums.txt at $CHECKSUMS_URL - refusing to install unverified"
+    # sha256sum format: "<hash>  <name>" (or "<hash> *<name>" in binary mode).
+    want="$(awk -v f="$asset" '$2 == f || $2 == "*" f {print $1}' "$sums" | head -1)"
+    [ -n "$want" ] || err "no checksum for $asset in checksums.txt"
+    got="$(sha256sum "$dest" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$dest" | cut -d' ' -f1)"
+    [ "$want" = "$got" ] || err "checksum mismatch for $asset (want $want, got $got)"
+    log "checksum verified against checksums.txt"
 }
 
 PLATFORM="$(detect_platform)"
-TARBALL_URL="${LOCAI_HEADLESS_URL:-$BINARY_BASE/locai-link-headless-$PLATFORM.tar.gz}"
+ASSET="locai-link-headless-$PLATFORM.tar.gz"
+TARBALL_URL="${LOCAI_HEADLESS_URL:-$BINARY_BASE/$ASSET}"
+CHECKSUMS_URL="${LOCAI_CHECKSUMS_URL:-$BINARY_BASE/checksums.txt}"
 log "platform: $PLATFORM"
 log "install root: $INSTALL_ROOT"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-fetch_verified "$TARBALL_URL" "$TMP/headless.tar.gz"
+fetch_verified "$TARBALL_URL" "$TMP/headless.tar.gz" "$ASSET"
 
 # --- lay the payload (binary + no-engine runtime), no engines --------
 mkdir -p "$INSTALL_ROOT" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/state" "$INSTALL_ROOT/engines"
