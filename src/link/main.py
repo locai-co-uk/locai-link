@@ -6,6 +6,7 @@
 import argparse
 import logging
 import os
+import platform
 import shutil
 import sys
 import tomllib
@@ -184,6 +185,136 @@ def run(args: argparse.Namespace):
     elif runtime.config_restart_requested:
         logger.info("Restarting agent to pick up persisted config...")
         os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def register(args: argparse.Namespace) -> int:
+    """Interactive one-shot registration: onboard, write the session, exit.
+
+    The background service idles until a session exists, then picks up the one
+    written here. Idempotent: a no-op if the device is already registered.
+    """
+    state_manager = StateManager()
+    if state_manager.load_state() is not None:
+        logger.info("This device is already registered; nothing to do.")
+        return 0
+
+    api_url = args.api_url or constants.DEFAULT_API_URL
+    try:
+        if args.fleet_key:
+            agent_config = enroll_device(fleet_key=args.fleet_key, api_url=api_url)
+        elif args.device_id:
+            if not args.registration_key:
+                logger.critical("--device-id re-activation requires --registration-key")
+                return 1
+            agent_config = activate_device(
+                device_id=args.device_id, reg_key=args.registration_key, api_url=api_url
+            )
+        else:
+            # reg_key None -> sign in (device flow), mint a key, then register.
+            agent_config = register_device(
+                name=args.device_name or platform.node(),
+                reg_key=args.registration_key,
+                api_url=api_url,
+                email=args.email,
+                token=args.token,
+            )
+        state_manager.bootstrap(agent_config)
+    except Exception as e:
+        logger.critical(f"Registration failed: {e}", exc_info=True)
+        return 1
+
+    logger.info(f"Registered device {agent_config.identity.device_id}. The service will pick it up.")
+    return 0
+
+
+def _health_get(path: str, timeout: float = 3.0):
+    """GET the running service's loopback health endpoint; returns parsed JSON."""
+    import requests
+
+    url = f"http://{constants.HEALTH_HOST}:{constants.HEALTH_PORT}{path}"
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def status(args: argparse.Namespace) -> int:
+    """Print registration, service, version, and update state; exit 0."""
+    import requests
+
+    saved = StateManager().load_state()
+    if saved is None:
+        print("Registration: not registered (run `locai register`).")
+    else:
+        try:
+            device_id = AgentConfig(**saved).identity.device_id
+            print(f"Registration: registered (device {device_id}).")
+        except Exception:
+            print("Registration: session present but unreadable.")
+
+    try:
+        health = _health_get("/healthz")
+    except requests.exceptions.ConnectionError:
+        print("Service:      not running.")
+        return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"Service:      unreachable ({type(e).__name__}).")
+        return 0
+
+    print(f"Service:      running (version {health.get('version', 'unknown')}, up {health.get('uptime_seconds', 0)}s).")
+    if health.get("currently_serving"):
+        print(f"Serving:      {health.get('model_id') or 'yes'}")
+    transport = health.get("transport") or {}
+    if transport:
+        conn = "connected" if transport.get("connected") else "disconnected"
+        print(f"Control:      {conn} ({transport.get('type')})")
+    if health.get("update_available"):
+        print(f"Update:       available -> {health.get('latest_version')} (run `locai update`).")
+    else:
+        print("Update:       up to date.")
+    return 0
+
+
+def update(args: argparse.Namespace) -> int:
+    """Trigger the running service's OTA update, then exit.
+
+    Reuses the service's full download -> verify -> flip -> restart path via the
+    loopback endpoint; --force triggers it even if no update has been detected yet.
+    """
+    import requests
+
+    try:
+        health = _health_get("/healthz")
+    except requests.exceptions.ConnectionError:
+        print("Service is not running; start it before updating.")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not reach the service ({type(e).__name__}).")
+        return 1
+
+    if not health.get("update_available") and not args.force:
+        print(f"Already at the latest version ({health.get('version', 'unknown')}).")
+        return 0
+
+    latest = health.get("latest_version")
+    target = f" -> {latest}" if latest else ""
+    url = f"http://{constants.HEALTH_HOST}:{constants.HEALTH_PORT}/update"
+    try:
+        resp = requests.post(url, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        print(f"Update request failed ({type(e).__name__}).")
+        return 1
+
+    if resp.status_code == 202:
+        print(f"Update{target} accepted; the service is applying it and will restart.")
+        return 0
+    if resp.status_code == 409:
+        print("No installable update available yet.")
+        return 0
+    if resp.status_code == 503:
+        print("Service is still starting; try again shortly.")
+        return 1
+    print(f"Update request returned HTTP {resp.status_code}.")
+    return 1
 
 
 def self_check(args: argparse.Namespace) -> int:
@@ -443,6 +574,23 @@ def main():
         help="Org-scoped fleet enrollment key; accepts the key itself or file:<path>.",
     )
 
+    # Interactive one-shot registration for a running headless service. Signs in
+    # (device flow), mints a key, writes the session, and exits; the service then
+    # picks it up. --fleet-key / --device-id cover unattended + re-activation.
+    reg_p = subparsers.add_parser("register", help="Register this device, then exit.")
+    reg_p.add_argument("--device-name", help="Device name for onboarding (default: hostname).")
+    reg_p.add_argument("--registration-key", help="Pre-minted key; skips interactive sign-in.")
+    reg_p.add_argument("--fleet-key", help="Org-scoped fleet key; accepts the key or file:<path>.")
+    reg_p.add_argument("--device-id", help="Existing device ID for re-activation.")
+    reg_p.add_argument("--email", help="Platform email (device flow used if omitted).")
+    reg_p.add_argument("--token", help="Pre-obtained JWT token (alternative to email).")
+    reg_p.add_argument("--api-url", help="Override API URL.")
+
+    subparsers.add_parser("status", help="Show registration, service, and update status.")
+
+    update_p = subparsers.add_parser("update", help="Update the running service to the latest version.")
+    update_p.add_argument("--force", action="store_true", help="Trigger even if no update has been detected yet.")
+
     subparsers.add_parser("stop", help="Stops all running services.")
     subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
 
@@ -462,6 +610,12 @@ def main():
         reset(args.hard)
     elif args.command == "run":
         run(args)
+    elif args.command == "register":
+        sys.exit(register(args))
+    elif args.command == "status":
+        sys.exit(status(args))
+    elif args.command == "update":
+        sys.exit(update(args))
     elif args.command == "install-plugin":
         from link.components.registry import ComponentRegistry
 

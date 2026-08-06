@@ -261,15 +261,41 @@ def _resolve_token(
     raise ValueError("Provide either --token or --email to authenticate.")
 
 
+def _mint_registration_key(auth_token: str, api_url: str, source: str) -> str:
+    """Mint a single-use registration key for interactive (keyless) onboarding.
+
+    `source` is recorded as the device's registration source on Control.
+    """
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    resp = _request_with_retry(
+        lambda: requests.post(
+            f"{api_url}/devices/registration-keys",
+            json={"registration_source": source},
+            headers=headers,
+            timeout=10,
+        ),
+        op_name="Registration key mint",
+    )
+    key = resp.json().get("registration_key")
+    if not key:
+        raise RuntimeError("registration_key missing from mint response")
+    return key
+
+
 def register_device(
     name: str,
-    reg_key: str,
+    reg_key: str | None,
     api_url: str,
     email: str | None = None,
     password: str | None = None,
     token: str | None = None,
+    source: str = "headless",
 ) -> AgentConfig:
-    """Exchange a registration key + name for a brand-new device ID and API key."""
+    """Exchange a registration key + name for a brand-new device ID and API key.
+
+    `reg_key` may be None for interactive onboarding: the auth token is resolved
+    first (device flow), then a single-use key is minted server-side.
+    """
     logger.info(f"Registering new device: {name}")
 
     client_metadata = {
@@ -278,6 +304,8 @@ def register_device(
         "hostname": platform.node(),
     }
     auth_token = _resolve_token(email, password, token, api_url, client_metadata=client_metadata)
+    if not reg_key:
+        reg_key = _mint_registration_key(auth_token, api_url, source)
 
     _agent_ver = resolve_agent_version()
     _metadata: dict[str, Any] = {"os": platform.system(), "arch": platform.machine()}

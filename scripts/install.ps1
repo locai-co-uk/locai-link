@@ -68,6 +68,17 @@ try {
 $bin = Join-Path $InstallRoot "locai-link.exe"
 if (-not (Test-Path $bin)) { Die "headless binary not found at $bin after extract" }
 
+# Put `locai` on PATH: a shim that calls the binary, plus the install dir on the
+# user PATH so `locai ...` works from a new shell.
+$shim = Join-Path $InstallRoot "locai.cmd"
+Set-Content -Path $shim -Value '@"%~dp0locai-link.exe" %*' -Encoding ASCII
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$InstallRoot*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallRoot", "User")
+    Log "added $InstallRoot to your PATH (open a new terminal to pick up 'locai')"
+}
+Log "CLI: locai -> $bin"
+
 # Bake the engine store base into the task so on-demand fetches resolve.
 if ($env:LOCAI_ARTIFACT_BASE) {
     [Environment]::SetEnvironmentVariable("LOCAI_ARTIFACT_BASE", $env:LOCAI_ARTIFACT_BASE, "User")
