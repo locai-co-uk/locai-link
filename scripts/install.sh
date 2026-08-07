@@ -133,6 +133,9 @@ install_service() {
             printf '  <key>ProgramArguments</key><array><string>%s</string><string>run</string></array>\n' "$BIN"
             [ -n "${LOCAI_ARTIFACT_BASE:-}" ] && echo "  <key>EnvironmentVariables</key><dict><key>LOCAI_ARTIFACT_BASE</key><string>$LOCAI_ARTIFACT_BASE</string></dict>"
             echo "  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
+            # Without these the service stream goes nowhere (Linux has journald).
+            echo "  <key>StandardOutPath</key><string>$INSTALL_ROOT/logs/service.log</string>"
+            echo "  <key>StandardErrorPath</key><string>$INSTALL_ROOT/logs/service.log</string>"
             echo "</dict></plist>"
         } > "$PLIST"
         uid="$(id -u)"
@@ -165,6 +168,11 @@ register_hint() {
 footer() {
     log ""
     log "Check it with 'locai status', or 'locai --help' for all commands."
+    if [ "$(uname -s)" = "Linux" ]; then
+        log "Service logs: journalctl --user -u $UNIT -f"
+    else
+        log "Service logs: $INSTALL_ROOT/logs/service.log"
+    fi
     log "To uninstall: locai uninstall"
 }
 

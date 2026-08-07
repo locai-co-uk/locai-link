@@ -331,26 +331,33 @@ fn windows_remove_files(root: &Path) -> Result<(), String> {
     );
     let _ = Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output();
 
-    // PowerShell single-quoted literal (with '' escaping) + -LiteralPath: the
-    // path is never parsed as command syntax, unlike an interpolated `cmd /C`.
-    // A surviving service instance holds the exe open and defeats a single
-    // Remove-Item, so the cleanup first stops this install's processes
-    // (path-scoped: other checkouts' binaries share the image name) and then
-    // retries the delete until the handles release.
-    let del = format!(
-        "Start-Sleep -Seconds 2; \
-         Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue | \
-         Where-Object {{ $_.Path -like '{esc}*' }} | Stop-Process -Force -ErrorAction SilentlyContinue; \
-         for ($i = 0; $i -lt 30; $i++) {{ \
-           Remove-Item -LiteralPath '{esc}' -Recurse -Force -ErrorAction SilentlyContinue; \
-           if (-not (Test-Path -LiteralPath '{esc}')) {{ break }}; \
-           Start-Sleep -Milliseconds 500 }}; \
-         $left = @(Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{esc}*' }}).Count; \
-         \"removed=$(-not (Test-Path -LiteralPath '{esc}')) leftoverProcs=$left\" | \
-           Out-File -FilePath (Join-Path $env:TEMP 'locai-uninstall.log')"
+    // The cleanup runs as a script FILE from %TEMP% (the run-from-outside
+    // pattern standard Windows uninstallers use): -File avoids the -Command
+    // quoting minefield entirely, and the temp location means the script never
+    // blocks the directory it deletes. A surviving service instance holds the
+    // exe open and defeats a single Remove-Item, so it stops this install's
+    // processes first (path-scoped: other checkouts share the image names),
+    // retries the delete, and records the outcome in locai-uninstall.log.
+    let script = format!(
+        r#"Start-Sleep -Seconds 2
+Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue |
+  Where-Object {{ $_.Path -like '{esc}*' }} | Stop-Process -Force -ErrorAction SilentlyContinue
+for ($i = 0; $i -lt 30; $i++) {{
+  Remove-Item -LiteralPath '{esc}' -Recurse -Force -ErrorAction SilentlyContinue
+  if (-not (Test-Path -LiteralPath '{esc}')) {{ break }}
+  Start-Sleep -Milliseconds 500
+}}
+$left = @(Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue |
+  Where-Object {{ $_.Path -like '{esc}*' }}).Count
+"removed=$(-not (Test-Path -LiteralPath '{esc}')) leftoverProcs=$left" |
+  Out-File -FilePath (Join-Path $env:TEMP 'locai-uninstall.log')
+"#
     );
+    let script_path = std::env::temp_dir().join("locai-uninstall.ps1");
+    std::fs::write(&script_path, script).map_err(|e| format!("write cleanup script: {e}"))?;
     Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &del])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .arg(&script_path)
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|e| format!("spawn cleanup: {e}"))?;

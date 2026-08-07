@@ -355,6 +355,15 @@ def setup_logging(
     logging_config: Any = None, reporting_config: Any = None, zenoh_session: Any = None
 ) -> logging.Logger:
     """Configure the root logger and the ``link.reporter`` logger."""
+    # Windows stdio defaults to the ANSI codepage when redirected to a file;
+    # the console formatter's markers would then raise UnicodeEncodeError on
+    # every line and bury the message under logging tracebacks.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
     _configure_logger(None, logging_config, zenoh_session)
     _configure_logger("link.reporter", reporting_config, zenoh_session)
     return logging.getLogger()

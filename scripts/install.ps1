@@ -58,6 +58,7 @@ function Invoke-LocaiRegistration {
 function Show-LocaiFooter {
     Log ""
     Log "Check it with 'locai status', or 'locai --help' for all commands."
+    Log "Service logs: $InstallRoot\logs\service.log"
     Log "To uninstall: locai uninstall"
 }
 
