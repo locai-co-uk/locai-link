@@ -50,9 +50,16 @@ fn install_root() -> PathBuf {
     if let Some(root) = std::env::var_os("LOCAI_INSTALL_ROOT") {
         return PathBuf::from(root);
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
+    // The Unix CLI is a symlink (<bin dir>/locai -> <root>/locai-link) and
+    // macOS current_exe() returns the invoked path unresolved, so canonicalize
+    // to land in the real install root. Windows launches the exe directly via
+    // the .cmd shim, and canonicalize's verbatim (\\?\) form would break the
+    // cleanup's path comparisons, so it keeps the raw path.
+    #[cfg(not(target_os = "windows"))]
+    let exe = std::env::current_exe().and_then(|p| p.canonicalize()).ok();
+    #[cfg(target_os = "windows")]
+    let exe = std::env::current_exe().ok();
+    exe.and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

@@ -186,6 +186,10 @@ if ($userPath -notlike "*$InstallRoot*") {
     # resolves to the current directory.
     $newPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallRoot } else { "$userPath;$InstallRoot" }
     [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    # Also update this session so `locai` works immediately when the script
+    # runs in-process (irm | iex). A -File child can't reach its parent shell,
+    # hence the new-terminal note.
+    if ($env:Path -notlike "*$InstallRoot*") { $env:Path = "$env:Path;$InstallRoot" }
     Log "added $InstallRoot to your PATH (open a new terminal to pick up 'locai')"
 }
 Log "CLI: locai -> $bin"
