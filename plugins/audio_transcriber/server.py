@@ -17,6 +17,14 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def _gpu_available() -> bool:
+    """Conservative GPU probe (an NVIDIA/AMD control binary on PATH). The
+    whisper prebuilt initialises its GPU backend by default and aborts on
+    machines without one, so serving defaults to --no-gpu unless a GPU is
+    likely present."""
+    return shutil.which("nvidia-smi") is not None or shutil.which("rocm-smi") is not None
+
+
 class WhisperServer:
     """Manages the whisper-server background process."""
 
@@ -37,6 +45,8 @@ class WhisperServer:
         self.language = kwargs.get("language")
         self.n_threads = kwargs.get("n_threads")
         self.beam_size = kwargs.get("beam_size")
+        # None = auto-detect at start(); an explicit config value wins.
+        self.use_gpu = kwargs.get("use_gpu")
 
         # Defer to install.py for binary directory — it already handles FROZEN
         # (PyInstaller bundles), venv, and standalone layouts.
@@ -148,6 +158,9 @@ class WhisperServer:
             "--port",
             str(self.port),
         ]
+        use_gpu = self.use_gpu if self.use_gpu is not None else _gpu_available()
+        if not use_gpu:
+            cmd.append("--no-gpu")
 
         # Optional parameters
         param_map = {
