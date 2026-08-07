@@ -256,6 +256,11 @@ pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
     // root carries the binary AND the bundle layout, so a stray or hostile
     // LOCAI_INSTALL_ROOT pointing at an unrelated directory is never deleted.
     let root = root.canonicalize().map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
+    // Windows canonicalize yields the verbatim (\\?\C:\...) form, which never
+    // matches the normal-form paths Get-Process reports, so the cleanup's
+    // process filter would silently miss everything. Strip it back.
+    #[cfg(target_os = "windows")]
+    let root = PathBuf::from(root.to_string_lossy().trim_start_matches(r"\\?\").to_string());
     let root = root.as_path();
     if !(root.join(binary).is_file() && root.join("boot.json").is_file() && root.join("versions").is_dir()) {
         return Err(format!(
