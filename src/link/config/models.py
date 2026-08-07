@@ -418,7 +418,7 @@ class AgentConfig(BaseModel):
     """Root configuration delivered to a Loc.ai:Link agent.
 
     This is what the backend returns in the `config` field of the registration
-    and activation responses. The agent saves it as the initial session state
+    and enrollment responses. The agent saves it as the initial session state
     and uses it as the source of truth for all subsequent operations.
 
     Backend integrators should treat this model as the contract — all fields

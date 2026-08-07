@@ -48,17 +48,18 @@ If you need AI inference inside a regulated or air-gapped environment where publ
 
 The Quick start installers above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
 
-Clone the repo and onboard the device with a single `run`. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
+Clone the repo, register the device, and start it. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
 
 ```sh
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
-uv run main.py run --registration-key "YOUR_REG_KEY"
+LOCAI_REGISTRATION_KEY="YOUR_REG_KEY" uv run main.py register
+uv run main.py run
 ```
 
-The registration key is the only credential; Control assigns the device id and name from the machine.
+The registration key is the only credential; Control assigns the device id and name from the machine. Pass the key through the environment rather than the `--registration-key` flag: argv is readable by other local processes (`/proc/<pid>/cmdline` on Linux).
 
-Enrolling with an org-scoped fleet key instead? Use `--fleet-key "YOUR_FLEET_KEY"` (accepts the key itself or `file:<path>`).
+Enrolling with an org-scoped fleet key instead? Set `LOCAI_FLEET_KEY` (accepts the key itself or `file:<path>`); `--fleet-key` also works as a convenience.
 
 ### Plugin build prerequisites (source builds only)
 
@@ -90,13 +91,14 @@ uv pip install -e ".[dev]"    # dev extras: testing + docs tools
 
 ### Running the agent
 
-Register a new device with a Registration Key from the Locai dashboard:
+Register a new device with a Registration Key from the Locai dashboard, then start it:
 
 ```
-uv run main.py run --registration-key "YOUR_REG_KEY"
+LOCAI_REGISTRATION_KEY="YOUR_REG_KEY" uv run main.py register
+uv run main.py run
 ```
 
-The key is the credential; Control binds the device to this machine and assigns its id and name. Add `--api-url "<url>"` when pointing at a non-production control plane.
+The key is the credential; Control binds the device to this machine and assigns its id and name. Prefer the environment over `--registration-key` (argv is visible to other local processes). Add `--api-url "<url>"` when pointing at a non-production control plane.
 
 On subsequent runs, resume the saved session:
 

@@ -112,8 +112,11 @@ class ZenohClient:
         while time.monotonic() < deadline:
             try:
                 # info is a method on some zenoh versions, a property on others;
-                # both shapes are handled by the except below.
-                if list(session.info().routers_zid()):  # pyright: ignore[reportCallIssue]
+                # probe whichever shape this version exposes.
+                info = session.info
+                if callable(info):
+                    info = info()
+                if list(info.routers_zid()):
                     return
             except (AttributeError, TypeError) as e:
                 # The probe API is absent/incompatible: never resolvable, so

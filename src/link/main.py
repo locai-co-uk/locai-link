@@ -551,8 +551,8 @@ def reset(hard: bool = False):
     logger.info(f"Reset complete. Removed {count} items.")
 
 
-def main():
-    """CLI entry point: parses arguments and dispatches to subcommands."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser; the visible command set depends on the build shape."""
     parser = argparse.ArgumentParser(formatter_class=_CliHelpFormatter)
     # metavar keeps hidden internal commands (below) out of the usage line.
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
@@ -601,6 +601,12 @@ def main():
         subparsers.add_parser("reset", help="Resets the environment.").add_argument("--hard", action="store_true")
         subparsers.add_parser("install-plugin", help="Installs a plugin.").add_argument("name")
 
+    return parser
+
+
+def main() -> None:
+    """CLI entry point: parses arguments and dispatches to subcommands."""
+    parser = _build_parser()
     args = parser.parse_args()
 
     if args.command == "run":

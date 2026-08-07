@@ -154,6 +154,9 @@ pub fn service_stop(u: &ServiceUnit) -> Result<(), String> {
 /// the CLI runs from the same install root.
 #[cfg(target_os = "windows")]
 fn kill_install_processes(root: &Path) {
+    // Normalize best-effort: a relative or trailing-separator LOCAI_INSTALL_ROOT
+    // would build a -like pattern that matches nothing and skip every process.
+    let root = resolved(root).unwrap_or_else(|_| root.to_path_buf());
     let esc = root.to_string_lossy().replace('\'', "''");
     let me = std::process::id();
     let ps = format!(
@@ -200,7 +203,10 @@ fn plist_path(u: &ServiceUnit) -> String {
 }
 
 /// Stop the service and remove its unit (part of uninstall). Best-effort.
-fn remove_service(u: &ServiceUnit) {
+/// `root` is uninstall's already-validated install root.
+fn remove_service(u: &ServiceUnit, root: &Path) {
+    #[cfg(not(target_os = "windows"))]
+    let _ = root; // only the Windows process kill is path-scoped
     #[cfg(target_os = "linux")]
     {
         let _ = run_ok("systemctl", &["--user", "disable", "--now", u.unit]);
@@ -221,7 +227,7 @@ fn remove_service(u: &ServiceUnit) {
         // restart-on-failure, re-locking the install root mid-uninstall. Kill
         // the tree first, then delete, then verify the definition is gone.
         let _ = run_ok("schtasks", &["/End", "/TN", u.label]);
-        kill_install_processes(&install_root());
+        kill_install_processes(root);
         let mut deleted = false;
         for _ in 0..10 {
             let _ = run_ok("schtasks", &["/Delete", "/TN", u.label, "/F"]);
@@ -251,7 +257,11 @@ fn remove_cli_symlink(root: &Path) {
     for dir in dirs {
         let link = dir.join("locai");
         if let Ok(target) = std::fs::read_link(&link) {
-            if target.starts_with(root) {
+            // Resolve relative targets against the link's dir and canonicalize
+            // (root is canonical), or a /tmp-style symlinked prefix never matches.
+            let abs = if target.is_absolute() { target } else { dir.join(target) };
+            let abs = abs.canonicalize().unwrap_or(abs);
+            if abs.starts_with(root) {
                 let _ = std::fs::remove_file(&link);
                 eprintln!("Removed CLI symlink {}", link.display());
             }
@@ -259,11 +269,21 @@ fn remove_cli_symlink(root: &Path) {
     }
 }
 
+/// Canonicalise, then strip the Windows verbatim (`\\?\`) prefix so paths from
+/// every source compare equal and match the normal-form paths Get-Process
+/// reports. The one normal form all path comparisons in this module use.
+fn resolved(p: &Path) -> std::io::Result<PathBuf> {
+    let p = p.canonicalize()?;
+    #[cfg(target_os = "windows")]
+    let p = PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+    Ok(p)
+}
+
 /// Full uninstall: deregister from Control, remove the service, drop the CLI
 /// entry, and delete the install root.
 fn home_dir() -> Option<PathBuf> {
     let var = if cfg!(target_os = "windows") { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(var).map(PathBuf::from).and_then(|p| p.canonicalize().ok())
+    std::env::var_os(var).map(PathBuf::from).and_then(|p| resolved(&p).ok())
 }
 
 pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
@@ -271,12 +291,7 @@ pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
     // Positive layout check rather than a path blocklist: a genuine install
     // root carries the binary AND the bundle layout, so a stray or hostile
     // LOCAI_INSTALL_ROOT pointing at an unrelated directory is never deleted.
-    let root = root.canonicalize().map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
-    // Windows canonicalize yields the verbatim (\\?\C:\...) form, which never
-    // matches the normal-form paths Get-Process reports, so the cleanup's
-    // process filter would silently miss everything. Strip it back.
-    #[cfg(target_os = "windows")]
-    let root = PathBuf::from(root.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+    let root = resolved(root).map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
     let root = root.as_path();
     if !(root.join(binary).is_file() && root.join("boot.json").is_file() && root.join("versions").is_dir()) {
         return Err(format!(
@@ -290,7 +305,7 @@ pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
     }
     // Deregister first: it needs the session api key the wipe below removes.
     deregister(root);
-    remove_service(u);
+    remove_service(u, root);
 
     #[cfg(target_os = "windows")]
     {

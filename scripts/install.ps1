@@ -88,7 +88,9 @@ logf = "$log"
 Set sh = CreateObject("WScript.Shell")
 sh.Run "cmd /s /c " & Q & Q & bin & Q & " run >> " & Q & logf & Q & " 2>&1" & Q, 0, True
 "@
-    Set-Content -Path $vbs -Value $vbsContent -Encoding ASCII
+    # UTF-16LE (Unicode): wscript reads it natively, and non-ASCII characters
+    # in the install path (user name in %LOCALAPPDATA%) survive the round trip.
+    Set-Content -Path $vbs -Value $vbsContent -Encoding Unicode
     $action    = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo `"$vbs`"" -WorkingDirectory $InstallRoot
     $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
     $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
@@ -98,6 +100,12 @@ sh.Run "cmd /s /c " & Q & Q & bin & Q & " run >> " & Q & logf & Q & " 2>&1" & Q,
     Stop-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
     Register-ScheduledTask -TaskName $Label -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
     Start-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
+    # Start is fire-and-forget; surface a dead task instead of claiming success.
+    Start-Sleep -Milliseconds 500
+    $state = (Get-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue).State
+    if ($state -ne "Running") {
+        Log "warning: scheduled task $Label is '$state', not Running; check $InstallRoot\logs\service.log"
+    }
 }
 
 # Re-run guard (parity with install.sh): don't clobber an existing install,

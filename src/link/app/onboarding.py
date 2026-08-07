@@ -251,7 +251,7 @@ def _default_device_name() -> str:
     host = platform.node()
     try:
         return f"{getpass.getuser()}@{host}"
-    except Exception:  # noqa: BLE001 - getuser can raise if no user db / env
+    except (OSError, KeyError):  # no user db entry / no USER-style env var
         return host
 
 

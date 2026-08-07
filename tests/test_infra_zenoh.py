@@ -138,3 +138,34 @@ def test_get_session_waits_for_router_after_open(mocker):
     assert result is fake_session
     fake_zenoh.open.assert_called_once_with(client._zenoh_config)
     wait.assert_called_once_with(fake_session)
+
+
+def test_wait_for_router_info_method_shape(mocker):
+    """zenoh versions where session.info is a method: probe succeeds at once."""
+    from link.adapters.zenoh_client import ZenohClient
+
+    client = ZenohClient.__new__(ZenohClient)
+    session = mocker.MagicMock()
+    session.info.return_value.routers_zid.return_value = ["router-zid-1"]
+    sleep = mocker.patch("link.adapters.zenoh_client.time.sleep")
+
+    client._wait_for_router(session)
+
+    sleep.assert_not_called()
+
+
+def test_wait_for_router_info_property_shape(mocker):
+    """zenoh versions where session.info is a property (not callable): the
+    probe must not call it, or a TypeError turns the wait into a no-op."""
+    from types import SimpleNamespace
+
+    from link.adapters.zenoh_client import ZenohClient
+
+    client = ZenohClient.__new__(ZenohClient)
+    info = SimpleNamespace(routers_zid=lambda: ["router-zid-1"])
+    session = SimpleNamespace(info=info)
+    sleep = mocker.patch("link.adapters.zenoh_client.time.sleep")
+
+    client._wait_for_router(session)
+
+    sleep.assert_not_called()

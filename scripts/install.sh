@@ -203,15 +203,26 @@ CHECKSUMS_URL="${LOCAI_CHECKSUMS_URL:-$BINARY_BASE/checksums.txt}"
 log "platform: $PLATFORM"
 log "install root: $INSTALL_ROOT"
 
+# A running service holds the binary open (Linux tar hits ETXTBSY, macOS keeps
+# executing the old file); stop it before replacing files. No-op on a fresh
+# install; install_service below starts it again.
+stop_service() {
+    case "$(uname -s)" in
+        Linux)  systemctl --user stop "$UNIT" 2>/dev/null || true ;;
+        Darwin) launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true ;;
+    esac
+}
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fetch_verified "$TARBALL_URL" "$TMP/headless.tar.gz" "$ASSET"
 
 mkdir -p "$INSTALL_ROOT" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/state" "$INSTALL_ROOT/engines"
+stop_service
 # The headless tarball wraps a flat install-root under a top <name>/ dir;
 # strip it so locai-link + versions/ + current + boot.json land at the root.
 tar -xzf "$TMP/headless.tar.gz" -C "$INSTALL_ROOT" --strip-components=1
-[ -x "$BIN" ] || chmod +x "$BIN" 2>/dev/null || true
 [ -f "$BIN" ] || err "headless binary not found at $BIN after extract"
+[ -x "$BIN" ] || chmod +x "$BIN" 2>/dev/null || true
 
 link_cli
 install_service

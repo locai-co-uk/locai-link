@@ -146,6 +146,18 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // --- Shape -----------------------------------------------------------
+
+    #[test]
+    fn shape_display_matches_serde_representation() {
+        // The supervisor derives asset names from the serde form and logs the
+        // Display form; a divergence would request a nonexistent asset.
+        for shape in [Shape::Desktop, Shape::Headless] {
+            let serialised = serde_json::to_value(shape).unwrap();
+            assert_eq!(serialised.as_str().unwrap(), shape.to_string());
+        }
+    }
+
     // --- read_boot_json --------------------------------------------------
 
     #[test]

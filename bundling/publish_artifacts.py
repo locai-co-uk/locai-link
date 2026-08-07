@@ -11,17 +11,17 @@ first, the manifest flips last.
 Two modes:
 
 * ``--from-dir`` seeds a store from archives already on disk. This is how the
-  local mock store for 460 testing is built (before 459 stands up the real
-  bucket + CI).
+  local mock store for testing is built (before the real bucket + CI publish
+  pipeline stands up).
 * ``--from-upstream`` downloads the pinned engine releases and repackages them.
-  That is the 459 CI publish job; the per-engine / per-platform asset recipe
+  That is the CI publish job; the per-engine / per-platform asset recipe
   below is its source of truth.
 
 The store client (``link.infra.artifact_store``) is the reader for what this writes.
 
 whisper-cpp has no upstream *server* prebuilt for macOS (only an xcframework),
 so darwin variants must be built and dropped in via ``--from-dir`` until the
-459 job grows a build step; they are intentionally absent from the upstream map.
+publish job grows a build step; they are intentionally absent from the upstream map.
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ ENGINE_VERSIONS = {
     "llama-swap": "247",
     "whisper-cpp": "v1.9.2",
 }
+
 
 # Upstream asset recipe: how to build each store variant from an upstream release
 # asset. {name: {version-fmt-url-base, variant: asset-filename}}. The {tag}
@@ -89,8 +90,8 @@ UPSTREAM: dict[str, _EngineSpec] = {
     "whisper-cpp": {
         "base": "https://github.com/ggml-org/whisper.cpp/releases/download/{tag}",
         "assets": {
-            # v1.9.2 added Linux server prebuilts; Windows uses the BLAS build.
-            # darwin has no upstream server binary -> --from-dir until 459 builds it.
+            # Recent tags ship Linux server prebuilts; Windows uses the BLAS build.
+            # darwin has no upstream server binary -> --from-dir until CI builds it.
             "linux-x64": "whisper-bin-ubuntu-x64.tar.gz",
             "linux-arm64": "whisper-bin-ubuntu-arm64.tar.gz",
             "windows-x64": "whisper-blas-bin-x64.zip",
@@ -133,20 +134,25 @@ def rebuild_manifest(store_dir: Path) -> Path:
     The manifest is derived from what is on disk, so it can never drift from the
     artifacts. Written via a temp + os.replace so a reader never sees a partial."""
     manifest: dict[str, Any] = {"schema": MANIFEST_SCHEMA}
-    for cap_dir in sorted(p for p in store_dir.iterdir() if p.is_dir() and p.name != "index"):
+    # Dot-dirs are scratch space (e.g. an interrupted run's .download), never content.
+    for cap_dir in sorted(p for p in store_dir.iterdir() if p.is_dir() and p.name != "index" and p.name[0] != "."):
         for name_dir in sorted(p for p in cap_dir.iterdir() if p.is_dir()):
             for ver_dir in sorted(p for p in name_dir.iterdir() if p.is_dir()):
                 for arch_dir in sorted(p for p in ver_dir.iterdir() if p.is_dir()):
-                    archives = [f for f in arch_dir.iterdir() if f.is_file() and not f.name.endswith(".sha256")]
+                    archives = sorted(f for f in arch_dir.iterdir() if f.is_file() and not f.name.endswith(".sha256"))
                     if not archives:
                         continue
+                    if len(archives) > 1:
+                        # The manifest is the commit point; an ambiguous pick could
+                        # ship the wrong engine. Make the operator clean up first.
+                        raise SystemExit(f"{arch_dir} holds {len(archives)} archives; expected exactly one")
                     art = archives[0]
                     rel = f"{cap_dir.name}/{name_dir.name}/{ver_dir.name}/{arch_dir.name}/{art.name}"
                     manifest.setdefault(cap_dir.name, {}).setdefault(name_dir.name, {}).setdefault(ver_dir.name, {})[
                         arch_dir.name
                     ] = {"path": rel, "sha256": _sha256(art), "size": art.stat().st_size}
     # Per-engine default version, so a device resolves what to fetch from the
-    # manifest instead of re-pinning versions in the runtime. Prefer the pinned
+    # manifest instead of re-pinning versions in the runtime.
     # The default version MUST be the ENGINE_VERSIONS pin — never guessed. A
     # lexical sort of build tags is wrong (b9999 > b10000), so a missing/unmatched
     # pin is a publish bug that would ship a stale engine as the default.
@@ -201,8 +207,8 @@ def _from_dir(store_dir: Path, source: Path) -> None:
 
 def _from_upstream(store_dir: Path) -> None:
     """Download the pinned engine releases and repackage them into the store.
-    This is the 459 CI job; kept minimal here (no signing, no GPU variants, no
-    whisper-macOS build). Best-effort per variant so one 404 doesn't abort all."""
+    The interim store-seeding job; kept minimal here (no signing, no GPU variants,
+    no whisper-macOS build). Best-effort per variant so one 404 doesn't abort all."""
     import urllib.request
 
     for name, spec in UPSTREAM.items():

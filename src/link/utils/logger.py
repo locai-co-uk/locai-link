@@ -363,6 +363,8 @@ def setup_logging(
             try:
                 stream.reconfigure(encoding="utf-8", errors="backslashreplace")
             except (OSError, ValueError):
+                # Best-effort: logging must still come up on streams that
+                # can't be reconfigured (closed, detached, or exotic stdio).
                 pass
     _configure_logger(None, logging_config, zenoh_session)
     _configure_logger("link.reporter", reporting_config, zenoh_session)

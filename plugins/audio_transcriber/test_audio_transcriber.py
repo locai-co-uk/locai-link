@@ -76,7 +76,11 @@ def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
             if attempt == max_attempts:
                 logger.info(f"{label} download failed after {max_attempts} attempts (HTTP 429).")
                 return False
-            retry_after = int(exc.headers.get("Retry-After", 0))
+            try:
+                # Retry-After may also be an HTTP date; fall back to backoff then.
+                retry_after = int(exc.headers.get("Retry-After", 0))
+            except ValueError:
+                retry_after = 0
             wait = max(retry_after, min(2**attempt, 60))
             logger.info(f"Rate-limited downloading {label} (attempt {attempt}/{max_attempts}); retrying in {wait}s...")
             time.sleep(wait)

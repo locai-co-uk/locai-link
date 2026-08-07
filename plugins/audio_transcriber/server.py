@@ -18,11 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 def _gpu_available() -> bool:
-    """Conservative GPU probe (an NVIDIA/AMD control binary on PATH). The
-    whisper prebuilt initialises its GPU backend by default and aborts on
-    machines without one, so serving defaults to --no-gpu unless a GPU is
-    likely present."""
-    return shutil.which("nvidia-smi") is not None or shutil.which("rocm-smi") is not None
+    """Conservative GPU probe. The whisper prebuilt initialises its GPU backend
+    by default and aborts on machines without one, so serving defaults to
+    --no-gpu unless a control tool is on PATH AND reports a device (the tool
+    can be installed on GPU-less hosts)."""
+    for probe in (("nvidia-smi", "-L"), ("rocm-smi",)):
+        if shutil.which(probe[0]) is None:
+            continue
+        try:
+            result = subprocess.run(probe, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return True
+    return False
 
 
 class WhisperServer:

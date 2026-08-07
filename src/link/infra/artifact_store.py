@@ -11,9 +11,9 @@ and tooling, never customer-entitled data.
 
 Layout on the store::
 
-    index/manifest.v1.json                         # the only mutable object
-    {capability}/{name}/{version}/{platform-arch}/{file}
-    engines/llama-cpp/b10289/linux-x64/llama-cpp-b10289-linux-x64.tar.gz
+    index / manifest.v1.json  # the only mutable object
+    {capability} / {name} / {version} / {platform - arch} / {file}
+    engines / llama - cpp / b10289 / linux - x64 / llama - cpp - b10289 - linux - x64.tar.gz
 
 The manifest maps capability -> name -> version -> platform-arch -> a variant
 record ({path, sha256, size}). ``path`` is relative to the store base, so a
@@ -119,8 +119,9 @@ def _cuda_major() -> int | None:
             m = re.search(pat, out)
             if m:
                 return int(m.group(1))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # A failed probe just means CPU fallback; log why for diagnosability.
+            logger.debug(f"CUDA probe {cmd[0]} failed: {exc}")
     return None
 
 
@@ -330,6 +331,12 @@ def fetch_variant(variant: Variant, cache_dir: Path, *, base: str | None = None)
     url = variant.url(base)
     logger.info(f"fetching artifact {url}")
     _download_to(url, archive)
+    # Cheap size gate before the (more expensive) hash: a wrong-sized file can
+    # never verify, and the mismatch message is more diagnosable than a hash diff.
+    if variant.size is not None and archive.stat().st_size != variant.size:
+        actual_size = archive.stat().st_size
+        archive.unlink(missing_ok=True)
+        raise VerificationError(f"size mismatch for {variant.path}: got {actual_size}, want {variant.size}")
     actual = _sha256_file(archive)
     if actual != variant.sha256:
         archive.unlink(missing_ok=True)
@@ -417,6 +424,8 @@ def ensure_engine(
     if dest_dir is None:
         raise ValueError("dest_dir is required")
     manifest = manifest or fetch_manifest(base)
+    # Resolve the default up front so logs report the real version, not None.
+    version = version or manifest.default_version(CAPABILITY_ENGINES, name)
     variant = manifest.variant(CAPABILITY_ENGINES, name, version, arch)
     marker = dest_dir / ".artifact-sha256"
 
