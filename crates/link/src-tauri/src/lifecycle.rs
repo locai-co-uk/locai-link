@@ -328,7 +328,10 @@ fn windows_remove_files(root: &Path) -> Result<(), String> {
          for ($i = 0; $i -lt 30; $i++) {{ \
            Remove-Item -LiteralPath '{esc}' -Recurse -Force -ErrorAction SilentlyContinue; \
            if (-not (Test-Path -LiteralPath '{esc}')) {{ break }}; \
-           Start-Sleep -Milliseconds 500 }}"
+           Start-Sleep -Milliseconds 500 }}; \
+         $left = @(Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{esc}*' }}).Count; \
+         \"removed=$(-not (Test-Path -LiteralPath '{esc}')) leftoverProcs=$left\" | \
+           Out-File -FilePath (Join-Path $env:TEMP 'locai-uninstall.log')"
     );
     Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &del])

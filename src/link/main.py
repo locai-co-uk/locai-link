@@ -211,7 +211,7 @@ def register(args: argparse.Namespace) -> int:
         return 1
 
     ident = agent_config.identity
-    _emit(f"Registered as {ident.device_name} ({ident.device_id}). The service will pick it up.")
+    _emit(f"Registered as {ident.device_name} ({ident.device_id}).")
     return 0
 
 
@@ -232,6 +232,20 @@ def _emit(line: str = "") -> None:
     logger may be wired to service handlers.
     """
     print(line)  # noqa: T201
+
+
+class _CliHelpFormatter(argparse.HelpFormatter):
+    """Keep each subcommand's help on its own line: stock argparse under-counts
+    the subcommand indent when sizing the help column, wrapping the longest
+    command's text onto the next line."""
+
+    def add_argument(self, action: argparse.Action) -> None:
+        if action.help is not argparse.SUPPRESS:
+            lengths = [len(self._format_action_invocation(action)) + self._current_indent]
+            for subaction in self._iter_indented_subactions(action):
+                lengths.append(len(self._format_action_invocation(subaction)) + self._current_indent)
+            self._action_max_length = max([self._action_max_length, *lengths])
+            self._add_item(self._format_action, [action])
 
 
 def status(args: argparse.Namespace) -> int:
@@ -539,7 +553,7 @@ def reset(hard: bool = False):
 
 def main():
     """CLI entry point: parses arguments and dispatches to subcommands."""
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=_CliHelpFormatter)
     # metavar keeps hidden internal commands (below) out of the usage line.
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 

@@ -107,6 +107,8 @@ if [[ $DEV -eq 1 ]]; then
     export LOCAI_CONTROL_API_URL="https://dev.api.locai.co.uk/api/v1"
     export LOCAI_ARTIFACT_BASE="https://storage.googleapis.com/locai-platform-artifacts-dev"
     log "DEV build — Control=$LOCAI_CONTROL_URL, artifacts=$LOCAI_ARTIFACT_BASE"
+else
+    log "PROD build (pass --dev to bake the dev endpoints)"
 fi
 # Always clean the crate: the endpoint bake is option_env! (compile time) and
 # cargo does not recompile on env-only changes, so a cached binary would keep
