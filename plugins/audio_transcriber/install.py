@@ -450,8 +450,8 @@ def install_inference_engine():
 
 def main():
     """Main installation script."""
-    if _is_already_installed(WHISPER_CPP_RELEASE):
-        return  # nothing to do, stay silent
+    # No early installed-check here: install_inference_engine() does the
+    # mode-aware one (a cached prebuilt must not satisfy a force-source run).
     logger.info("Starting Installation for Audio Transcriber...")
     install_inference_engine()
     logger.info("Audio Transcriber component installation complete.")

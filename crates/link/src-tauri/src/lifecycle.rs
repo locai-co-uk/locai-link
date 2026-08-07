@@ -275,7 +275,15 @@ fn remove_cli_symlink(root: &Path) {
 fn resolved(p: &Path) -> std::io::Result<PathBuf> {
     let p = p.canonicalize()?;
     #[cfg(target_os = "windows")]
-    let p = PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+    let p = {
+        // \\?\UNC\server\share -> \\server\share; \\?\C:\x -> C:\x. Stripping
+        // \\?\ alone would leave a UNC path relative (UNC\server\...).
+        let raw = p.to_string_lossy();
+        match raw.strip_prefix(r"\\?\UNC\") {
+            Some(unc) => PathBuf::from(format!(r"\\{unc}")),
+            None => PathBuf::from(raw.trim_start_matches(r"\\?\").to_string()),
+        }
+    };
     Ok(p)
 }
 

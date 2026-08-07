@@ -207,9 +207,19 @@ log "install root: $INSTALL_ROOT"
 # executing the old file); stop it before replacing files. No-op on a fresh
 # install; install_service below starts it again.
 stop_service() {
+    # No-op when the service isn't there, but a live one that won't stop must
+    # abort: extracting over a running binary leaves a mixed install.
     case "$(uname -s)" in
-        Linux)  systemctl --user stop "$UNIT" 2>/dev/null || true ;;
-        Darwin) launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true ;;
+        Linux)
+            if systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+                systemctl --user stop "$UNIT" || err "could not stop $UNIT before replacing files"
+            fi
+            ;;
+        Darwin)
+            if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+                launchctl bootout "gui/$(id -u)/$LABEL" || err "could not stop $LABEL before replacing files"
+            fi
+            ;;
     esac
 }
 

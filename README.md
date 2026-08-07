@@ -48,18 +48,17 @@ If you need AI inference inside a regulated or air-gapped environment where publ
 
 The Quick start installers above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
 
-Clone the repo, register the device, and start it. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
+Clone the repo and onboard the device with a single `run`. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
 
 ```sh
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
-LOCAI_REGISTRATION_KEY="YOUR_REG_KEY" uv run main.py register
-uv run main.py run
+uv run main.py run --registration-key 'YOUR_REG_KEY'
 ```
 
-The registration key is the only credential; Control assigns the device id and name from the machine. Pass the key through the environment rather than the `--registration-key` flag: argv is readable by other local processes (`/proc/<pid>/cmdline` on Linux).
+The registration key is the only credential; Control assigns the device id and name from the machine. On subsequent runs, `uv run main.py run` resumes the saved session.
 
-Enrolling with an org-scoped fleet key instead? Set `LOCAI_FLEET_KEY` (accepts the key itself or `file:<path>`); `--fleet-key` also works as a convenience.
+Enrolling with an org-scoped fleet key instead? Use `--fleet-key 'YOUR_FLEET_KEY'` (accepts the key itself or `file:<path>`).
 
 ### Plugin build prerequisites (source builds only)
 
@@ -77,36 +76,13 @@ Install `git` and `cmake` on the device before deploying a model that uses these
 
 ## Hacking on the codebase
 
-This guide covers setting up a device to run the Locai agent from source (i.e. this repository).
+Development happens on the same checkout as [Build from source](#build-from-source) above; add the dev extras for testing and docs tooling:
 
-### Installation
-
-Clone the repository and install dependencies with `uv`:
-
-```
-git clone https://github.com/locai-co-uk/locai-link.git
-cd locai-link
+```sh
 uv pip install -e ".[dev]"    # dev extras: testing + docs tools
 ```
 
-### Running the agent
-
-Register a new device with a Registration Key from the Locai dashboard, then start it:
-
-```
-LOCAI_REGISTRATION_KEY="YOUR_REG_KEY" uv run main.py register
-uv run main.py run
-```
-
-The key is the credential; Control binds the device to this machine and assigns its id and name. Prefer the environment over `--registration-key` (argv is visible to other local processes). Add `--api-url "<url>"` when pointing at a non-production control plane.
-
-On subsequent runs, resume the saved session:
-
-```sh
-uv run main.py run
-```
-
-Deploy as a background service (systemd/launchd/Windows) with the release installers under `scripts/`; register out-of-band with `locai register --registration-key <KEY>`.
+Add `--api-url "<url>"` to `run` when pointing at a non-production control plane.
 
 ### CLI reference
 
@@ -127,7 +103,7 @@ source checkout, which runs in the foreground under `uv run main.py run`.
 
 API docs are generated from source docstrings via `mkdocs` + `mkdocstrings` (part of the `--dev` extras):
 
-```
+```sh
 uv run mkdocs serve           # live-reload server at http://127.0.0.1:8000
 uv run mkdocs build           # static site in ./site/
 ```

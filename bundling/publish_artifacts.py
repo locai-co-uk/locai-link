@@ -14,8 +14,9 @@ Two modes:
   local mock store for testing is built (before the real bucket + CI publish
   pipeline stands up).
 * ``--from-upstream`` downloads the pinned engine releases and repackages them.
-  That is the CI publish job; the per-engine / per-platform asset recipe
-  below is its source of truth.
+  Operator-invoked interim seeding path; it must not run unattended in CI until
+  every upstream asset carries a pinned expected digest. The per-engine /
+  per-platform asset recipe below is its source of truth.
 
 The store client (``link.infra.artifact_store``) is the reader for what this writes.
 
