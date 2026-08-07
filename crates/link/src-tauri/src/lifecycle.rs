@@ -135,13 +135,33 @@ pub fn service_stop(u: &ServiceUnit) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        run_ok("schtasks", &["/End", "/TN", u.label])
+        // /End only terminates the process the scheduler launched (the hidden
+        // launcher), orphaning the exe and runtime; kill this install's
+        // processes explicitly.
+        let _ = run_ok("schtasks", &["/End", "/TN", u.label]);
+        kill_install_processes(&install_root());
+        Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = u;
         Err("service control not supported on this OS".into())
     }
+}
+
+/// Kill this install's service processes, path-scoped so other checkouts'
+/// binaries (same image names) are untouched. Excludes the invoking process:
+/// the CLI runs from the same install root.
+#[cfg(target_os = "windows")]
+fn kill_install_processes(root: &Path) {
+    let esc = root.to_string_lossy().replace('\'', "''");
+    let me = std::process::id();
+    let ps = format!(
+        "Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Path -like '{esc}*' -and $_.Id -ne {me} }} | \
+         Stop-Process -Force -ErrorAction SilentlyContinue"
+    );
+    let _ = Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output();
 }
 
 pub fn service_restart(u: &ServiceUnit) -> Result<(), String> {
@@ -160,7 +180,10 @@ pub fn service_restart(u: &ServiceUnit) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        // Same orphan problem as stop: clear the old tree fully before /Run,
+        // or two supervisors race for the ports.
         let _ = run_ok("schtasks", &["/End", "/TN", u.label]);
+        kill_install_processes(&install_root());
         run_ok("schtasks", &["/Run", "/TN", u.label])
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
