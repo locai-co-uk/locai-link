@@ -30,9 +30,9 @@ irm https://get.locai.co.uk/install.ps1 | iex
 
 You will now have the `locai` service installed on your machine. To register, run `locai register --registration-key "YOUR_REG_KEY"`. For a fleet, register with `--fleet-key` instead. To register unattended in one step, set `LOCAI_REGISTRATION_KEY` (or `LOCAI_FLEET_KEY`) before running the install command. Check status any time with `locai status`; update with `locai update`.
 
-### Desktop (macOS)
+### Desktop (Linux, macOS)
 
-Download the signed + notarised app from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest) and follow the setup assistant. (Windows and Linux desktop builds follow later.)
+Download from the [Releases page](https://github.com/locai-co-uk/locai-link/releases/latest): the signed + notarised `.pkg` on macOS, or the desktop tarball on Linux (extract, then run `./install.sh` inside). Follow the in-app setup. (Windows desktop follows later.)
 
 Onboarding is key-only and machine-bound: the registration key from Control is the credential, and Control binds the device to this machine and assigns its id and name. See [Onboarding flow](#onboarding-flow) for the full picture. To run from a git checkout instead, see [Build from source](#build-from-source).
 
@@ -218,20 +218,12 @@ flowchart TB
 
 On an `UPDATE_AGENT` command (from the control plane, or the loopback `/update` endpoint the menu-bar app posts to), the agent reports the command complete, shuts down all pipelines cleanly, then takes one of two paths depending on how it was installed:
 
-**Bundled install** (PyInstaller artifact, the packaged app):
-
-1. Resolves the latest matching release from **GitHub Releases** and downloads the platform bundle
-2. Verifies the SHA256, extracts it alongside the running version under `versions/<v>/`
+1. Checks the latest version against **Control** (the single source of truth for what a device should run), then downloads the platform bundle from **GitHub Releases**
+2. Verifies the SHA256 against the release-wide `checksums.txt`, extracts it alongside the running version under `versions/<v>/`
 3. Health-checks the new runtime, then **atomically flips the `current` pointer** and garbage-collects old versions
-4. Exits with code `42`; the launcher relaunches from the new `current`. A `.update-pending` stamp lets the launcher roll back if the new version fails to boot
+4. Exits with code `42`; the supervisor relaunches from the new `current`. A `.update-pending` stamp lets it roll back if the new version fails to boot
 
-**Source install** (cloned repo):
-
-1. Runs `git pull` on the current branch (stashing local changes if needed) and re-runs `uv pip install -e .`
-2. Refreshes pinned binaries for plugins referenced by the active config (each `plugins/*/install.py` is tag-cached, so this is cheap when versions haven't changed, and unused plugins are skipped)
-3. Re-execs itself via `os.execv()`; the process image is replaced but the **PID is preserved**, so systemd/launchd/Windows Service see a continuously-running process
-
-Either way no separate supervisor is needed, and the same `main.py run` command works for development and headless service deployment.
+Source checkouts are developer-only and do not self-update; update them with `git pull`.
 
 ### Onboarding flow
 
@@ -251,8 +243,8 @@ Plugins are standalone installable packages that register into the runtime via t
 
 | Plugin              | Role                | Binary           | Pinned               |
 | ------------------- | ------------------- | ---------------- | -------------------- |
-| `language_model`    | Local LLM inference | `llama-server`   | llama.cpp `b8808`    |
-| `audio_transcriber` | Speech-to-text      | `whisper-server` | whisper.cpp `v1.8.4` |
+| `language_model`    | Local LLM inference | `llama-server`   | llama.cpp `b10289`   |
+| `audio_transcriber` | Speech-to-text      | `whisper-server` | whisper.cpp `v1.9.2` |
 | `image_classifier`  | Vision models       | TFLite runtime   | —                    |
 | `audio_classifier`  | Audio tagging       | TFLite runtime   | —                    |
 

@@ -338,14 +338,19 @@ jobs:
     if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
     runs-on: windows-latest
     env:
-      # Absolute + already canonical: the assertions compare it against
-      # Get-Process .Path with -like, which never resolves `..`.
-      LOCAI_INSTALL_ROOT: ${{ runner.temp }}\locai-e2e
       TASK_NAME: uk.co.locai.link.headless
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Set install root
+        # The runner context isn't available in job-level env; export the root
+        # via GITHUB_ENV instead. Absolute + already canonical: the assertions
+        # compare it against Get-Process .Path with -like, which never
+        # resolves `..`.
+        shell: pwsh
+        run: '"LOCAI_INSTALL_ROOT=$env:RUNNER_TEMP\locai-e2e" | Out-File -FilePath $env:GITHUB_ENV -Append'
 
       - uses: astral-sh/setup-uv@v5
 
