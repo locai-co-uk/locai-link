@@ -72,12 +72,23 @@ function Install-LocaiTask {
     # task would pop a console window at every logon. A hidden PowerShell parent
     # suppresses the window while keeping the exe inside the task's process
     # tree, so stop/restart (schtasks /End) still terminate it.
-    $binEsc  = $bin -replace "'", "''"
-    # All streams append to a service log: the hidden console would otherwise
-    # swallow supervisor/runtime output (journald/launchd cover this elsewhere).
-    $logEsc  = (Join-Path $InstallRoot "logs\service.log") -replace "'", "''"
-    $runArgs = "-NoProfile -WindowStyle Hidden -Command `"& '$binEsc' run *>> '$logEsc'`""
-    $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $runArgs -WorkingDirectory $InstallRoot
+    # wscript is a GUI-subsystem host, so no console is ever allocated - this
+    # holds even where Windows Terminal is the default host and ignores
+    # -WindowStyle Hidden. The cmd layer appends all output to the service log
+    # (journald/launchd cover this elsewhere), and both layers wait, so the
+    # task's process tree still owns the exe and stop/restart terminate it.
+    $log = Join-Path $InstallRoot "logs\service.log"
+    $vbs = Join-Path $InstallRoot "run-hidden.vbs"
+    $vbsContent = @"
+' Launches the headless service with a hidden console (written by install.ps1).
+Q = Chr(34)
+bin = "$bin"
+logf = "$log"
+Set sh = CreateObject("WScript.Shell")
+sh.Run "cmd /s /c " & Q & Q & bin & Q & " run >> " & Q & logf & Q & " 2>&1" & Q, 0, True
+"@
+    Set-Content -Path $vbs -Value $vbsContent -Encoding ASCII
+    $action    = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo `"$vbs`"" -WorkingDirectory $InstallRoot
     $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
     $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive

@@ -181,7 +181,7 @@ def register(args: argparse.Namespace) -> int:
     """
     state_manager = StateManager()
     if state_manager.load_state() is not None:
-        logger.info("This device is already registered; nothing to do.")
+        _emit("This device is already registered; nothing to do.")
         return 0
 
     api_url = args.api_url or constants.DEFAULT_API_URL
@@ -189,23 +189,29 @@ def register(args: argparse.Namespace) -> int:
     # processes, so the installers hand the key over via the environment.
     fleet_key = args.fleet_key or os.environ.get("LOCAI_FLEET_KEY")
     reg_key = args.registration_key or os.environ.get("LOCAI_REGISTRATION_KEY")
+    if not fleet_key and not reg_key:
+        _emit(
+            "Provide --registration-key or --fleet-key (flag or "
+            "LOCAI_REGISTRATION_KEY/LOCAI_FLEET_KEY env) to register a headless device."
+        )
+        return 1
+
+    # One-shot CLI: the outcome goes to stdout, so quiet the onboarding
+    # modules' console INFO chatter (warnings and errors still surface).
+    logging.getLogger("link").setLevel(logging.WARNING)
     try:
         if fleet_key:
             agent_config = enroll_device(fleet_key=fleet_key, api_url=api_url)
-        elif reg_key:
-            agent_config = register_with_key(reg_key=reg_key, api_url=api_url)
         else:
-            logger.critical(
-                "Provide --registration-key or --fleet-key (flag or "
-                "LOCAI_REGISTRATION_KEY/LOCAI_FLEET_KEY env) to register a headless device."
-            )
-            return 1
+            agent_config = register_with_key(reg_key=reg_key, api_url=api_url)
         state_manager.bootstrap(agent_config)
     except Exception as e:
-        logger.critical(f"Registration failed: {e}", exc_info=True)
+        logger.debug("registration failure detail", exc_info=True)
+        _emit(f"Registration failed: {e}")
         return 1
 
-    logger.info(f"Registered device {agent_config.identity.device_id}. The service will pick it up.")
+    ident = agent_config.identity
+    _emit(f"Registered as {ident.device_name} ({ident.device_id}). The service will pick it up.")
     return 0
 
 
