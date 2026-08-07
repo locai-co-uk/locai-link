@@ -50,40 +50,18 @@ If you need AI inference inside a regulated or air-gapped environment where publ
 
 The pre-built binaries above are the recommended path for most users. Build from source instead when you want to: track the latest `main`, modify plugins, contribute back, or run on a platform/architecture the Releases page doesn't ship for.
 
-One-line installer that clones the repo, sets up Python via `uv`, and runs the agent in a single command:
-
-**Linux / macOS:**
+Clone the repo and onboard the device with a single `run`. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
 
 ```
-curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
+git clone https://github.com/locai-co-uk/locai-link.git
+cd locai-link
+uv run main.py run \
   --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
 ```
 
-**Windows (PowerShell):**
+`run` prompts interactively for anything you omit, including your platform password.
 
-```
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.ps1))) `
-  -DeviceName "my-edge-device-01" -Email "you@example.com" -RegistrationKey "YOUR_REG_KEY"
-```
-
-**Windows (CMD):**
-
-```
-curl -LsSf --ssl-no-revoke https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.cmd -o install.cmd && install.cmd --device-name "my-edge-device-01" --email "you@example.com" --registration-key "YOUR_REG_KEY"
-```
-
-> `--ssl-no-revoke` is needed because Windows curl uses Schannel, which fails the connection with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` when it can't reach the certificate's revocation endpoint — common on corporate networks and strict firewalls. The flag skips the revocation lookup only; server certificate validation is unaffected.
-
-The installer prompts interactively for anything you omit, including your platform password.
-
-Enrolling with an org-scoped fleet key instead? Pass it as the only argument — no device name, email, or registration key needed:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/install.sh | bash -s -- \
-  --fleet-key "YOUR_FLEET_KEY"
-```
-
-`--fleet-key` accepts the key itself or `file:<path>` to read it from a file. On Windows use `-FleetKey` (PowerShell) or `--fleet-key` (CMD).
+Enrolling with an org-scoped fleet key instead? Use `--fleet-key "YOUR_FLEET_KEY"` (accepts the key itself or `file:<path>`) with no device name, email, or registration key needed.
 
 ### Plugin build prerequisites (source builds only)
 
@@ -105,12 +83,12 @@ This guide covers setting up a device to run the Locai agent from source (i.e. t
 
 ### Installation
 
-Clone the repository and install dependencies. `main.py setup` will install `uv` itself if needed.
+Clone the repository and install dependencies with `uv`:
 
 ```
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
-uv run main.py setup          # add --dev for testing/docs tools
+uv pip install -e ".[dev]"    # dev extras: testing + docs tools
 ```
 
 ### Running the agent
@@ -129,7 +107,7 @@ If your account has no password (e.g. Google sign-up), the CLI seamlessly switch
 On subsequent runs, resume the saved session:
 
 ```
-uv run main.py run            # or --prod to install as a systemd/launchd/Windows service
+uv run main.py run            # or --headless to install as a systemd/launchd/Windows service
 ```
 
 ### CLI reference

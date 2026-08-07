@@ -1,27 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""OTA update logic — covers both install shapes.
+"""Bundled OTA update logic.
 
-Source install (``curl … | bash`` deployments): pulls latest code via git +
-refreshes dependencies and plugin binaries. Entry point: ``pull_and_update``.
+The frozen install (PyInstaller artifact under ``<install_root>/``) downloads a
+release tarball, verifies, extracts, flips the ``current`` pointer, health-checks
+the new runtime, and GCs the old. Entry points in the ``Bundle OTA`` section:
+``discover_install_root``, ``read_manifest``, ``latest_release_for``,
+``download``, ``verify``, ``extract``, ``flip_current``, ``health_check``,
+``gc_old_versions``.
 
-Bundled install (PyInstaller artifact deployed to ``<install_root>/``):
-downloads a release tarball, verifies, extracts, flips the ``current``
-pointer, health-checks the new runtime, GCs the old. Entry points: the
-``Bundle OTA`` section below — ``discover_install_root``, ``read_manifest``,
-``latest_release_for``, ``download``, ``verify``, ``extract``,
-``flip_current``, ``health_check``, ``gc_old_versions``.
-
-The runtime signals an update request by setting
-``AgentRuntime.update_requested = True`` and shutting down. ``main.run`` then
-invokes ``_apply_update_and_reexec`` which routes to one of the two paths
-above based on ``sys.frozen`` (dispatch wiring not yet in this commit).
+The runtime signals an update by setting ``AgentRuntime.update_requested = True``
+and shutting down; ``main.run`` then calls ``_apply_update_and_reexec`` which runs
+``swap_bundle``. Source installs are developer-only and update via ``git pull``.
 
 Bundled-install layout this module operates on::
 
     <install_root>/
-    ├── locai-link               (launcher; not our concern — see launcher/)
+    ├── locai-link               (supervisor binary; not our concern here)
     ├── versions/<v>/locai-link-runtime
     ├── current -> versions/<v>  (symlink OR a ``CURRENT`` text file)
     ├── previous -> versions/<v> (same shape as current)
@@ -30,7 +26,7 @@ Bundled-install layout this module operates on::
 
 The launcher is the stable entry point the OS service starts; it follows the
 ``current`` pointer and exec's the runtime there. That indirection is what
-makes A/B updates safe — we extract the new version next to the old, flip
+makes A/B updates safe: we extract the new version next to the old, flip
 the pointer atomically, and the next launch picks it up.
 """
 
@@ -48,7 +44,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
@@ -57,231 +52,24 @@ import requests
 from packaging.version import Version
 
 from link import constants
-from link.config.models import AgentConfig
 from link.utils import archive as archive_util
 
 logger = logging.getLogger(__name__)
 
 
 class _HttpGetter(Protocol):
-    """Minimal .get() surface — accepts a real ``requests.Session``, the
-    ``requests`` module itself, or a test stub. All three are called with
-    the same keyword arguments."""
+    """Minimal .get() surface: a real ``requests.Session``, the ``requests``
+    module itself, or a test stub, all called with the same keyword args."""
 
     def get(self, url: str, **kwargs: Any) -> Any: ...
 
 
 # ===========================================================================
-# Source-install OTA — git-based, used when running from a cloned repo.
-# ===========================================================================
-
-DEFAULT_BRANCH = constants.DEFAULT_BRANCH
-
-
-def _command_exists(name: str) -> bool:
-    return shutil.which(name) is not None
-
-
-def get_current_branch(repo_dir: Path) -> str | None:
-    """Returns the current git branch name, or None if it cannot be determined.
-
-    Args:
-        repo_dir (Path): The path to the git repository.
-
-    Returns:
-        str | None: The current branch name.
-    """
-    result = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    )
-    branch = result.stdout.strip()
-    return branch if result.returncode == 0 and branch and branch != "HEAD" else None
-
-
-def get_local_version(repo_dir: Path) -> str | None:
-    """Reads the version string from pyproject.toml.
-
-    Args:
-        repo_dir (Path): The path to the project root.
-
-    Returns:
-        str | None: The version string, or None if not found.
-    """
-    toml_path = repo_dir / "pyproject.toml"
-    if not toml_path.exists():
-        return None
-    try:
-        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    project = data.get("project")
-    version = project.get("version") if isinstance(project, dict) else None
-    return version if isinstance(version, str) else None
-
-
-def pull_and_update(repo_dir: Path, branch: str = DEFAULT_BRANCH) -> bool:
-    """Pulls the latest code from the remote, stashing any local changes.
-
-    Args:
-        repo_dir (Path): The path to the git repository.
-        branch (str): The default branch to pull from (overridden if on a dev branch).
-
-    Returns:
-        bool: True if the codebase was updated, False if already up to date.
-
-    Raises:
-        RuntimeError: If git is not available or the pull fails irrecoverably.
-    """
-    if not _command_exists("git"):
-        raise RuntimeError("git is required for updates but was not found.")
-
-    # Use the actual current branch rather than the default, so running
-    # update on a dev branch doesn't pull main into it.
-    current_branch = get_current_branch(repo_dir)
-    if current_branch and current_branch != branch:
-        logger.info(f"Detected branch '{current_branch}' — updating from origin/{current_branch}.")
-        branch = current_branch
-
-    # Fetch without merging so we can compare first
-    subprocess.run(["git", "fetch", "origin", branch], cwd=repo_dir, check=True)
-
-    # Count commits the local branch is behind the remote
-    result = subprocess.run(
-        ["git", "rev-list", "--count", f"HEAD..origin/{branch}"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    )
-    behind = int(result.stdout.strip() or "0")
-
-    if behind == 0:
-        local_ver = get_local_version(repo_dir)
-        logger.info(f"Already up to date{f' (v{local_ver})' if local_ver else ''}.")
-        return False
-
-    logger.info(f"Update available: {behind} new commit(s) on {branch}.")
-
-    # Check for local modifications that would block the pull
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    stashed = False
-    if dirty:
-        logger.info("Local modifications detected — stashing before update...")
-        stash_result = subprocess.run(
-            ["git", "stash", "push", "--include-untracked", "-m", "locai-auto-stash"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-        )
-        if stash_result.returncode != 0:
-            raise RuntimeError("Could not stash local changes. Aborting update to avoid data loss.")
-        stashed = True
-
-    # Pull
-    subprocess.run(["git", "pull", "origin", branch], cwd=repo_dir, check=True)
-
-    # Restore stash if we created one
-    if stashed:
-        pop_result = subprocess.run(
-            ["git", "stash", "pop"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-        )
-        if pop_result.returncode != 0:
-            logger.warning("Update succeeded but stash could not be re-applied cleanly.")
-            logger.warning("Your changes are saved in git stash — run 'git stash show' to review.")
-        else:
-            logger.info("Local changes re-applied successfully.")
-
-    # Re-install dependencies in case pyproject.toml changed
-    logger.info("Updating dependencies...")
-    subprocess.run(["uv", "pip", "install", "-e", "."], cwd=repo_dir, check=True)
-
-    new_ver = get_local_version(repo_dir)
-    logger.info(f"Update complete{f' — now at v{new_ver}' if new_ver else ''}.")
-    return True
-
-
-def reinstall_plugin_binaries(repo_dir: Path, config: AgentConfig) -> None:
-    """Re-runs install.py only for plugins referenced by the active config.
-
-    Each plugin declares its component type(s) via `[project.entry-points."locai.plugins"]`
-    in its `pyproject.toml`. A plugin is installed only if at least one of those
-    entry-point names appears as `source.type` or `sink.type` in the config's
-    pipelines. Built-in component types (http_poll, http_post, command, etc.)
-    have no plugin dir and are silently skipped.
-
-    Plugins use tag-based caching internally, so re-runs for active plugins are
-    cheap when versions haven't changed.
-
-    Args:
-        repo_dir: The path to the project root.
-        config: The active agent config — determines which plugins to refresh.
-    """
-    plugins_dir = repo_dir / "plugins"
-    if not plugins_dir.exists():
-        logger.debug("No plugins/ directory — skipping binary refresh.")
-        return
-
-    referenced = _referenced_component_types(config)
-
-    for plugin_dir in sorted(plugins_dir.iterdir()):
-        install_script = plugin_dir / "install.py"
-        if not install_script.is_file():
-            continue
-
-        declared = _plugin_entry_point_names(plugin_dir)
-        if not declared & referenced:
-            logger.debug(f"Skipping plugin '{plugin_dir.name}' — not used by active config.")
-            continue
-
-        logger.info(f"Refreshing binaries for plugin '{plugin_dir.name}'...")
-        try:
-            subprocess.run(["uv", "run", "python", str(install_script)], cwd=repo_dir, check=True)
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Plugin '{plugin_dir.name}' install failed (exit {e.returncode}) — continuing.")
-
-
-def _referenced_component_types(config: AgentConfig) -> set[str]:
-    """Collects all source/sink component types referenced by the config's pipelines."""
-    types: set[str] = set()
-    for pipeline in config.pipelines:
-        if pipeline.source and pipeline.source.type:
-            types.add(pipeline.source.type)
-        if pipeline.sink and pipeline.sink.type:
-            types.add(pipeline.sink.type)
-    return types
-
-
-def _plugin_entry_point_names(plugin_dir: Path) -> set[str]:
-    """Reads the 'locai.plugins' entry-point names from a plugin's pyproject.toml."""
-    pyproject = plugin_dir / "pyproject.toml"
-    if not pyproject.is_file():
-        return set()
-    try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning(f"Could not parse {pyproject}: {e}")
-        return set()
-    entries = data.get("project", {}).get("entry-points", {}).get("locai.plugins", {})
-    return set(entries.keys())
-
-
-# ===========================================================================
-# Bundle OTA — download / verify / extract / flip / GC for PyInstaller bundles.
+# Bundle OTA: download / verify / extract / flip / GC for PyInstaller bundles.
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Layout constants — single source of truth for the on-disk shape
+# Layout constants: single source of truth for the on-disk shape
 # ---------------------------------------------------------------------------
 
 VERSIONS_DIR = "versions"
@@ -289,17 +77,15 @@ STAGING_DIR = "staging"
 CURRENT_LINK = "current"
 PREVIOUS_LINK = "previous"
 # Windows-without-Developer-Mode fallback for the symlink. The build process
-# writes one or the other depending on what the OS allows; the Rust launcher
-# (under ``launcher/``) accepts either shape.
+# writes one or the other depending on what the OS allows; the Rust supervisor
+# (in ``crates/link``) accepts either shape.
 CURRENT_POINTER_FILE = "CURRENT"
 PREVIOUS_POINTER_FILE = "PREVIOUS"
 MANIFEST_NAME = "manifest.json"
-BOOT_NAME = "boot.json"
 RUNTIME_BINARY = "locai-link-runtime.exe" if sys.platform == "win32" else "locai-link-runtime"
 UPDATE_PENDING_STAMP = ".update-pending"
 
 DEFAULT_RELEASES_REPO = constants.REPO_SLUG
-DEFAULT_CHANNEL = "stable"
 
 # Download tuning. Generous: this runs once per OTA, not in a hot path.
 _CHUNK_SIZE = 1024 * 1024  # 1 MiB
@@ -373,36 +159,12 @@ class ReleaseInfo:
     tag: str  # the raw tag, e.g. "v1.0.16"
     asset_name: str  # full filename including the version suffix and extension
     download_url: str
-    sha256_url: str | None  # sibling .sha256 — None if release didn't ship one
+    sha256_url: str | None  # sibling .sha256; None if release didn't ship one
     checksums_url: str | None = None  # release-wide checksums.txt; preferred over the sidecar
 
 
-@dataclasses.dataclass(frozen=True)
-class BootConfig:
-    """Mirror of ``boot.json`` written by host installers for the fetch-on-first-launch path.
-
-    Carried here for completeness; the actual bootstrap consumption (used when
-    a host installer ships only the launcher + boot.json and the bundle is
-    downloaded on first launch) lives in the Rust launcher under
-    ``crates/launcher/``. Field shape (name, optional/required) must match
-    the Rust ``BootConfig`` in ``crates/launcher/src/boot.rs`` and its
-    mirror in ``crates/shared/src/lib.rs`` — kept in lockstep because a
-    host installer that writes fields the Python side drops is a schema
-    drift bug.
-    """
-
-    host_app: str
-    plugin_set: list[str]
-    channel: str
-    asset_repo: str
-    # Optional direct download URL. When present, the launcher skips the
-    # GitHub Releases API and downloads from this URL directly. Useful
-    # for air-gapped mirrors and CI stubs.
-    asset_url: str | None = None
-
-
 ProgressFn = Callable[[int, int], None]
-"""``progress(bytes_done, bytes_total)`` — ``bytes_total`` is 0 when unknown."""
+"""``progress(bytes_done, bytes_total)``; ``bytes_total`` is 0 when unknown."""
 
 
 # ---------------------------------------------------------------------------
@@ -452,49 +214,6 @@ def read_manifest(root: Path) -> Manifest:
         )
     except KeyError as exc:
         raise ManifestMalformed(f"{path}: missing field {exc}") from exc
-
-
-def read_boot_config(root: Path) -> BootConfig | None:
-    """Parse ``<root>/boot.json`` if present. Returns None otherwise.
-
-    Field types are validated strictly (no silent coercion) so a
-    malformed ``boot.json`` fails here rather than later during OTA,
-    and so the Python side stays in lockstep with the Rust launcher's
-    stricter serde deserialisation.
-    """
-    path = root / BOOT_NAME
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ManifestMalformed(f"{path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ManifestMalformed(f"{path}: expected a JSON object, got {type(data).__name__}")
-
-    def _require_str(key: str, default: str | None = None) -> str:
-        raw = data.get(key, default)
-        if raw is None:
-            raise ManifestMalformed(f"{path}: missing required string field {key!r}")
-        if not isinstance(raw, str):
-            raise ManifestMalformed(f"{path}: {key!r} must be a string, got {type(raw).__name__}")
-        return raw
-
-    plugin_set_raw = data.get("plugin_set", [])
-    if not isinstance(plugin_set_raw, list) or not all(isinstance(p, str) for p in plugin_set_raw):
-        raise ManifestMalformed(f"{path}: 'plugin_set' must be a list of strings")
-
-    asset_url_raw = data.get("asset_url")
-    if asset_url_raw is not None and not isinstance(asset_url_raw, str):
-        raise ManifestMalformed(f"{path}: 'asset_url' must be a string or absent, got {type(asset_url_raw).__name__}")
-
-    return BootConfig(
-        host_app=_require_str("host_app"),
-        plugin_set=list(plugin_set_raw),
-        channel=_require_str("channel", DEFAULT_CHANNEL),
-        asset_repo=_require_str("asset_repo", DEFAULT_RELEASES_REPO),
-        asset_url=asset_url_raw,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +380,7 @@ def verify(
 ) -> None:
     """Verify a downloaded bundle. Raises ``VerifyFailed`` on mismatch.
 
-    SHA check is mandatory — pass either the literal hex digest or a URL to a
+    SHA check is mandatory: pass either the literal hex digest or a URL to a
     sibling ``.sha256`` file (the format GitHub Actions publishes). Platform
     signature is best-effort and dispatches by OS:
         - macOS: ``codesign --verify --deep --strict`` over the extracted
@@ -680,9 +399,8 @@ def verify(
         raise VerifyFailed(f"SHA256 mismatch: expected {expected_sha256}, got {actual}")
 
     # Platform-signature dispatch is intentionally a no-op for the tarball
-    # itself. The macOS codesign check happens against the extracted bundle
-    # — see verify_extracted_macos. This keeps the function callable for the
-    # download path on all platforms.
+    # itself; the macOS codesign check runs against the extracted bundle (see
+    # verify_extracted_macos). Keeps the function callable on all platforms.
     if platform == "win32":
         # Documented for v1: SHA is the only integrity gate; Authenticode
         # check requires a signed binary, which we don't have a cert for yet.
@@ -768,7 +486,7 @@ def _hash_sha256(path: Path) -> str:
 def extract(archive: Path, dest: Path) -> None:
     """Extract a release archive's version payload into ``dest``.
 
-    The release tarball is a full installer package — it wraps the bundle as
+    The release tarball is a full installer package: it wraps the bundle as
     ``<name>/bundle/versions/<v>/`` alongside install.sh + icons at the root.
     For OTA we only want that inner payload dir (the one holding the runtime);
     the launcher, pointer, and installer scripts already exist in the deployed
@@ -844,10 +562,6 @@ def _resolve_current(root: Path) -> Path | None:
     return _resolve_pointer(root, CURRENT_LINK, CURRENT_POINTER_FILE)
 
 
-# def _resolve_previous(root: Path) -> Path | None:
-#     return _resolve_pointer(root, PREVIOUS_LINK, PREVIOUS_POINTER_FILE)
-
-
 def _resolve_pointer(root: Path, link_name: str, file_name: str) -> Path | None:
     link = root / link_name
     if link.is_symlink() or link.is_dir():
@@ -869,7 +583,7 @@ def _resolve_pointer(root: Path, link_name: str, file_name: str) -> Path | None:
 def flip_current(root: Path, new_version: str) -> None:
     """Point ``current`` at ``versions/<new_version>``, demote the old to ``previous``.
 
-    Preserves the pointer *shape* — if the install was using a CURRENT pointer
+    Preserves the pointer *shape*: if the install was using a CURRENT pointer
     file (Windows-without-developer-mode fallback chosen at build time), the
     new pointer is written the same way. Otherwise a symlink is used.
     """
@@ -899,7 +613,7 @@ def _install_uses_symlink(root: Path) -> bool:
         return True
     if (root / CURRENT_POINTER_FILE).is_file():
         return False
-    # Fresh install with no current yet — prefer symlink, the OS will tell us
+    # Fresh install with no current yet: prefer symlink; the OS will tell us
     # if it isn't allowed and `_write_pointer` falls back.
     return sys.platform != "win32"
 
@@ -933,7 +647,7 @@ def _write_pointer(
         with tempfile.TemporaryDirectory(dir=root) as td:
             tmp = Path(td) / "link.tmp"
             tmp.symlink_to(Path(VERSIONS_DIR) / version, target_is_directory=True)
-            # Move into the parent dir under a unique name first — symlinks
+            # Move into the parent dir under a unique name first: symlinks
             # cannot be atomically replaced across directories on every fs,
             # but os.replace within the same dir is atomic on POSIX.
             staged = root / f".{link_name}.tmp"
@@ -966,7 +680,7 @@ def _write_pointer(
 def health_check(runtime_path: Path, *, timeout: float = 30.0) -> bool:
     """Spawn ``runtime_path --self-check`` and return True on a clean exit 0.
 
-    Captures stderr for log forwarding on failure. Does not raise — the caller
+    Captures stderr for log forwarding on failure. Does not raise; the caller
     decides what to do on a False result (typically: skip the flip, GC the
     staged version).
     """
@@ -1107,7 +821,7 @@ def check_update_available(
         override = os.environ.get("LOCAI_LATEST_VERSION") if _ota_overrides_allowed() else None
         latest = override or latest_version_from_control(control_base_url or DEFAULT_CONTROL_API_BASE)
         return (_version_gt(latest, manifest.version), latest)
-    except Exception as e:  # noqa: BLE001 — never let the check crash the agent
+    except Exception as e:  # noqa: BLE001 - never let the check crash the agent
         logger.debug(f"update check failed: {e}")
         return (False, None)
 
@@ -1136,7 +850,7 @@ def bundle_asset_available(install_root: Path | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Whole-app OTA — swap changed UI apps (companion / setup assistant)
+# Whole-app OTA: swap the changed UI app (the single desktop app)
 # ---------------------------------------------------------------------------
 
 _APP_COMPANION = "companion"
@@ -1145,26 +859,25 @@ _APP_COMPANION = "companion"
 def _ui_app_payload_name(key: str) -> str:
     """Name of the app inside the OTA payload for the current platform."""
     if sys.platform == "darwin":
-        return {"companion": "Locai Link.app", "setup_assistant": "Setup Assistant.app"}[key]
+        return {"companion": "Locai Link.app"}[key]
     if sys.platform == "win32":
-        return {"companion": "companion.exe", "setup_assistant": "setup-assistant.exe"}[key]
-    return {"companion": "companion", "setup_assistant": "setup-assistant"}[key]
+        return {"companion": "companion.exe"}[key]
+    return {"companion": "companion"}[key]
 
 
 def _ui_app_destinations(key: str, install_root: Path) -> list[Path]:
     """Installed app copy the OTA can update. On macOS this is the install-root
     copy (user-owned, so the user-context OTA can replace it); the LaunchAgent
-    runs that copy. The /Applications copy is pkg-managed for discoverability —
-    the OTA can't rewrite it (writing inside /Applications needs admin) so it's
-    left alone and refreshed on the next pkg install."""
+    runs that copy. The /Applications copy is pkg-managed for discoverability and
+    left alone (writing there needs admin), refreshed on the next pkg install."""
     if sys.platform == "darwin":
-        if key == _APP_COMPANION:
-            return [install_root / "Locai Link.app"]
-        return [install_root / "Setup Assistant.app"]
+        return [install_root / "Locai Link.app"]
     if sys.platform == "win32":
-        return []  # no companion OTA on Windows yet
-    name = "companion" if key == _APP_COMPANION else "setup-assistant"
-    return [install_root / name]
+        return []  # single-binary self-swap deferred; no separate app to swap
+    # Linux ships the UI inside the single locai-link binary (no separate app),
+    # so there's nothing to whole-app swap. Updating that binary in place is the
+    # single-binary self-swap, tracked as its own piece of work.
+    return []
 
 
 def _rm(path: Path) -> None:
@@ -1172,6 +885,30 @@ def _rm(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     elif path.exists() or path.is_symlink():
         path.unlink(missing_ok=True)
+
+
+def _remove_legacy_setup_assistant(install_root: Path) -> None:
+    """Remove the pre-merge standalone Setup Assistant left on disk by an
+    upgrade-in-place OTA (onboarding is now a window of the main app). The pkg
+    postinstall + uninstaller cover the reinstall/uninstall paths; this covers
+    OTA-only devices. Best-effort: a leftover is harmless (no LaunchAgent
+    targets it). LEGACY-SA-CLEANUP: remove once no pre-merge install remains."""
+    targets: list[Path] = []
+    if sys.platform == "darwin":
+        # Both copies are user-owned (the pkg chowns them to the user), so the
+        # user-context runtime can remove them right after the OTA.
+        targets.append(install_root / "Setup Assistant.app")
+        targets.append(Path("/Applications/Locai Setup Assistant.app"))
+    elif sys.platform.startswith("linux"):
+        targets.append(install_root / "setup-assistant")
+        targets.append(Path.home() / ".local" / "share" / "applications" / "locai-setup-assistant.desktop")
+    for t in targets:
+        try:
+            if t.exists() or t.is_symlink():
+                _rm(t)
+                logger.info(f"removed legacy Setup Assistant artifact: {t}")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"legacy Setup Assistant cleanup skipped {t}: {e}")
 
 
 def _locate_in_payload(staging: Path, name: str) -> Path | None:
@@ -1224,8 +961,7 @@ _COMPANION_LABEL = constants.COMPANION_LABEL
 
 
 def _restart_ui_app(key: str) -> None:
-    """Relaunch the companion so it picks up the swapped binary. Setup Assistant
-    only runs during setup, so it has nothing to restart. Best-effort."""
+    """Relaunch the app so it picks up the swapped binary. Best-effort."""
     if key != _APP_COMPANION:
         return
     try:
@@ -1261,7 +997,7 @@ def _home_for_uid(uid: str) -> Path:
 
 
 def _restart_companion_macos(force_reload: bool = False) -> None:
-    """Relaunch the companion, mirroring the Setup Assistant's proven sequence:
+    """Relaunch the companion:
     kickstart in place; if the service isn't reachable in this domain (stale /
     legacy-domain registration), rebootstrap from the installed plist and retry;
     fall back to LaunchServices. Each launchctl call is bounded so a hung
@@ -1277,13 +1013,13 @@ def _restart_companion_macos(force_reload: bool = False) -> None:
         try:
             return subprocess.run(["launchctl", *args], check=False, timeout=10).returncode
         except subprocess.TimeoutExpired:
-            return 1  # treat a hang as failure and move on — never block the update
+            return 1  # treat a hang as failure and move on; never block the update
 
     # Non-destructive first: kickstart a live service in place. When the plist
     # just changed, skip this so we reload the corrected definition below.
     ok = False if force_reload else _lc("kickstart", "-k", service) == 0
     if not ok:
-        # Not reachable in this domain — refresh the registration and retry.
+        # Not reachable in this domain: refresh the registration and retry.
         _lc("bootout", service)
         _lc("bootstrap", f"gui/{uid}", str(plist))
         # bootstrap with RunAtLoad already starts the (correct) binary; kickstart
@@ -1320,8 +1056,8 @@ def _reinstall_url() -> str:
 
 def _companion_installed_version(install_root: Path) -> str | None:
     """Version of the running companion .app (macOS), or None if unknown. Checks
-    the install-root copy first — that's the one the LaunchAgent runs and the OTA
-    updates — so drift reflects the live UI, not the pkg-managed /Applications copy."""
+    the install-root copy first (the one the LaunchAgent runs and the OTA
+    updates) so drift reflects the live UI, not the pkg-managed /Applications copy."""
     if sys.platform != "darwin":
         return None
     import plistlib
@@ -1342,7 +1078,7 @@ def _companion_installed_version(install_root: Path) -> str | None:
 
 def _companion_running_version(install_root: Path) -> str | None:
     """Version the *running* companion published at launch (state file), or None
-    when absent (pre-fix companion). This reflects the live process — unlike the
+    when absent (pre-fix companion). Reflects the live process, unlike the
     on-disk bundle, which reads new right after a swap even if the old companion
     is still running because the relaunch silently failed."""
     marker = install_root / constants.STATE_SUBDIR / constants.COMPANION_RUNNING_VERSION_MARKER
@@ -1355,7 +1091,7 @@ def _companion_running_version(install_root: Path) -> str | None:
 
 def _notify_reinstall_required(version: str, url: str) -> None:
     """Best-effort local notification that a reinstall is needed to finish the
-    update. Names the download URL but does not open it — no outbound navigation
+    update. Names the download URL but does not open it; no outbound navigation
     happens without the user choosing to act."""
     msg = f"Couldn't finish updating to {version}. Reinstall from {url} to finish."
     title = "Locai Link update incomplete"
@@ -1400,7 +1136,7 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
 
     uid = _macos_console_uid() or _current_uid()
     plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_COMPANION_LABEL}.plist"
-    correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link-companion")
+    correct = str(install_root / "Locai Link.app" / "Contents" / "MacOS" / "locai-link")
     try:
         if not plist.exists():
             return False  # fresh installs get the plist from the Setup Assistant
@@ -1416,7 +1152,7 @@ def _heal_companion_launchagent(install_root: Path) -> bool:
         logger.info(f"self-heal: repaired companion LaunchAgent program path -> {correct}")
         # A companion started via `open -a` isn't launchd-managed, so bootout won't
         # stop it; kill it so the relaunch below doesn't leave two trays.
-        subprocess.run(["pkill", "-f", "locai-link-companion"], check=False, timeout=10)
+        subprocess.run(["pkill", "-f", "Locai Link.app/Contents/MacOS/locai-link"], check=False, timeout=10)
         _restart_companion_macos(force_reload=True)
         return True
     except Exception as e:  # noqa: BLE001 - self-heal must never crash the agent
@@ -1444,7 +1180,7 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
             time.sleep(_DRIFT_SETTLE_SECONDS)
         running = _companion_running_version(root)
         companion_version = running or _companion_installed_version(root)
-        # Only the running-version path has a relaunch race — give a just-
+        # Only the running-version path has a relaunch race: give a just-
         # relaunched companion a moment to publish its version before deciding
         # it's stale, so we don't fire a false prompt during the relaunch window.
         settle = 0
@@ -1454,6 +1190,11 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
             companion_version = running or _companion_installed_version(root)
             settle += 1
         if not companion_version or companion_version == runtime_version:
+            return
+        if _on_legacy_layout(root):
+            # A pre-merge -> merged migration is under way; heal_legacy_layout runs
+            # its own finish (with an admin prompt), so don't also fire a "reinstall
+            # needed" notice - that would be two competing prompts for one update.
             return
         marker = root / constants.STATE_SUBDIR / "ui-drift-notified"
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == runtime_version:
@@ -1466,6 +1207,188 @@ def check_ui_version_drift(install_root: Path | None = None, url: str | None = N
         marker.write_text(runtime_version, encoding="utf-8")
     except Exception as e:  # noqa: BLE001 - the drift check must never crash the agent
         logger.debug(f"ui drift check skipped: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Self-heal: finish a breaking OTA (pre-merge layout -> merged build)
+# ---------------------------------------------------------------------------
+# The frictionless OTA only swaps versions/<v>, so a device on the pre-merge
+# layout (separate `companion`/`setup-assistant` binaries + a launcher-supervised
+# agent unit) ends up running the new runtime under old scaffolding. The merged
+# build ships one `locai-link` binary + one unit and none of those artefacts, so
+# their presence means the install must finish the transition to the merged
+# layout. One-way: pre-merge -> merged is a hard boundary (no rollback).
+#
+# Linux reinstalls itself per-user (no admin). macOS can't fully self-heal without
+# root (the /usr/local/bin symlink + pkg receipt), so it splits the work: the
+# no-admin part runs silently on every boot - stop the pre-merge agent unit so the
+# device is on a single runtime at once - then it prompts ONCE for admin and runs
+# the version-matched finish-migration.sh for the privileged bits (symlink, receipt,
+# /Applications refresh, launcher removal). The prompt is a normal continuation of
+# the update the user already started; a dismissed prompt just leaves the silent
+# single-runtime state and re-prompts on the next version.
+
+_LEGACY_HEAL_MARKER = "legacy-heal-attempted"
+_LEGACY_HEAL_RETRY_SECONDS = 15 * 60
+# Written with the runtime version once the admin finish has been offered, so a
+# dismissed prompt doesn't nag on every boot (re-prompts when the version changes).
+_MIGRATION_PROMPTED_MARKER = "migration-finish-prompted"
+# Pre-merge launcher-supervised agent LaunchAgent; only the macOS finish refers to
+# it (the merged build ships only the companion unit).
+_LEGACY_AGENT_LABEL = f"{constants.REVERSE_DNS}.agent"
+
+
+def _on_legacy_layout(install_root: Path) -> bool:
+    """True if this install still has the pre-merge layout (separate UI binaries
+    or the launcher's agent unit). False on a native merged install."""
+    if sys.platform.startswith("linux"):
+        if (install_root / "companion").exists() or (install_root / "setup-assistant").exists():
+            return True
+        agent_unit = Path.home() / ".config" / "systemd" / "user" / "locai-link-agent.service"
+        return agent_unit.exists()
+    if sys.platform == "darwin":
+        # Any pre-merge artefact still on disk: the standalone Setup Assistant, the
+        # standalone launcher binary at the install root, or the launcher's agent
+        # LaunchAgent. All are absent on a native merged install.
+        if (install_root / "Setup Assistant.app").exists() or (install_root / "locai-link").exists():
+            return True
+        uid = _macos_console_uid() or _current_uid()
+        agent_plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_LEGACY_AGENT_LABEL}.plist"
+        return agent_plist.exists()
+    return False
+
+
+def _stop_legacy_supervisor_macos(install_root: Path) -> None:
+    """Stop the pre-merge launcher-supervised agent unit (the second supervisor
+    spawning a duplicate runtime) so the device is on a single runtime right after
+    the OTA, with or without the admin finish. User domain, no admin. The bootout
+    is detached (start_new_session) so that if this runtime happens to be the
+    agent's own child, tearing the job down can't kill it before the call lands; the
+    companion-supervised runtime keeps serving either way."""
+    uid = _macos_console_uid() or _current_uid()
+    agent_plist = _home_for_uid(uid) / "Library" / "LaunchAgents" / f"{_LEGACY_AGENT_LABEL}.plist"
+    try:
+        _rm(agent_plist)  # so it can't relaunch after a logout
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"stop-supervisor: agent plist removal skipped: {e}")
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["launchctl", "bootout", f"gui/{uid}/{_LEGACY_AGENT_LABEL}"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("stop-supervisor: booted out legacy agent unit (single runtime)")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"stop-supervisor: agent bootout skipped: {e}")
+
+
+def _run_admin_finish_macos(install_root: Path) -> None:
+    """Prompt once for admin and run the version-matched finish-migration.sh to
+    complete the merged layout (drop the launcher, refresh /Applications, fix the
+    /usr/local/bin symlink + pkg receipt). The user already chose to update, so the
+    prompt is a normal continuation. Detached so the blocking prompt doesn't stall
+    the runtime; gated to at most once per version so a dismissed prompt doesn't nag
+    every boot."""
+    finisher = install_root / "current" / "finish-migration.sh"
+    if not finisher.is_file():
+        logger.warning(f"migration finisher missing at {finisher}; skipping admin finish")
+        return
+    version = read_manifest(install_root).version
+    marker = install_root / constants.STATE_SUBDIR / _MIGRATION_PROMPTED_MARKER
+    if marker.exists() and marker.read_text(encoding="utf-8").strip() == version:
+        return  # already offered for this version; don't nag
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(version, encoding="utf-8")
+    # Pass the script path as an osascript argv item (not interpolated into the
+    # AppleScript source) so the path can't alter the program; quoted form handles
+    # any shell metacharacters when bash runs it as root.
+    applescript = (
+        "on run argv\n"
+        'do shell script ("/bin/bash " & quoted form of (item 1 of argv)) '
+        "with administrator privileges\n"
+        "end run"
+    )
+    try:
+        subprocess.Popen(  # noqa: S603
+            ["osascript", "-e", applescript, str(finisher)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info(f"prompted for admin to finish migration to {version}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"admin finish prompt failed: {e}")
+
+
+def heal_legacy_layout(install_root: Path | None = None) -> None:
+    """Finish the pre-merge -> merged transition when a frictionless OTA left the
+    new runtime on old scaffolding, so every component (binary, unit, UI) ends up on
+    this version. Frozen installs only. Linux reinstalls per-user (no admin); macOS
+    stops the second supervisor silently, then prompts once for admin to finish the
+    privileged bits. Best-effort; never crashes the agent."""
+    if not running_frozen_bundle():
+        return
+    try:
+        root = install_root or discover_install_root()
+        if not _on_legacy_layout(root):
+            return
+        # Remove the legacy Setup Assistant first (user-owned, no admin).
+        _remove_legacy_setup_assistant(root)
+        if sys.platform == "darwin":
+            _stop_legacy_supervisor_macos(root)  # silent: one runtime immediately
+            _run_admin_finish_macos(root)  # one admin prompt: the privileged bits
+            return
+        if sys.platform.startswith("linux"):
+            # One reinstall at a time: during the hybrid two supervisors each spawn
+            # a runtime and both call this on startup.
+            marker = root / constants.STATE_SUBDIR / _LEGACY_HEAL_MARKER
+            if marker.exists() and (time.time() - marker.stat().st_mtime) < _LEGACY_HEAL_RETRY_SECONDS:
+                return  # a heal is already in flight; don't stack
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(int(time.time())), encoding="utf-8")
+            _self_heal_reinstall_linux(root)
+    except Exception as e:  # noqa: BLE001 - self-heal must never crash the agent
+        logger.warning(f"legacy-layout self-heal skipped: {e}")
+
+
+def _locate_installer_root(extract_dir: Path) -> Path:
+    """Directory holding install.sh inside an extracted release tarball."""
+    for p in extract_dir.rglob("install.sh"):
+        if p.is_file():
+            return p.parent
+    raise BundleUpdateError(f"self-heal: no install.sh in extracted release under {extract_dir}")
+
+
+def _self_heal_reinstall_linux(install_root: Path) -> None:
+    """Download the current release and run its install.sh detached, so the
+    ``systemctl --user disable`` of the agent unit inside install.sh can't kill
+    the reinstall along with this process."""
+    manifest = read_manifest(install_root)
+    release = latest_release_for(manifest.asset_name)
+    logger.info(f"self-heal: reinstalling {release.version} to migrate off the pre-merge layout")
+    staging = staging_path(install_root)
+    archive = download(release.download_url, staging / release.asset_name)
+    if release.checksums_url:
+        verify(archive, expected_sha256=_sha256_from_checksums(release.checksums_url, release.asset_name))
+    else:
+        verify(archive, expected_sha256_url=release.sha256_url)
+    extract_dir = staging / "heal-extract"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    _extract_archive(archive, extract_dir)
+    script = _locate_installer_root(extract_dir) / "install.sh"
+    if not script.is_file():
+        raise BundleUpdateError(f"self-heal: install.sh missing at {script}")
+    # `--collect` reaps the transient unit on exit; running detached is what lets
+    # install.sh disable the agent unit (which supervises us) without self-killing.
+    subprocess.Popen(
+        ["systemd-run", "--user", "--collect", "--unit", "locai-link-heal", "--", "/bin/bash", str(script), "--apply"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    logger.info("self-heal: launched detached reinstall (journalctl --user -u locai-link-heal)")
 
 
 def _harden_swapped_app(dest: Path) -> None:
@@ -1508,15 +1431,15 @@ def swap_changed_ui_apps(
     swapped: list[str] = []
     for key, new_hash in new_apps.items():
         if old_apps.get(key) == new_hash:
-            continue  # unchanged — don't disturb the running app
+            continue  # unchanged; don't disturb the running app
         try:
+            dests = _ui_app_destinations(key, install_root)
+            if not dests:
+                continue  # platform has no separate UI app to swap
             name = _ui_app_payload_name(key)
             src = _locate_in_payload(staging, name)
             if src is None:
                 logger.warning(f"whole-app OTA: '{key}' changed but '{name}' not in payload; skipping")
-                continue
-            dests = _ui_app_destinations(key, install_root)
-            if not dests:
                 continue
             # Verify the staged bundle BEFORE any destructive replace, so a bad
             # signature never overwrites the good installed app.
@@ -1614,6 +1537,10 @@ def swap_bundle(install_root: Path | None = None) -> bool:
             _restart_ui_app(key)
     except Exception as e:  # noqa: BLE001
         logger.error(f"whole-app OTA: UI app swap failed (runtime still updated): {e}")
+
+    # Devices that only ever OTA-update never run the pkg/uninstaller scripts, so
+    # sweep the merged-away Setup Assistant here too. See LEGACY-SA-CLEANUP.
+    _remove_legacy_setup_assistant(install_root)
 
     gc_old_versions(install_root)
     clear_staging(install_root)

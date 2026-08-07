@@ -291,6 +291,7 @@ _DEFAULT_HANDLER = object()
 def _server_with_handlers(
     models: list[dict[str, Any]],
     command_handler: Any = _DEFAULT_HANDLER,
+    update_preflight: Any = None,
 ):
     """Boot a HealthServer with a provider that returns `models` and,
     by default, a dispatch handler that records commands.
@@ -315,6 +316,7 @@ def _server_with_handlers(
         version="1.0.18-test",
         models_provider=lambda: models,
         command_handler=wired,
+        update_preflight=update_preflight,
     )
     srv = HealthServer(state, port=port)
     srv.start()
@@ -534,6 +536,29 @@ def test_post_update_dispatches_update_agent():
     assert len(received) == 1
     assert received[0]["type"] == "UPDATE_AGENT"
     assert received[0]["id"].startswith("loopback-")
+
+
+def test_post_update_409_when_preflight_declines():
+    # No installable asset -> decline synchronously so the companion clears its
+    # "updating" lock instead of hanging on a dispatched-then-declined command.
+    srv, port, received = _server_with_handlers([], update_preflight=lambda: False)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post_no_body(port, "/update")
+        assert exc.value.code == 409
+    finally:
+        srv.stop()
+    assert received == []  # never dispatched
+
+
+def test_post_update_dispatches_when_preflight_allows():
+    srv, port, received = _server_with_handlers([], update_preflight=lambda: True)
+    try:
+        resp = _post_no_body(port, "/update")
+        assert resp.status == 202
+    finally:
+        srv.stop()
+    assert len(received) == 1 and received[0]["type"] == "UPDATE_AGENT"
 
 
 def test_post_update_503_without_handler():

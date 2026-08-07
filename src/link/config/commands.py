@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Typed command schema — the control-plane → agent contract."""
+"""Typed command schema: the control-plane to agent contract."""
 
 from typing import Annotated, Any, Literal
 
@@ -151,13 +151,7 @@ def parse_command(raw: dict[str, Any]) -> Command:
     """Validate a raw command dict against the `Command` union.
 
     Any shape or type mismatch raises `pydantic.ValidationError` with a
-    concrete field path — no translation, no fallbacks. The backend and the
-    agent share this schema verbatim, so there's nothing to paper over.
-
-    Args:
-        raw: The decoded JSON body as a dict.
-
-    Returns:
-        A validated instance of one of the `Command` variants.
+    concrete field path: the backend and agent share this schema verbatim,
+    so there are no fallbacks.
     """
     return _COMMAND_ADAPTER.validate_python(raw)

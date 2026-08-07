@@ -8,7 +8,7 @@ their version, so the workflow YAML stays readable. Kept out of ``tests/``
 because it's a CLI invoked from a workflow step, not collected by pytest.
 
     app <path> <version> <executable> <marker>
-    manifest <path> <version> <companion_hash> <sa_hash>
+    manifest <path> <version> <companion_hash>
     appversion <app_path>
 """
 
@@ -22,10 +22,9 @@ from pathlib import Path
 ASSET_STEM = "locai-link-llm-stt"
 
 
-# Real bundle identifiers per app, so a swapped .app carries its own identity.
+# Real bundle identifier, so a swapped .app carries its own identity.
 _APP_IDENTIFIERS = {
     "Locai Link": "uk.co.locai.link.companion",
-    "Setup Assistant": "uk.co.locai.link.setup-assistant",
 }
 
 
@@ -49,7 +48,7 @@ def make_app(path: str, version: str, executable: str, marker: str) -> None:
     (p / "Contents" / "Resources" / "build-marker.txt").write_text(marker, encoding="utf-8")
 
 
-def make_manifest(path: str, version: str, companion_hash: str, sa_hash: str) -> None:
+def make_manifest(path: str, version: str, companion_hash: str) -> None:
     Path(path).write_text(
         json.dumps(
             {
@@ -59,7 +58,7 @@ def make_manifest(path: str, version: str, companion_hash: str, sa_hash: str) ->
                 "git_sha": "ci",
                 "built_at": "ci",
                 "plugins": [],
-                "apps": {"companion": companion_hash, "setup_assistant": sa_hash},
+                "apps": {"companion": companion_hash},
             }
         ),
         encoding="utf-8",

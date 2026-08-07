@@ -11,6 +11,8 @@ and the raw OS id must never leak — only the digest is returned.
 import hashlib
 import re
 
+import pytest
+
 import link.infra.utils as mid
 
 
@@ -35,23 +37,19 @@ def test_raw_id_never_returned_to_caller(mocker):
 # --- per-OS dispatch ---
 
 
-def test_linux_reader_dispatched(mocker):
-    mocker.patch("link.infra.utils.platform.system", return_value="Linux")
-    reader = mocker.patch("link.infra.utils._read_linux", return_value="linux-id")
-    assert mid._read_raw_id() == "linux-id"
-    reader.assert_called_once()
-
-
-def test_windows_reader_dispatched(mocker):
-    mocker.patch("link.infra.utils.platform.system", return_value="Windows")
-    mocker.patch("link.infra.utils._read_windows", return_value="win-guid")
-    assert mid._read_raw_id() == "win-guid"
-
-
-def test_macos_reader_dispatched(mocker):
-    mocker.patch("link.infra.utils.platform.system", return_value="Darwin")
-    mocker.patch("link.infra.utils._read_macos", return_value="mac-uuid")
-    assert mid._read_raw_id() == "mac-uuid"
+@pytest.mark.parametrize(
+    "system,reader,expected",
+    [
+        ("Linux", "_read_linux", "linux-id"),
+        ("Windows", "_read_windows", "win-guid"),
+        ("Darwin", "_read_macos", "mac-uuid"),
+    ],
+)
+def test_reader_dispatched_per_os(mocker, system, reader, expected):
+    mocker.patch("link.infra.utils.platform.system", return_value=system)
+    reader_mock = mocker.patch(f"link.infra.utils.{reader}", return_value=expected)
+    assert mid._read_raw_id() == expected
+    reader_mock.assert_called_once()
 
 
 def test_native_read_failure_falls_back(mocker):

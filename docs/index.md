@@ -10,5 +10,5 @@ Welcome to the **Loc.ai:Link** documentation. This agent provides a modular runt
 ## Getting Started
 
 ```bash
-uv run main.py setup
+uv pip install -e ".[dev]"
 ```

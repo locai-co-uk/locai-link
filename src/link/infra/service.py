@@ -19,16 +19,14 @@ from link import constants
 logger = logging.getLogger(__name__)
 
 # Default reverse-DNS prefix for service labels. Single-sourced from
-# constants.REVERSE_DNS so the source-install (`--prod`) service and the
-# packaged install share one org namespace instead of a separate hardcoded
-# one; the packaged installer passes the same value explicitly.
+# constants.REVERSE_DNS so the source-install and packaged install share one
+# org namespace instead of a separate hardcoded one.
 DEFAULT_LABEL_PREFIX = constants.REVERSE_DNS
 
-# Service scope. "user" lands the unit file under the user's home
-# directory (the historical default); "system" lands it under the
-# OS-level system directory (the .pkg installer's "install for all
-# users" path). Only honoured by MacOSBackend today — Linux and
-# Windows backends keep their historical behaviour.
+# Service scope. "user" lands the unit file under the user's home directory
+# (historical default); "system" lands it under the OS-level system directory.
+# Only honoured by MacOSBackend today; Linux and Windows keep their historical
+# behaviour.
 ServiceScope = Literal["user", "system"]
 
 
@@ -141,8 +139,7 @@ WantedBy=default.target
         _run_cmd("systemctl --user daemon-reload")
         _run_cmd(f"systemctl --user enable {self.service_name}")
 
-        # Ensure user services run even when user isn't logged in
-        # FIX: Use getpass.getuser() instead of os.getlogin()
+        # Ensure user services run even when the user isn't logged in.
         _run_cmd(f"loginctl enable-linger {getpass.getuser()}", ignore_errors=True)
 
         if start_now:
@@ -168,19 +165,16 @@ WantedBy=default.target
 
 
 class MacOSBackend(ServiceBackend):
-    """LaunchAgents Implementation.
+    """LaunchAgents implementation.
 
-    Supports two scopes:
-        * ``user``   — ``~/Library/LaunchAgents/<label>.plist``. Runs
-          when this user logs in. Historical default.
-        * ``system`` — ``/Library/LaunchAgents/<label>.plist``. Runs
-          when *any* user logs in. The .pkg installer's "Install for
-          all users of this Mac" path lands here.
+    Two scopes:
+        * ``user``:   ``~/Library/LaunchAgents/<label>.plist``, runs when this
+          user logs in (historical default).
+        * ``system``: ``/Library/LaunchAgents/<label>.plist``, runs when any
+          user logs in.
 
-    System-scope writes require write access to ``/Library/`` (root or
-    sudo). The .pkg postinstall script runs with the right privileges;
-    the developer one-liner flow does not, which is why ``user`` stays
-    the default.
+    System-scope writes require write access to ``/Library/`` (root or sudo),
+    which is why ``user`` stays the default.
     """
 
     def __init__(self, *args, **kwargs):
@@ -197,9 +191,9 @@ class MacOSBackend(ServiceBackend):
     @override
     def is_running(self) -> bool:
         # `launchctl list` prints one row per loaded label ("PID STATUS
-        # LABEL"). Match in Python instead of shelling out to grep —
-        # avoids shell=True (banned in src/link/**) and any interpolation
-        # of self.label into a shell command.
+        # LABEL"). Match in Python instead of shelling out to grep: avoids
+        # shell=True (banned in src/link/**) and any interpolation of
+        # self.label into a shell command.
         res = subprocess.run(["launchctl", "list"], capture_output=True, text=True, check=False)
         if res.returncode != 0:
             return False
@@ -284,8 +278,7 @@ class WindowsBackend(ServiceBackend):
             logger.warning("Admin privileges required to install Windows services.")
             return
 
-        # FIX: Escape inner quotes with backslashes (\") so sc.exe parses them correctly
-        # The result looks like: binPath= "cmd /c \"python.exe ... >> log 2>&1\""
+        # Escape inner quotes with backslashes so sc.exe parses them correctly.
         inner_cmd = f"{self.command} >> {self.log_file} 2>&1"
         bin_path = f'cmd /c \\"{inner_cmd}\\"'
 
@@ -342,17 +335,11 @@ class WindowsBackend(ServiceBackend):
 
 
 def _run_cmd(cmd: str | list[str], ignore_errors: bool = False) -> None:
-    """Executes a command without a shell.
+    """Execute a command without a shell.
 
     A string is tokenised with ``shlex.split`` (a list is passed through), so
-    no shell is involved and no value is interpolated into a shell line. A
-    missing executable (``FileNotFoundError``) is treated like a non-zero exit,
-    matching the previous shell behaviour where a missing binary surfaced as a
-    ``CalledProcessError`` rather than crashing the caller.
-
-    Args:
-        cmd (str | list[str]): The command to run.
-        ignore_errors (bool): If True, suppresses the failure warning.
+    no value is interpolated into a shell line. A missing executable is treated
+    like a non-zero exit.
     """
     argv = shlex.split(cmd) if isinstance(cmd, str) else cmd
     try:
@@ -363,14 +350,7 @@ def _run_cmd(cmd: str | list[str], ignore_errors: bool = False) -> None:
 
 
 def _run_quiet(cmd_list: list[str]) -> bool:
-    """Returns True if command exit code is 0.
-
-    Args:
-        cmd_list (list[str]): The command and args.
-
-    Returns:
-        bool: True if exit code is 0, else False.
-    """
+    """Return True if the command exits 0."""
     try:
         subprocess.run(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return True
@@ -379,11 +359,7 @@ def _run_quiet(cmd_list: list[str]) -> bool:
 
 
 def _is_admin() -> bool:
-    """Checks for Windows Admin privileges.
-
-    Returns:
-        bool: True if admin, False otherwise.
-    """
+    """Return True if running with Windows admin privileges."""
     try:
         import ctypes
 
@@ -403,32 +379,20 @@ def ServiceManager(
     scope: ServiceScope = "user",
     label_prefix: str = DEFAULT_LABEL_PREFIX,
 ) -> ServiceBackend:
-    """Factory function that returns the correct OS backend.
+    """Return the OS-appropriate service backend.
 
     Args:
-        service_name (str): Name of the service.
-        command (str | None): The command to execute.
-        description (str): Description of the service.
-        working_dir (Path | str | None): Working directory for the service.
-        env_vars (dict[str, str] | None): Environment variables to set.
-        scope: "user" (default, per-user) or "system" (.pkg "install for
-            all users" path — system-wide unit file). Only honoured by
-            MacOSBackend today.
+        scope: "user" (default, per-user) or "system" (system-wide unit file).
+            Only honoured by MacOSBackend today.
         label_prefix: Reverse-DNS prefix for the service label. Defaults to
-            constants.REVERSE_DNS ("uk.co.locai.link"), aligning the
-            source-install service label with the bundle identifier on the
-            .pkg / .app artefacts. The packaged installer passes the same
-            value explicitly.
-
-    Returns:
-        ServiceBackend: An instance of LinuxBackend, MacOSBackend, or WindowsBackend.
+            constants.REVERSE_DNS.
 
     Raises:
         NotImplementedError: If the OS is not supported.
     """
     system = platform.system().lower()
     # Pass scope/label_prefix as explicit kwargs so type checkers keep
-    # the `ServiceScope` Literal — a dict widens it to str.
+    # the `ServiceScope` Literal; a dict widens it to str.
     if system == "linux":
         return LinuxBackend(
             service_name, command, description, working_dir, env_vars, scope=scope, label_prefix=label_prefix
@@ -446,29 +410,18 @@ def ServiceManager(
 
 
 def install_all(services: list[ServiceBackend], start_now: bool) -> None:
-    """Install several services in lockstep.
+    """Install several services in lockstep, rolling back all of them if any fails.
 
-    Batch-installer for flows that need the agent and any GUI-app
-    LaunchAgents to come up together under one "Run at login" toggle.
-    If any install raises, every service already installed in this
-    batch is rolled back so the caller doesn't end up with half a
-    system registered.
-
-    Args:
-        services: ServiceBackend instances to register. Each is
-            constructed by the caller with its own service_name, command,
-            and label_prefix — this function just sequences the install
-            calls.
-        start_now: Passed straight through to each backend's
-            ``install``. RunAtLoad on every plist tracks this flag.
+    Keeps the caller from ending up with half a system registered. Each
+    service is constructed by the caller; this function just sequences the
+    install calls and passes ``start_now`` through.
     """
     installed: list[ServiceBackend] = []
     try:
         for svc in services:
-            # Track BEFORE install so a mid-install failure (plist
-            # written but not loaded, etc.) still gets rolled back.
-            # ``uninstall`` is idempotent — safe on a service that
-            # never fully installed.
+            # Track BEFORE install so a mid-install failure (plist written
+            # but not loaded, etc.) still gets rolled back. ``uninstall`` is
+            # idempotent, safe on a service that never fully installed.
             installed.append(svc)
             svc.install(start_now=start_now)
     except Exception:

@@ -1,0 +1,1658 @@
+<!--
+SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+SPDX-License-Identifier: BUSL-1.1
+-->
+
+<script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import locaiLogo from "./lib/locai-logo.png";
+  import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
+
+  // Release-channel marker shown by the version in the sidebar foot. From
+  // VITE_CHANNEL at build time (defaults to "alpha" so unset builds still get
+  // a label); set VITE_CHANNEL=prod to drop it entirely.
+  const CHANNEL = (import.meta.env.VITE_CHANNEL ?? "alpha").toLowerCase();
+  const channelLabel =
+    CHANNEL === "prod" || CHANNEL === ""
+      ? ""
+      : `${CHANNEL.charAt(0).toUpperCase()}${CHANNEL.slice(1)}`;
+
+  // Post-install user configuration flow. The .pkg installer has
+  // already placed files and registered LaunchAgents; this wizard's
+  // job is Sign in → Models → Serving → Permissions → Finish.
+  const STEPS = [
+    { id: "sign-in", label: "Sign in" },
+    { id: "models", label: "Models" },
+    { id: "permissions", label: "Permissions" },
+    { id: "finish", label: "Finish" },
+  ] as const;
+
+  type CheckInstallResult = {
+    installed: boolean;
+    version: string | null;
+    path: string | null;
+    boot: {
+      host_app: string;
+      plugin_set: string[];
+      channel: string;
+      asset_repo: string;
+      asset_url: string | null;
+    } | null;
+    boot_error: string | null;
+    reason: string | null;
+    device_id: string | null;
+    device_name: string | null;
+    pending_version: string | null;
+  };
+
+  // Install root, loaded from Rust on mount (macOS → /Library/Locai,
+  // Linux → $HOME/.local/share/locai). Empty until the async fetch resolves;
+  // every call site gates on it so an empty root never reaches an invoke().
+  let installRoot = $state<string>("");
+
+  // OS the SA is running on ("macos" / "linux" / other). Frontend uses
+  // this to render menubar vs tray, System Settings vs systemctl, etc.
+  // Loaded from Rust on mount alongside installRoot.
+  let platform = $state<string>("");
+
+  // "splash" — check_install found a registered device: show the "already set
+  //   up" chooser (Open Preferences / Re-register / Uninstall). Default for re-runs.
+  // "wizard" — fresh install (no session) or user confirmed Re-register on the
+  //   splash. Runs sign-in → models → permissions → finish.
+  let mode = $state<"splash" | "wizard">("wizard");
+
+  // When set, completeSetup() runs `re_register` (Control DELETE + local wipe)
+  // before minting the new key, then clears this. Carrying the old id here (vs
+  // re-reading check_install at Finish) wipes the id the user saw on the splash.
+  let pendingReRegister = $state<{ deviceId: string; deviceName: string | null } | null>(null);
+
+  // Splash action UI state — one at a time, no concurrency.
+  let splashAction = $state<
+    | { kind: "idle" }
+    | { kind: "confirming"; action: "re-register" | "uninstall" }
+    | { kind: "working"; message: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  // Bootstrap runs once on mount to verify the .pkg actually
+  // installed. Failure surfaces as a full-screen error instead of
+  // letting the user step through a wizard against a broken install.
+  type Bootstrap =
+    | { kind: "checking" }
+    | { kind: "ready"; install: CheckInstallResult }
+    | { kind: "error"; message: string };
+
+  // Wire shapes mirror `DeviceCodeStart` and `SignInPollResult` in
+  // src-tauri/src/lib.rs. Access tokens never cross this boundary —
+  // they live in the Rust `SignInState`.
+  type DeviceCodeStart = {
+    user_code: string;
+    verification_uri: string;
+    verification_uri_complete: string;
+    interval: number;
+    expires_in: number;
+  };
+  type SignInPollResult =
+    | { status: "pending" }
+    | { status: "slow_down" }
+    | { status: "approved"; user_id: string; email: string; username: string }
+    | { status: "denied" }
+    | { status: "expired" }
+    | { status: "error"; message: string };
+
+  type SignIn =
+    | { kind: "idle" }
+    | { kind: "starting" }
+    | { kind: "pending"; start: DeviceCodeStart; interval: number }
+    | { kind: "approved"; email: string; username: string }
+    | { kind: "error"; message: string };
+
+  type RegisteredDevice = {
+    device_id: string;
+    api_key: string;
+    config: unknown; // AgentConfig JSON — passed opaquely back to install_agent_config
+  };
+
+  type ModelSummary = {
+    id: string;
+    display_name: string;
+    model_type: string;
+    framework: string;
+    file_extension: string;
+    size_bytes: number;
+    status: string;
+  };
+
+  type Models =
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "ready"; models: ModelSummary[]; selected: Set<string> }
+    | { kind: "error"; message: string };
+
+  type Finish =
+    | { kind: "idle" }
+    | { kind: "minting" }
+    | { kind: "registering" }
+    | { kind: "writing"; registered: RegisteredDevice }
+    | { kind: "bootstrapping"; registered: RegisteredDevice }
+    | { kind: "deploying"; registered: RegisteredDevice; done: number; total: number }
+    | {
+        kind: "done";
+        device_id: string;
+        config_path: string | null;
+        deployed_count: number;
+      }
+    | {
+        kind: "error";
+        message: string;
+        registered?: RegisteredDevice;
+        // Which completeSetup phase failed — drives the fine-print suggestion so
+        // e.g. a deploy failure isn't reported as "config couldn't be written".
+        phase?: "minting" | "registering" | "writing" | "bootstrapping" | "deploying";
+      };
+
+  let bootstrap = $state<Bootstrap>({ kind: "checking" });
+  let current = $state(0);
+  let signIn = $state<SignIn>({ kind: "idle" });
+  let models = $state<Models>({ kind: "idle" });
+  let finish = $state<Finish>({ kind: "idle" });
+  // Default on — matches the Permissions step's "quietly in the background"
+  // pitch. Either way both LaunchAgents are kickstarted on Finish.
+  let runAtLogin = $state(true);
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Lazy-load the catalog the first time the user reaches the Models step
+  // (post sign-in, so we have a JWT). No refetch on re-nav — it would lose
+  // selections and the list is stable enough for one wizard pass.
+  $effect(() => {
+    if (
+      STEPS[current].id === "models" &&
+      signIn.kind === "approved" &&
+      models.kind === "idle"
+    ) {
+      void loadModels();
+    }
+  });
+
+  // Model types this build can serve, from supported_model_types (bundle
+  // manifest plugins). Empty until resolved, and stays empty on failure so we
+  // fail closed rather than guessing a capability set.
+  let supportedTypes = $state<string[]>([]);
+
+  // Servable iff this build ships a plugin for the model's type, so
+  // an LLM-only build hides audio/other models it can't run.
+  function isServable(m: ModelSummary): boolean {
+    return supportedTypes.includes(m.model_type);
+  }
+
+  // Gemma 4 XS is the recommended default. Matched by name until
+  // Control exposes a dedicated flag. Normalise punctuation first so the real
+  // library name "Gemma 4 (X-Small)" and variants (XS, X Small) all match.
+  function isRecommended(m: ModelSummary): boolean {
+    const n = m.display_name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return n.includes("gemma4") && (n.includes("xs") || n.includes("extrasmall"));
+  }
+
+  async function loadModels() {
+    models = { kind: "loading" };
+    try {
+      try {
+        supportedTypes = await invoke<string[]>("supported_model_types");
+      } catch (e) {
+        // Fail closed: show nothing rather than guessing a capability set.
+        console.warn("supported_model_types:", e);
+      }
+      const list = await invoke<ModelSummary[]>("list_models");
+      // Servable types only; recommended first, then alphabetical.
+      const servable = list.filter(isServable).sort((a, b) => {
+        const ra = isRecommended(a);
+        const rb = isRecommended(b);
+        if (ra !== rb) return ra ? -1 : 1;
+        return a.display_name.localeCompare(b.display_name);
+      });
+      // Pre-select the recommended model so the common path is one click.
+      const selected = new Set(servable.filter(isRecommended).map((m) => m.id));
+      models = { kind: "ready", models: servable, selected };
+    } catch (e) {
+      models = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function toggleModel(id: string) {
+    if (models.kind !== "ready") return;
+    const next = new Set(models.selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    models = { ...models, selected: next };
+  }
+
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  async function runBootstrapCheck() {
+    try {
+      // Resolve the platform-appropriate install root before anything
+      // else — every downstream invoke() threads this value through.
+      installRoot = await invoke<string>("get_install_root");
+      platform = await invoke<string>("get_platform");
+      const install = await invoke<CheckInstallResult>("check_install", {
+        installRoot,
+      });
+      bootstrap = { kind: "ready", install };
+      // Already-set-up detection: if check_install pulled a device_id
+      // out of session_*.json, land on the splash first. User has to
+      // explicitly choose Re-register to enter the wizard — protects
+      // against accidental clicks from the Applications menu.
+      if (install.device_id) {
+        mode = "splash";
+      }
+    } catch (e) {
+      bootstrap = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  let unlistenReRegister: (() => void) | null = null;
+
+  onMount(() => {
+    void runBootstrapCheck();
+    // Preferences → "Re-register…" opens this window and emits this; jump
+    // straight into the re-register confirmation on the manage splash.
+    void listen("start-re-register", () => {
+      mode = "splash";
+      startReRegister();
+    }).then((un) => {
+      unlistenReRegister = un;
+    });
+    return () => {
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      unlistenReRegister?.();
+    };
+  });
+
+  async function startSignIn() {
+    // "Try again" / error retry can re-enter while a poll from the previous
+    // attempt is still armed; cancel it so we don't run two poll loops (which
+    // doubles the request rate and trips Control's slow_down).
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    signIn = { kind: "starting" };
+    try {
+      const start = await invoke<DeviceCodeStart>("sign_in_start");
+      signIn = { kind: "pending", start, interval: start.interval };
+      // Best-effort browser open. If it fails the user can still click
+      // "Open browser again" — the verification URL is always visible.
+      try {
+        await openUrl(start.verification_uri_complete);
+      } catch {
+        // ignored; button in the UI is the fallback
+      }
+      schedulePoll(start.interval);
+    } catch (e) {
+      signIn = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function schedulePoll(intervalSeconds: number) {
+    pollTimer = setTimeout(() => {
+      void runPoll();
+    }, intervalSeconds * 1000);
+  }
+
+  async function runPoll() {
+    if (signIn.kind !== "pending") return;
+    try {
+      const result = await invoke<SignInPollResult>("sign_in_poll");
+      switch (result.status) {
+        case "pending":
+          schedulePoll(signIn.interval);
+          return;
+        case "slow_down":
+          // RFC 8628 §3.5 — bump interval by 5s and keep polling.
+          signIn = { ...signIn, interval: signIn.interval + 5 };
+          schedulePoll(signIn.interval);
+          return;
+        case "approved":
+          signIn = { kind: "approved", email: result.email, username: result.username };
+          return;
+        case "denied":
+          signIn = { kind: "error", message: "Sign-in was denied. You can try again." };
+          return;
+        case "expired":
+          signIn = {
+            kind: "error",
+            message: "The sign-in request expired. Please start again.",
+          };
+          return;
+        case "error":
+          signIn = { kind: "error", message: result.message };
+          return;
+      }
+    } catch (e) {
+      signIn = { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  // Map a raw registration failure to user-facing copy. The device-limit
+  // case gets a specific hint; anything else falls back to a generic line
+  // so raw backend text never reaches the user.
+  function friendlyRegisterError(raw: string): string {
+    const s = raw.toLowerCase();
+    // Rate limiting ("too many requests"/429) is not a device-limit; classify it first.
+    if (s.includes("too many requests") || s.includes("rate limit") || s.includes("429")) {
+      return "Too many attempts right now. Wait a moment, then try again.";
+    }
+    const deviceLimit =
+      s.includes("device") &&
+      (s.includes("limit") ||
+        s.includes("maximum") ||
+        s.includes("quota") ||
+        s.includes("too many"));
+    if (deviceLimit) {
+      return "You've reached the maximum number of registered devices. Remove a device from your Locai dashboard, then try again.";
+    }
+    return "We couldn't register this device. Check your connection and try again.";
+  }
+
+  async function completeSetup() {
+    // Idempotency guard: `register_device` isn't safe to call twice — each call
+    // makes a new device on Control, so retrying after a config-write failure
+    // could blow the device cap. If one exists from a prior attempt, resume from
+    // the install_agent_config phase.
+    const already: RegisteredDevice | undefined =
+      finish.kind === "error" ? finish.registered : undefined;
+
+    // Re-register (picked on the splash): delete the old device on Control +
+    // wipe local state (session, models, pipeline state) before minting a key.
+    // Skipped when `already` is set — the retry path, where wiping would orphan
+    // the device we just created.
+    if (pendingReRegister && !already) {
+      finish = { kind: "minting" };
+      try {
+        await invoke<void>("re_register", {
+          installRoot,
+          oldDeviceId: pendingReRegister.deviceId,
+        });
+        pendingReRegister = null;
+      } catch (e) {
+        finish = {
+          kind: "error",
+          message: `Re-register cleanup failed: ${e instanceof Error ? e.message : String(e)}`,
+        };
+        return;
+      }
+    }
+
+    let registered: RegisteredDevice;
+    if (already) {
+      registered = already;
+    } else {
+      // Phase 1: mint a fresh single-use registration key. Fast in
+      // steady state; slow when Control's Cloud Run instance cold-starts.
+      finish = { kind: "minting" };
+      let registrationKey: string;
+      try {
+        registrationKey = await invoke<string>("mint_registration_key");
+      } catch (e) {
+        finish = {
+          kind: "error",
+          phase: "minting",
+          message: friendlyRegisterError(e instanceof Error ? e.message : String(e)),
+        };
+        return;
+      }
+
+      // Phase 2: derive the device name, then redeem the key. Redemption is the
+      // slow one (Control creates the row, provisions Zenoh creds, returns config).
+      let deviceName: string;
+      try {
+        deviceName = await invoke<string>("suggest_device_name");
+      } catch (e) {
+        finish = {
+          kind: "error",
+          phase: "registering",
+          message: e instanceof Error ? e.message : String(e),
+        };
+        return;
+      }
+
+      finish = { kind: "registering" };
+      try {
+        registered = await invoke<RegisteredDevice>("register_device", {
+          deviceName,
+          registrationKey,
+        });
+      } catch (e) {
+        finish = {
+          kind: "error",
+          phase: "registering",
+          message: friendlyRegisterError(e instanceof Error ? e.message : String(e)),
+        };
+        return;
+      }
+    }
+
+    // Phase 3: write the AgentConfig session file the runtime will
+    // read on its next start.
+    finish = { kind: "writing", registered };
+    let configPath: string | null = null;
+    try {
+      configPath = await invoke<string>("install_agent_config", {
+        installRoot,
+        config: registered.config,
+      });
+    } catch (e) {
+      // Register succeeded on Control but we couldn't lay the config
+      // down locally — flag it distinctly so the user knows the device
+      // exists on the server side either way.
+      finish = {
+        kind: "error",
+        phase: "writing",
+        message: e instanceof Error ? e.message : String(e),
+        registered,
+      };
+      return;
+    }
+
+    // Phase 4: bootstrap the LaunchAgents (register + kickstart). Best-effort —
+    // on failure the user can still launch from Applications and kickstart recovers.
+    finish = { kind: "bootstrapping", registered };
+    try {
+      await invoke("install_launchagents", {
+        installRoot,
+        runAtLogin,
+      });
+    } catch (e) {
+      console.warn("install_launchagents failed:", e);
+    }
+
+    // Phase 5: queue deploys for selected models, in parallel (independent
+    // POST + Zenoh dispatch each, so ~1 RTT not N). Failures don't roll back.
+    // Capture the narrowed value: `models` is reactive $state, so TS widens it
+    // back to the union inside the filter closure.
+    const ready = models.kind === "ready" ? models : null;
+    const selected = ready
+      ? ready.models.filter((m) => ready.selected.has(m.id))
+      : [];
+    finish = {
+      kind: "deploying",
+      registered,
+      done: 0,
+      total: selected.length,
+    };
+    // Pre-register each selected model "queued 0%" with the local runtime so the
+    // app's Models panel shows all rows from t=0 (the runtime deploys
+    // serially otherwise). Best-effort loopback POST; the runtime registers the
+    // model itself once the download starts.
+    await Promise.allSettled(
+      selected.map((m) =>
+        invoke<void>("mark_deployment_pending", {
+          pipelineId: m.id,
+          modelName: m.display_name,
+        })
+      )
+    );
+    // Wait until the agent's Zenoh transport is connected, else Control's
+    // DEPLOY_MODEL races the subscriber setup and is dropped (deploy accepted,
+    // no download). Non-fatal on timeout — queued rows stay, deploy still works later.
+    try {
+      await invoke<void>("wait_for_agent_ready");
+    } catch (e) {
+      console.warn("wait_for_agent_ready timed out; proceeding anyway:", e);
+    }
+    // Tick finish.done as each dispatch settles so the "N of M" counter
+    // reflects progress instead of jumping from 0 to N at the end.
+    const results = await Promise.allSettled(
+      selected.map((m) =>
+        invoke<string>("deploy_model", {
+          deviceId: registered.device_id,
+          modelId: m.id,
+        }).finally(() => {
+          if (finish.kind === "deploying") {
+            finish = { ...finish, done: finish.done + 1 };
+          }
+        })
+      )
+    );
+    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    const deployedCount = results.length - failures.length;
+
+    if (failures.length > 0) {
+      // Surface the first failure to keep the error message concise;
+      // subsequent failures are usually the same root cause (auth,
+      // network) and repeating them adds noise.
+      const first = failures[0].reason;
+      finish = {
+        kind: "error",
+        phase: "deploying",
+        message: `Deploy failed for ${failures.length} of ${selected.length} models: ${
+          first instanceof Error ? first.message : String(first)
+        }`,
+        registered,
+      };
+      return;
+    }
+
+    finish = {
+      kind: "done",
+      device_id: registered.device_id,
+      config_path: configPath,
+      deployed_count: deployedCount,
+    };
+  }
+
+  // Finish onboarding: just dismiss this window and leave the app in the tray.
+  // Preferences is NOT auto-opened — the user reaches it from the tray.
+  async function completeOnboarding() {
+    try {
+      await invoke<void>("finish_setup");
+    } catch (e) {
+      console.warn("finish_setup:", e);
+    }
+  }
+
+  async function openPreferences() {
+    splashAction = { kind: "working", message: "Opening Preferences…" };
+    try {
+      // Explicit "Open Preferences" (already-set-up splash): reveal prefs and
+      // dismiss this window; the tray keeps running (one app now).
+      await invoke<void>("open_preferences_window");
+    } catch (e) {
+      splashAction = {
+        kind: "error",
+        message: `Couldn't open Preferences: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  }
+
+  function startReRegister() {
+    splashAction = { kind: "confirming", action: "re-register" };
+  }
+
+  function versionGt(a: string, b: string): boolean {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0;
+      const y = pb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+
+  // A deferred installer re-run staged a newer version under pending/; the splash
+  // offers to apply it. Null when nothing newer is staged.
+  const pendingUpdate = $derived(
+    bootstrap.kind === "ready" &&
+      bootstrap.install.pending_version != null &&
+      bootstrap.install.version != null &&
+      versionGt(bootstrap.install.pending_version, bootstrap.install.version)
+      ? bootstrap.install.pending_version
+      : null,
+  );
+
+  async function applyPending() {
+    splashAction = { kind: "working", message: `Updating to v${pendingUpdate ?? ""}…` };
+    try {
+      // The staged installer applies detached and restarts the app onto the new
+      // version, so there's nothing more to do here on success.
+      await invoke("apply_pending_update");
+    } catch (e) {
+      splashAction = {
+        kind: "error",
+        message: `Update failed: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  }
+
+  function startUninstall() {
+    splashAction = { kind: "confirming", action: "uninstall" };
+  }
+
+  function cancelConfirm() {
+    splashAction = { kind: "idle" };
+  }
+
+  async function confirmReRegister() {
+    if (bootstrap.kind !== "ready" || !bootstrap.install.device_id) return;
+    // Stash the old identity for completeSetup() — it invokes
+    // `re_register` (Control DELETE + local wipe) before minting a
+    // fresh registration key. Wizard runs normally afterwards.
+    pendingReRegister = {
+      deviceId: bootstrap.install.device_id,
+      deviceName: bootstrap.install.device_name,
+    };
+    splashAction = { kind: "idle" };
+    mode = "wizard";
+  }
+
+  async function confirmUninstall() {
+    splashAction = { kind: "working", message: "Removing Locai Link…" };
+    try {
+      await invoke<void>("launch_uninstaller", { installRoot });
+      // Uninstaller runs as a transient user-scope service, so it survives us
+      // exiting. Quit the app; the uninstaller tears down the rest.
+      await invoke<void>("exit_app");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Dismissing the admin prompt isn't a failure — return to the splash.
+      if (msg === "cancelled") {
+        splashAction = { kind: "idle" };
+      } else {
+        splashAction = { kind: "error", message: `Uninstall failed: ${msg}` };
+      }
+    }
+  }
+
+  async function reopenBrowser() {
+    if (signIn.kind !== "pending") return;
+    try {
+      await openUrl(signIn.start.verification_uri_complete);
+    } catch {
+      // no-op; the URL text is on screen for manual copy
+    }
+  }
+
+  function next() {
+    if (current < STEPS.length - 1) current += 1;
+  }
+  function back() {
+    if (current > 0) current -= 1;
+  }
+  function statusOf(idx: number): "done" | "current" | "pending" {
+    if (idx < current) return "done";
+    if (idx === current) return "current";
+    return "pending";
+  }
+
+  // The Sign-in step is the only one that gates Continue on external
+  // state. All later steps are placeholders that let Continue through.
+  const canContinue = $derived.by(() => {
+    if (STEPS[current].id === "sign-in") return signIn.kind === "approved";
+    return current < STEPS.length - 1;
+  });
+</script>
+
+{#if bootstrap.kind !== "ready"}
+  <div class="splash">
+    <div class="splash__mark">Loc<span class="brand__accent">ai</span> Link</div>
+    {#if bootstrap.kind === "checking"}
+      <div class="splash__msg">Checking installation…</div>
+    {:else}
+      <div class="splash__msg splash__msg--error">
+        Setup couldn't verify the install.
+      </div>
+      <div class="splash__detail">{bootstrap.message}</div>
+    {/if}
+  </div>
+{:else if mode === "splash" && bootstrap.install.device_id}
+  <!-- ============ ALREADY-INSTALLED CHOOSER ============ -->
+  <!-- Reuses the wizard's sidebar + stage layout so this surface matches the
+       rest of the SA; the steps list is dropped (no step machine here). -->
+  <main class="wizard">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand__tab">SETUP ASSISTANT</div>
+        <img class="brand__logo" src={locaiLogo} alt="Locai" />
+      </div>
+      {#if bootstrap.install.installed && bootstrap.install.version}
+        <div class="rail-foot">
+          v{bootstrap.install.version}{channelLabel ? ` · ${channelLabel}` : ""}
+        </div>
+      {/if}
+    </aside>
+
+    <section class="content">
+      <div class="content__body">
+        <p class="eyebrow">MANAGE</p>
+        <h1>Already set up on this device</h1>
+        <p class="lead">
+          {#if bootstrap.install.device_name}
+            <strong>{bootstrap.install.device_name}</strong>
+            <span class="mono chooser__uuid">· {bootstrap.install.device_id}</span>
+          {:else}
+            <span class="mono">{bootstrap.install.device_id}</span>
+          {/if}
+        </p>
+
+        {#if splashAction.kind === "confirming" && splashAction.action === "re-register"}
+          <div class="signin-block">
+            <p class="lead">
+              This removes the current device from Control and clears
+              local models. You'll sign in and re-register from scratch.
+              The installed app stays.
+            </p>
+            <div class="row">
+              <button class="btn btn--ghost" onclick={cancelConfirm}>Cancel</button>
+              <button class="btn btn--danger" onclick={confirmReRegister}>Re-register</button>
+            </div>
+          </div>
+        {:else if splashAction.kind === "confirming" && splashAction.action === "uninstall"}
+          <div class="signin-block">
+            <p class="lead">
+              This stops Locai Link, removes it from your applications,
+              and deletes local models. The device row on Control stays
+              — remove it from Control if you no longer want it there.
+            </p>
+            <div class="row">
+              <button class="btn btn--ghost" onclick={cancelConfirm}>Cancel</button>
+              <button class="btn btn--danger" onclick={confirmUninstall}>Uninstall</button>
+            </div>
+          </div>
+        {:else if splashAction.kind === "working"}
+          <div class="signin-block">
+            <div class="row">
+              <div class="spinner"></div>
+              <span>{splashAction.message}</span>
+            </div>
+          </div>
+        {:else}
+          {#if splashAction.kind === "error"}
+            <div class="signin-block signin-block--error">
+              {splashAction.message}
+            </div>
+          {/if}
+          <div class="chooser__actions">
+            {#if pendingUpdate}
+              <button class="btn btn--primary btn--wide" onclick={applyPending}>
+                Update to v{pendingUpdate}
+              </button>
+            {/if}
+            <button
+              class="btn {pendingUpdate ? 'btn--ghost' : 'btn--primary'} btn--wide"
+              onclick={openPreferences}
+            >
+              Preferences
+            </button>
+            <button class="btn btn--ghost btn--wide" onclick={startUninstall}>
+              Uninstall…
+            </button>
+          </div>
+        {/if}
+      </div>
+    </section>
+  </main>
+{:else}
+  <main class="wizard">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand__tab">SETUP ASSISTANT</div>
+        <img class="brand__logo" src={locaiLogo} alt="Locai" />
+      </div>
+
+      <ol class="steps">
+        {#each STEPS as step, i (step.id)}
+          <li class="step step--{statusOf(i)}">
+            <span class="step__num">{i + 1}</span>
+            <span class="step__label">{step.label}</span>
+          </li>
+        {/each}
+      </ol>
+
+      {#if bootstrap.install.installed && bootstrap.install.version}
+        <div class="rail-foot">
+          v{bootstrap.install.version}{channelLabel ? ` · ${channelLabel}` : ""}
+        </div>
+      {/if}
+    </aside>
+
+    <section class="content">
+      <div class="content__body">
+        {#if STEPS[current].id === "sign-in"}
+          <p class="eyebrow">STEP 1 · CONNECT</p>
+          <h1>Sign in to Locai</h1>
+          <p class="lead">
+            We'll open your browser to sign in. Approve this device
+            there, and this window will pick up automatically.
+          </p>
+
+          {#if signIn.kind === "idle"}
+            <button class="btn btn--primary btn--wide btn--with-logo" onclick={startSignIn}>
+              <span>Sign in with</span>
+              <img class="btn__logo" src={locaiLogo} alt="Locai" />
+            </button>
+          {:else if signIn.kind === "starting"}
+            <div class="signin-block">
+              <div class="spinner"></div>
+              <div class="signin-block__msg">Requesting a sign-in code…</div>
+            </div>
+          {:else if signIn.kind === "pending"}
+            <div class="signin-block">
+              <p class="field__label">YOUR CODE</p>
+              <div class="user-code">{signIn.start.user_code}</div>
+              <p class="fine-print">
+                If the browser didn't open, visit
+                <span class="mono">{signIn.start.verification_uri}</span>
+                and enter the code above.
+              </p>
+              <div class="row">
+                <button class="btn btn--ghost" onclick={reopenBrowser}>
+                  Open browser again
+                </button>
+                <div class="waiting">
+                  <div class="spinner spinner--sm"></div>
+                  <span>Waiting for approval…</span>
+                </div>
+              </div>
+            </div>
+          {:else if signIn.kind === "approved"}
+            <div class="signin-block">
+              <p class="field__label">SIGNED IN</p>
+              <div class="approved">
+                <span class="checkmark">✓</span>
+                <div>
+                  <div class="approved__name">{signIn.username}</div>
+                  <div class="approved__email">{signIn.email}</div>
+                </div>
+              </div>
+            </div>
+          {:else if signIn.kind === "error"}
+            <div class="signin-block">
+              <div class="signin-block__msg signin-block__msg--error">
+                {signIn.message}
+              </div>
+              <button class="btn btn--primary" onclick={startSignIn}>Try again</button>
+            </div>
+          {/if}
+        {:else if STEPS[current].id === "models"}
+          <p class="eyebrow">STEP 2 · MODELS</p>
+          <h1>Choose models to prefetch</h1>
+          <p class="lead">
+            Pick which models to send to this device. You can change the
+            selection later from Control.
+          </p>
+
+          {#if models.kind === "loading"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Loading your models…</span>
+              </div>
+            </div>
+          {:else if models.kind === "error"}
+            <div class="signin-block">
+              <div class="signin-block__msg signin-block__msg--error">
+                {models.message}
+              </div>
+              <button class="btn btn--ghost" onclick={loadModels}>Retry</button>
+              <p class="fine-print">
+                You can continue without a selection — models can be
+                deployed from Control at any time.
+              </p>
+            </div>
+          {:else if models.kind === "ready"}
+            {#if models.models.length === 0}
+              <div class="signin-block">
+                <div class="signin-block__msg">
+                  You don't have any models on your account yet. Add
+                  models from Control, then come back — or continue and
+                  set them up later.
+                </div>
+              </div>
+            {:else}
+              <ul class="model-list">
+                {#each models.models as m (m.id)}
+                  <li class="model-row">
+                    <label class="model-row__label">
+                      <input
+                        type="checkbox"
+                        checked={models.selected.has(m.id)}
+                        onchange={() => toggleModel(m.id)}
+                      />
+                      <div class="model-row__body">
+                        <div class="model-row__name">
+                          <span class="model-row__name-text">{m.display_name}</span>
+                          {#if isRecommended(m)}
+                            <span class="model-row__badge">Recommended</span>
+                          {/if}
+                        </div>
+                        <div class="model-row__meta">
+                          <span>{m.model_type}</span>
+                          <span>·</span>
+                          <span>{m.framework}</span>
+                          <span>·</span>
+                          <span>{formatBytes(m.size_bytes)}</span>
+                        </div>
+                      </div>
+                    </label>
+                  </li>
+                {/each}
+              </ul>
+              <p class="fine-print">
+                {models.selected.size} of {models.models.length} selected
+              </p>
+            {/if}
+          {/if}
+        {:else if STEPS[current].id === "permissions"}
+          <p class="eyebrow">STEP 3 · PERMISSIONS</p>
+          <h1>Runs quietly in the background</h1>
+          <p class="lead">
+            After setup, Locai Link runs in the background and appears
+            in your {platform === "linux" ? "system tray" : "menubar"}.
+          </p>
+          <label class="toggle-row">
+            <input
+              type="checkbox"
+              bind:checked={runAtLogin}
+            />
+            <div class="toggle-copy">
+              <span class="toggle-title">Start Locai Link at login</span>
+              <span class="toggle-hint">
+                Auto-start the agent and {platform === "linux" ? "tray" : "menubar"} app when you log in.
+                Uncheck to launch manually from {platform === "linux" ? "your Applications menu" : "Applications"}.
+              </span>
+            </div>
+          </label>
+          <p class="fine-print">
+            {#if platform === "linux"}
+              You can change this at any time from Locai Link Preferences.
+            {:else}
+              You can change this later in <strong>System Settings →
+              General → Login Items &amp; Extensions</strong>.
+            {/if}
+          </p>
+        {:else if STEPS[current].id === "finish"}
+          <p class="eyebrow">STEP 4 · FINISH</p>
+          <h1>Register this device</h1>
+          <p class="lead">
+            Enrol this machine on your Locai organisation and drop the
+            initial config in place. The agent picks it up on next start.
+          </p>
+
+          {#if finish.kind === "idle"}
+            <button
+              class="btn btn--primary btn--wide"
+              onclick={completeSetup}
+            >
+              Complete setup
+            </button>
+          {:else if finish.kind === "minting"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Requesting registration key…</span>
+              </div>
+            </div>
+          {:else if finish.kind === "registering"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Registering device with Control…</span>
+              </div>
+              <p class="fine-print">
+                First-time registration can take a few seconds while
+                Control provisions credentials for this device.
+              </p>
+            </div>
+          {:else if finish.kind === "writing"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Writing agent config…</span>
+              </div>
+              <p class="fine-print">
+                Device ID <span class="mono">{finish.registered.device_id}</span>
+              </p>
+            </div>
+          {:else if finish.kind === "bootstrapping"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>Setting up background services…</span>
+              </div>
+            </div>
+          {:else if finish.kind === "deploying"}
+            <div class="signin-block">
+              <div class="row">
+                <div class="spinner"></div>
+                <span>
+                  Queueing models on this device
+                  ({finish.done} of {finish.total})…
+                </span>
+              </div>
+            </div>
+          {:else if finish.kind === "done"}
+            <div class="signin-block">
+              <div class="approved">
+                <span class="checkmark">✓</span>
+                <div>
+                  <div class="approved__name">All set</div>
+                  <div class="approved__email">
+                    Device <span class="mono">{finish.device_id}</span>
+                  </div>
+                </div>
+              </div>
+              {#if finish.config_path}
+                <p class="fine-print">
+                  Config written to <span class="mono">{finish.config_path}</span>
+                </p>
+              {/if}
+              {#if finish.deployed_count > 0}
+                <p class="fine-print">
+                  Queued {finish.deployed_count} model{finish.deployed_count === 1 ? "" : "s"} for
+                  this device. The agent will download them on next start.
+                </p>
+              {/if}
+              <p class="fine-print">
+                Locai Link is now running in your {platform === "linux" ? "system tray" : "menubar"}.
+                You can close this window.
+              </p>
+            </div>
+          {:else if finish.kind === "error"}
+            <div class="signin-block">
+              <div class="signin-block__msg signin-block__msg--error">
+                {finish.message}
+              </div>
+              {#if finish.phase === "writing" && finish.registered}
+                <p class="fine-print">
+                  The device was registered on Control
+                  (<span class="mono">{finish.registered.device_id}</span>)
+                  but the local config couldn't be written. You can
+                  re-run this step or hand the config off manually.
+                </p>
+              {:else if finish.phase === "deploying" && finish.registered}
+                <p class="fine-print">
+                  The device was registered on Control
+                  (<span class="mono">{finish.registered.device_id}</span>)
+                  and the config is in place — only the model deploy step
+                  failed. You can retry, or deploy the models from Control
+                  later.
+                </p>
+              {/if}
+              <button
+                class="btn btn--primary"
+                onclick={completeSetup}
+              >
+                Try again
+              </button>
+            </div>
+          {/if}
+        {/if}
+      </div>
+
+      <footer class="bar">
+        <button class="btn btn--ghost" onclick={back} disabled={current === 0}>Go Back</button>
+        <!-- Continue drives the wizard forward; on the last step it's replaced
+             by Complete, which dismisses this window and leaves the app in the
+             tray (Preferences is NOT auto-opened). Both never render together. -->
+        {#if current < STEPS.length - 1}
+          <button
+            class="btn btn--primary"
+            onclick={next}
+            disabled={!canContinue}
+          >
+            Continue
+          </button>
+        {:else if finish.kind === "done"}
+          <button
+            class="btn btn--primary"
+            onclick={completeOnboarding}
+          >
+            Complete
+          </button>
+        {/if}
+      </footer>
+    </section>
+  </main>
+{/if}
+
+<style>
+  /* Global reset (border-box, body margin, hidden scrollbars) + wizard shell
+     layout live in setup.css so they apply without Svelte scoping quirks. */
+
+  .wizard {
+    display: flex;
+    flex-direction: row;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--color-paper);
+    color: var(--color-text);
+    font-family: var(--font-body), var(--font-system);
+  }
+
+  /* --- Bootstrap splash ---------------------------------------------------- */
+
+  .splash {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-16);
+    background: var(--color-surface-dark-rail);
+    color: var(--color-text-on-dark);
+    font-family: var(--font-body), var(--font-system);
+    padding: var(--space-34);
+    text-align: center;
+  }
+  .splash__mark {
+    font-family: var(--font-display), var(--font-system);
+    font-weight: var(--weight-extrabold);
+    font-size: 28px;
+    letter-spacing: var(--tracking-display);
+    line-height: 1;
+  }
+  .splash__msg {
+    font-size: 14px;
+    color: var(--color-text-on-dark-70);
+  }
+  .splash__msg--error {
+    color: var(--color-status-conflict);
+  }
+  .splash__detail {
+    font-family: var(--font-mono), monospace;
+    font-size: 12px;
+    color: var(--color-text-on-dark-45);
+    max-width: 60ch;
+    word-break: break-word;
+  }
+  /* Chooser lives inside the wizard shell — stack the 3 lifecycle
+     actions vertically, matching the width of the Continue/Sign-in
+     buttons in the normal wizard flow. */
+  .chooser__actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 320px;
+    margin-top: var(--space-16);
+  }
+  .chooser__uuid {
+    color: var(--color-text-muted);
+    font-size: 12px;
+  }
+
+  /* --- Sidebar (dark rail) ------------------------------------------------- */
+
+  .sidebar {
+    width: 200px;
+    flex-shrink: 0;
+    padding: var(--space-26) var(--space-22) var(--space-22);
+    background: var(--color-surface-dark-rail);
+    color: var(--color-text-on-dark);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-30);
+  }
+
+  .brand__tab {
+    font-family: var(--font-mono), monospace;
+    font-size: 10px;
+    letter-spacing: var(--tracking-mono-md);
+    color: var(--color-text-on-dark-45);
+    text-transform: uppercase;
+    margin-bottom: var(--space-8);
+  }
+
+  .brand__logo {
+    /* Black-on-light source PNG; sidebar is near-black, so invert(1) to render
+       it legibly (white "Loc" + white pill, black inner text). Height matches
+       the previous 22px text mark's visual weight. */
+    height: 32px;
+    width: auto;
+    display: block;
+    filter: invert(1);
+  }
+
+  /* Still used by the splash mark (below) and the "Sign in with Locai"
+     button — a green pill wrapping the "ai" letters. Kept alongside
+     the new sidebar logo image so those surfaces retain the accent. */
+  .brand__accent {
+    background: var(--color-primary-bright);
+    color: var(--color-ink);
+    padding: 0 4px;
+    border-radius: var(--radius-xs);
+    margin: 0 1px;
+  }
+
+  .steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-14);
+  }
+
+  .step {
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    font-size: 14px;
+    font-weight: var(--weight-medium);
+    color: var(--color-text-on-dark-55);
+  }
+
+  .step__num {
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-pill);
+    border: 1.5px solid var(--color-text-on-dark-45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-on-dark-55);
+    flex-shrink: 0;
+  }
+
+  .step--current {
+    color: var(--color-text-on-dark);
+  }
+  .step--current .step__num,
+  .step--done .step__num {
+    background: var(--color-primary-bright);
+    border-color: var(--color-primary-bright);
+    color: var(--color-ink);
+  }
+  .step--done {
+    color: var(--color-text-on-dark-55);
+  }
+
+  .rail-foot {
+    margin-top: auto;
+    font-family: var(--font-mono), monospace;
+    font-size: 10px;
+    letter-spacing: var(--tracking-mono-md);
+    color: var(--color-text-on-dark-45);
+  }
+
+  /* --- Content pane -------------------------------------------------------- */
+
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-34);
+    gap: var(--space-22);
+    min-width: 0;
+  }
+
+  .content__body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-16);
+    overflow-y: auto;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono), monospace;
+    font-size: 11px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-mono-md);
+    color: var(--color-primary);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--font-display), var(--font-system);
+    font-weight: var(--weight-extrabold);
+    font-size: 26px;
+    letter-spacing: var(--tracking-display);
+    color: var(--color-text-strong);
+    margin: 0;
+  }
+
+  .lead {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--color-text-secondary);
+    margin: 0;
+    max-width: 46ch;
+  }
+
+  .fine-print {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--color-text-muted);
+    margin: var(--space-8) 0 0 0;
+    max-width: 46ch;
+  }
+
+  /* --- Sign-in surfaces --------------------------------------------------- */
+
+  .signin-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-12);
+    max-width: 32rem;
+  }
+  .signin-block__msg {
+    font-size: 13px;
+    color: var(--color-text-secondary);
+  }
+  .signin-block__msg--error {
+    color: var(--color-status-conflict);
+  }
+
+  .user-code {
+    font-family: var(--font-mono), monospace;
+    font-size: 28px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.24em;
+    color: var(--color-text-strong);
+    background: var(--color-surface-cream);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    padding: 14px 20px;
+    text-align: center;
+    user-select: all;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-16);
+    flex-wrap: wrap;
+  }
+  .waiting {
+    display: flex;
+    align-items: center;
+    gap: var(--space-8);
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .approved {
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    padding: var(--space-12) var(--space-14);
+    background: var(--color-surface-tint-green-2);
+    border: 1px solid var(--color-border-green-tint);
+    border-radius: var(--radius-md);
+  }
+  .checkmark {
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-primary-bright);
+    color: var(--color-ink);
+    border-radius: var(--radius-pill);
+    font-weight: var(--weight-bold);
+  }
+  .approved__name {
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-strong);
+  }
+  .approved__email {
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--color-border-strong);
+    border-top-color: var(--color-primary);
+    border-radius: var(--radius-pill);
+    animation: locaiSpin 0.9s linear infinite;
+  }
+  .spinner--sm {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+  }
+
+  .mono {
+    font-family: var(--font-mono), monospace;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    word-break: break-all;
+  }
+
+  .btn--wide {
+    align-self: flex-start;
+    padding: 10px 22px;
+    font-size: 14px;
+  }
+
+  /* Sign-in button: inline the same brand logo the sidebar uses, sized
+     to the button text baseline. */
+  .btn--with-logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn__logo {
+    height: 16px;
+    width: auto;
+    display: block;
+  }
+
+  /* --- Model catalog ------------------------------------------------------ */
+
+  .model-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    max-width: 40rem;
+  }
+  .model-row {
+    border: 1px solid var(--color-border-hairline);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-cream-alt);
+  }
+  .model-row:hover {
+    border-color: var(--color-border-strong);
+  }
+  .model-row__label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    padding: var(--space-10) var(--space-12);
+    cursor: pointer;
+    width: 100%;
+  }
+  /* Custom checkbox — appearance:none so it renders identically on
+     webkit2gtk and WKWebView, in light and dark. Colors come from tokens
+     that flip with the theme, so no per-mode overrides are needed. */
+  :global(input[type="checkbox"]) {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    flex-shrink: 0;
+    cursor: pointer;
+    border: 1.5px solid var(--color-border-checkbox-off);
+    border-radius: var(--radius-checkbox);
+    background: var(--color-surface);
+    transition: background var(--motion-hover) var(--easing-standard),
+                border-color var(--motion-hover) var(--easing-standard);
+  }
+  :global(input[type="checkbox"]:checked) {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  /* appearance:none drops the native focus ring; restore a visible one so
+     keyboard users can see which control has focus. */
+  :global(input[type="checkbox"]:focus-visible) {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  /* Checkmark — a rotated border shown only when checked. The on-dark
+     token stays light in both themes, so it reads on the green fill. */
+  :global(input[type="checkbox"]:checked)::after {
+    content: "";
+    position: absolute;
+    left: 4.5px;
+    top: 1px;
+    width: 4px;
+    height: 8px;
+    border: solid var(--color-text-on-dark);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  .model-row__body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .model-row__name {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    min-width: 0;
+    font-size: 13px;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-strong);
+  }
+  .model-row__name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .model-row__badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm, 4px);
+    background: var(--color-surface-tint-green-3, #eaf9f1);
+    color: var(--color-primary-pressed, #00a852);
+  }
+  .model-row__meta {
+    display: flex;
+    gap: var(--space-6);
+    font-family: var(--font-mono), monospace;
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-12);
+    padding: var(--space-10) var(--space-12);
+    border: 1px solid var(--color-border-hairline);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-cream-alt);
+    max-width: 40rem;
+    cursor: pointer;
+    margin: var(--space-8) 0 var(--space-12);
+  }
+  .toggle-row:hover {
+    border-color: var(--color-border-strong);
+  }
+  .toggle-row input[type="checkbox"] {
+    margin-top: 2px;
+  }
+  .toggle-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .toggle-title {
+    font-size: 13px;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-strong);
+  }
+  .toggle-hint {
+    font-size: 12px;
+    color: var(--color-text-muted);
+  }
+
+  /* --- Sign-in form (legacy) --------------------------------------------- */
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    max-width: 32rem;
+  }
+
+  .field__label {
+    font-family: var(--font-mono), monospace;
+    font-size: 10px;
+    letter-spacing: var(--tracking-mono-md);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+  }
+
+  .field__input {
+    font-family: var(--font-body), var(--font-system);
+    font-size: 14px;
+    padding: 10px 14px;
+    border-radius: var(--radius-input);
+    border: 1px solid var(--color-border-strong);
+    background: var(--color-surface);
+    color: var(--color-text-strong);
+  }
+  .field__input:focus {
+    outline: none;
+    border-color: var(--color-primary-bright);
+    box-shadow: 0 0 0 3px rgba(0, 210, 106, 0.15);
+  }
+
+  /* --- Footer bar --------------------------------------------------------- */
+
+  .bar {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-10);
+    border-top: 1px solid var(--color-border-hairline);
+    padding-top: var(--space-16);
+  }
+
+  .btn {
+    font-family: var(--font-body), var(--font-system);
+    font-size: 13px;
+    font-weight: var(--weight-semibold);
+    padding: 8px 18px;
+    border-radius: var(--radius-control);
+    cursor: pointer;
+    transition:
+      background var(--motion-hover) var(--easing-out),
+      border-color var(--motion-hover) var(--easing-out);
+  }
+
+  .btn--primary {
+    background: var(--color-primary);
+    color: var(--color-text-on-dark);
+    border: 1px solid var(--color-primary-pressed);
+    box-shadow: var(--shadow-button-sm);
+  }
+  .btn--primary:hover:not(:disabled) {
+    background: var(--color-primary-bright);
+  }
+  .btn--primary:disabled {
+    background: var(--color-text-disabled);
+    border-color: var(--color-text-disabled);
+    cursor: not-allowed;
+  }
+
+  .btn--ghost {
+    background: var(--color-paper);
+    color: var(--color-text-strong);
+    border: 1px solid var(--color-border-input);
+  }
+  .btn--ghost:hover:not(:disabled) {
+    background: var(--color-surface-hover);
+  }
+  .btn--ghost:disabled {
+    color: var(--color-text-disabled);
+    border-color: var(--color-border-hairline);
+    cursor: not-allowed;
+  }
+</style>

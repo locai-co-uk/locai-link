@@ -391,6 +391,17 @@ def test_deploy_model_overlap_rejected_same_pipeline(empty_agent, mocker, tmp_pa
     _await_deploys(empty_agent)
 
 
+def test_download_lock_is_shared_per_model_name(empty_agent):
+    """Concurrent deploys of the SAME target file must share one download lock so
+    they serialize instead of racing the `.partial` rename (the smol/smol3 bug);
+    different files get independent locks."""
+    a1 = empty_agent._download_lock_for("smol.gguf")
+    a2 = empty_agent._download_lock_for("smol.gguf")
+    b = empty_agent._download_lock_for("other.gguf")
+    assert a1 is a2, "same model_name must map to the same lock"
+    assert a1 is not b, "different model_name must map to different locks"
+
+
 def test_cancel_deploy_interrupts_download(empty_agent, mocker, tmp_path, monkeypatch):
     """CANCEL_DEPLOY breaks the chunk loop, deletes .partial, reports cancelled."""
     monkeypatch.chdir(tmp_path)

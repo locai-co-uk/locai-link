@@ -31,11 +31,14 @@ fi
 
 # --- 1. Stop + disable user services (best-effort) --------------------
 # `disable --now` stops and prevents auto-start in one call. Failures are
-# non-fatal — just ensure nothing's running before we delete the binary.
+# non-fatal; just ensure nothing's running before we delete the binary.
 systemctl --user disable --now locai-link-companion.service 2>/dev/null || true
+# LEGACY: pre-merge separate agent unit (the merged binary supervises now).
 systemctl --user disable --now locai-link-agent.service     2>/dev/null || true
 
 # Belt-and-braces: kill anything still running under our binary paths.
+pkill -f "$INSTALL_ROOT/locai-link"      2>/dev/null || true
+# LEGACY: pre-merge separate companion binary + standalone setup-assistant.
 pkill -f "$INSTALL_ROOT/companion"       2>/dev/null || true
 pkill -f "$INSTALL_ROOT/setup-assistant" 2>/dev/null || true
 
@@ -51,6 +54,7 @@ systemctl --user daemon-reload
 # --- 3. Remove .desktop menu entries ----------------------------------
 
 rm -f "$DESKTOP_DIR/locai-link.desktop"
+# LEGACY-SA-CLEANUP: pre-merge standalone onboarding menu entry.
 rm -f "$DESKTOP_DIR/locai-setup-assistant.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then

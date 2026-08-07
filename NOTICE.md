@@ -1,6 +1,6 @@
 Loc.ai:Link
-Copyright 2026 Loc.ai Ltd
-This product includes software developed at Loc.ai Ltd (https://www.locai.co.uk).
+Copyright 2026 Loc.ai Ltd.
+This product includes software developed at Loc.ai Ltd. (https://www.locai.co.uk).
 
 ### THIRD-PARTY SOFTWARE NOTICES
 
@@ -34,39 +34,47 @@ in the `LICENSES-external/` directory and the `THIRDPARTYLICENSES` file.
    License: MPL 2.0
    Copyright (c) 2015 Kenneth Reitz
 
+7. packaging (github.com/pypa/packaging)
+   License: Apache 2.0 OR BSD 2-Clause
+   Copyright (c) Donald Stufft and individual contributors
+
 #### Development dependencies
 
-7. Ruff (github.com/astral-sh/ruff)
+8. Ruff (github.com/astral-sh/ruff)
    License: MIT
    Copyright (c) 2022 Charlie Marsh
 
-8. pytest (github.com/pytest-dev/pytest)
+9. pytest (github.com/pytest-dev/pytest)
    License: MIT
    Copyright (c) 2004 Holger Krekel and others
 
-9. pytest-mock (github.com/pytest-dev/pytest-mock)
-   License: MIT
-   Copyright (c) 2014 Bruno Oliveira
+10. pytest-mock (github.com/pytest-dev/pytest-mock)
+    License: MIT
+    Copyright (c) 2014 Bruno Oliveira
 
-10. pytest-cov (github.com/pytest-dev/pytest-cov)
+11. pytest-cov (github.com/pytest-dev/pytest-cov)
     License: MIT
     Copyright (c) 2010 Meme Dough
 
-11. MkDocs (github.com/mkdocs/mkdocs)
+12. MkDocs (github.com/mkdocs/mkdocs)
     License: BSD 2-Clause
     Copyright (c) 2014-present, Tom Christie
 
-12. Material for MkDocs (github.com/squidfunk/mkdocs-material)
+13. Material for MkDocs (github.com/squidfunk/mkdocs-material)
     License: MIT
     Copyright (c) 2016-2026 Martin Donath
 
-13. mkdocstrings (github.com/mkdocstrings/mkdocstrings)
+14. mkdocstrings (github.com/mkdocstrings/mkdocstrings)
     License: ISC
     Copyright (c) 2019, Timothée Mazzucotelli
 
 #### Plugins
 
 Plugins shipped under `plugins/` (e.g. `language_model`, `audio_transcriber`)
-bundle and download additional third-party software at install time, including
-but not limited to llama.cpp and whisper.cpp. Each plugin maintains its own
-notice and license inventory in its respective directory.
+download and run additional third-party engines at install time:
+
+- llama.cpp (MIT)
+- whisper.cpp (MIT)
+- llama-swap (MIT) — Copyright (c) 2024 Benson Wong (github.com/mostlygeek/llama-swap)
+
+Those engines remain governed by their respective upstream licenses.

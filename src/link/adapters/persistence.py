@@ -19,16 +19,11 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def save(self, key: str, data: Any) -> None:
-        """Saves data to the storage backend.
-
-        Args:
-            key (str): The key to identify the data.
-            data (Any): The data to be saved.
-        """
+        """Saves data under the given key."""
         pass
 
     def close(self) -> None:
-        """Closes the storage connection. Default: no-op — override if needed."""
+        """Closes the storage connection. Default no-op; override if needed."""
         pass
 
 
@@ -39,21 +34,12 @@ class ZenohStorageBackend(StorageBackend):
     """
 
     def __init__(self, session):
-        """Initialises the ZenohStorageBackend.
-
-        Args:
-            session (Any): The Zenoh session object.
-        """
+        """Initialises the ZenohStorageBackend."""
         self.session = session
 
     @override
     def save(self, key: str, data: Any) -> None:
-        """Saves data to Zenoh.
-
-        Args:
-            key (str): The key under which to publish the data.
-            data (Any): The data payload.
-        """
+        """Publishes data to Zenoh under the given key."""
         if not self.session:
             logger.warning("Zenoh put dropped (no active session): key=%s", key)
             return
@@ -64,19 +50,14 @@ class ZenohStorageBackend(StorageBackend):
         except Exception as e:
             logger.warning(f"Zenoh Put Failed: {e}")
 
-    # close() inherits from base: no-op. Session lifetime is managed by
-    # InfrastructureManager, not by this backend.
+    # close() inherits the base no-op: session lifetime is owned by InfrastructureManager.
 
 
 class SQLiteStorageBackend(StorageBackend):
     """Persists data to a local SQLite database (e.g. for offline buffering)."""
 
     def __init__(self, db_path: str = "buffer.db"):
-        """Initialises the SQLiteStorageBackend.
-
-        Args:
-            db_path (str): Path to the SQLite database file. Defaults to "buffer.db".
-        """
+        """Initialises the SQLiteStorageBackend."""
         self.db_path = db_path
         self._conn = None
         self._setup_db()
@@ -94,12 +75,7 @@ class SQLiteStorageBackend(StorageBackend):
 
     @override
     def save(self, key: str, data: Any) -> None:
-        """Saves data to the local SQLite database.
-
-        Args:
-            key (str): The storage key.
-            data (Any): The data to persist.
-        """
+        """Persists data to the local SQLite database."""
         if not self._conn:
             return
 

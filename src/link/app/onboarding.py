@@ -39,14 +39,10 @@ DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 def _open_in_browser(url: str) -> bool:
     """Best-effort: open ``url`` in the system browser. Returns True on success.
 
-    The GUI install path runs the agent under launchd with no terminal
-    attached — printing the device-flow URL to stderr lands in a log
-    file the user never sees. Detect that case (stdin is not a TTY) and
-    shell out to the platform browser-opener instead.
-
-    Never raises: a failed ``open`` shouldn't break enrolment. The
-    URL is always printed too, so a user who finds the log can still
-    paste it manually.
+    The GUI install path runs the agent with no terminal attached, so printing
+    the device-flow URL to stderr only lands in a log the user never sees. When
+    stdin is not a TTY, shell out to the platform browser-opener instead. Never
+    raises: the URL is always printed too, so it can be pasted manually.
     """
     system = platform.system()
     if system == "Darwin":
@@ -65,12 +61,12 @@ def _open_in_browser(url: str) -> bool:
 
 
 def _running_detached() -> bool:
-    """True when stdin has no terminal attached — i.e. running under launchd/systemd."""
+    """True when stdin has no terminal attached, i.e. running under launchd/systemd."""
     try:
         return not sys.stdin.isatty()
     except (AttributeError, OSError):
-        # Frozen bundle or unusual exec environment — err on the side of
-        # treating as detached so we still try to open the browser.
+        # Frozen bundle or unusual exec environment: treat as detached so we
+        # still try to open the browser.
         return True
 
 
@@ -91,7 +87,7 @@ _RETRY_AFTER_HONOR_CAP_SECONDS = 300.0
 
 
 class UseDeviceFlowError(Exception):
-    """HTTP 409 use_device_flow — account uses SSO, no password set."""
+    """HTTP 409 use_device_flow: account uses SSO, no password set."""
 
 
 def _login_permanent(resp: requests.Response) -> None:
@@ -111,20 +107,10 @@ def _login_permanent(resp: requests.Response) -> None:
 
 
 def login_and_get_token(email: str, password: str, api_url: str) -> str:
-    """Authenticates with the platform and returns a JWT access token.
+    """Authenticate with the platform and return a JWT access token.
 
-    Args:
-        email (str): The user's platform email address.
-        password (str): The user's platform password.
-        api_url (str): The API base URL.
-
-    Returns:
-        str: The JWT access token.
-
-    Raises:
-        UseDeviceFlowError: If the backend returns HTTP 409 `use_device_flow`
-            (account has no password — caller should run the device flow).
-        RuntimeError: If authentication fails for any other reason.
+    Raises UseDeviceFlowError on HTTP 409 `use_device_flow` (account has no
+    password; caller should run the device flow), RuntimeError otherwise.
     """
     logger.info("Authenticating with the platform...")
     resp = _request_with_retry(
@@ -161,9 +147,8 @@ def _device_flow(api_url: str, client_metadata: dict[str, Any] | None = None) ->
     verification_uri_complete = data.get("verification_uri_complete", verification_uri)
     interval = int(data.get("interval", 5))
 
-    # Print to stderr so the banner stays visible regardless of stdout
-    # redirection — and so the URL is recoverable from a log if the
-    # browser open below fails or the user dismissed the window.
+    # Print to stderr so the banner survives stdout redirection and stays
+    # recoverable from a log if the browser open below fails.
     print(
         "\n"
         "To authenticate, open this URL on any device:\n"
@@ -245,22 +230,9 @@ def _resolve_token(
     api_url: str,
     client_metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Resolves a JWT token from the provided credentials.
-
-    Args:
-        email (str | None): The user's email address.
-        password (str | None): The user's password (prompted if None and email is provided).
-        token (str | None): A pre-obtained JWT token.
-        api_url (str): The API base URL.
-        client_metadata (dict | None): Optional metadata surfaced to the user
-            on the approval page if the flow falls through to device auth.
-
-    Returns:
-        str: A valid JWT token.
-
-    Raises:
-        ValueError: If neither token nor email is provided.
-        RuntimeError: If authentication fails.
+    """Resolve a JWT token from the provided credentials (token, or email with
+    password/device-flow). ``client_metadata`` is surfaced on the approval page
+    if the flow falls through to device auth. Raises if neither token nor email.
     """
     if token:
         return token
@@ -278,8 +250,8 @@ def _resolve_token(
         try:
             return login_and_get_token(email, password, api_url)
         except UseDeviceFlowError:
-            # SSO-only user — let them know why we're switching flows so they
-            # don't read the banner as "wrong password, try again".
+            # SSO-only user: say why we're switching flows so the banner doesn't
+            # read as "wrong password, try again".
             print(
                 "This account uses single sign-on; falling back to device authorization.",
                 file=sys.stderr,
@@ -297,19 +269,7 @@ def register_device(
     password: str | None = None,
     token: str | None = None,
 ) -> AgentConfig:
-    """Exchanges a Registration Key + Name for a BRAND NEW Device ID and API Key.
-
-    Args:
-        name (str): The device name.
-        reg_key (str): The registration key.
-        api_url (str): The API base URL.
-        email (str | None): The user's email (used to obtain a token if token is not provided).
-        password (str | None): The user's password (prompted if None).
-        token (str | None): A pre-obtained JWT token (alternative to email/password).
-
-    Returns:
-        AgentConfig: The initial AgentConfig.
-    """
+    """Exchange a registration key + name for a brand-new device ID and API key."""
     logger.info(f"Registering new device: {name}")
 
     client_metadata = {
@@ -420,20 +380,10 @@ def _request_with_retry(
     op_name: str,
     permanent_handler: Callable[[requests.Response], None] | None = None,
 ) -> requests.Response:
-    """Issues control-plane onboarding requests, retrying transient failures.
-
-    Retries network, 429, and 5xx errors using jittered backoff and Retry-After.
-
-    Args:
-        do_request: Callable returning the HTTP response.
-        op_name: Operation name for log/error context.
-        permanent_handler: Callback on permanent failures before generic rejection.
-
-    Returns:
-        The successful Response.
-
-    Raises:
-        RuntimeError: On retry exhaustion or permanent failure.
+    """Issue control-plane onboarding requests, retrying transient failures
+    (network, 429, 5xx) with jittered backoff and Retry-After. Raises on retry
+    exhaustion or a permanent failure. ``permanent_handler`` runs on a permanent
+    failure before the generic rejection.
     """
     for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
         try:
@@ -540,16 +490,7 @@ def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
 
 
 def activate_device(device_id: str, reg_key: str, api_url: str) -> AgentConfig:
-    """Exchanges a Registration Key + Existing Device ID for a NEW API Key.
-
-    Args:
-        device_id (str): The existing device ID.
-        reg_key (str): The registration key.
-        api_url (str): The API base URL.
-
-    Returns:
-        AgentConfig: The recovered AgentConfig.
-    """
+    """Exchange a registration key + existing device ID for a new API key."""
     logger.info(f"Activating existing device: {device_id}")
 
     payload = {"device_id": device_id, "registration_key": reg_key, "device_type": "edge_device"}
@@ -583,24 +524,10 @@ def _resolve_agent_config(
 ) -> AgentConfig:
     """Select and resolve the AgentConfig for this device.
 
-    Preference order:
-      1. A backend-provided config (delivered in the registration response).
-      2. The built-in hardcoded defaults from `_bootstrap_config`.
-
-    If a backend config is present but cannot be resolved (wrong schema version,
-    fails Pydantic validation, etc.), this logs a loud error and falls back to
-    defaults so registration still succeeds — operators can investigate via the
-    backend admin surface without bricking the device.
-
-    Args:
-        server_config: Raw `config` dict from the backend response, or None.
-        device_id: Device identifier from the registration response.
-        device_name: Device name (from the client-side registration request).
-        api_key: API key from the registration response.
-        api_url: Base URL the agent was started with.
-
-    Returns:
-        A validated `AgentConfig` ready to hand to the state manager.
+    Prefers a backend-provided config, else the built-in defaults from
+    `_bootstrap_config`. If a backend config is present but unresolvable (wrong
+    schema, failed validation), logs a loud error and falls back to defaults so
+    registration still succeeds.
     """
     if server_config is None:
         logger.info("No config from backend — using built-in defaults.")
@@ -620,19 +547,7 @@ def _apply_server_config(
     raw: dict[str, Any], device_id: str, device_name: str, api_key: str, api_url: str
 ) -> AgentConfig:
     """Resolve templates, inject identity, and validate a backend config.
-
-    Args:
-        raw: The raw config dict from the backend response.
-        device_id: Device identifier from the registration response.
-        device_name: Device name (from the client-side registration request).
-        api_key: API key from the registration response.
-        api_url: Base URL the agent was started with.
-
-    Returns:
-        A validated `AgentConfig`.
-
-    Raises:
-        ValueError: If the schema version is unknown or validation fails.
+    Raises ValueError if the schema version is unknown or validation fails.
     """
 
     raw_version = raw.get("version")
@@ -668,17 +583,7 @@ def _apply_server_config(
 
 
 def _bootstrap_config(device_id: str, device_name: str, api_key: str, api_url: str) -> AgentConfig:
-    """Helper to generate the standard configuration object.
-
-    Args:
-        device_id (str): The device ID.
-        device_name (str): The device name.
-        api_key (str): The API key.
-        api_url (str): The API URL.
-
-    Returns:
-        AgentConfig: The generated agent configuration.
-    """
+    """Generate the standard hardcoded configuration object."""
     logger.info(f"Onboarding successful. Assigned ID: {device_id}")
 
     return AgentConfig(

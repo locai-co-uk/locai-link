@@ -25,12 +25,7 @@ class AgentCommand(Sink):
     """
 
     def __init__(self, callback, dedup_window: int = 2000):
-        """Initialises the AgentCommand sink.
-
-        Args:
-            callback (Callable): The function to call with command data.
-            dedup_window (int): Maximum recent command ids to remember.
-        """
+        """Initialises the AgentCommand sink (dedup_window = recent ids to remember)."""
         self.callback = callback
         self._seen: deque[str] = collections.deque(maxlen=dedup_window)
 
@@ -44,7 +39,7 @@ class AgentCommand(Sink):
 
     def _dispatch(self, cmd: dict[str, Any]) -> bool:
         cmd_id = cmd.get("id")
-        # Truthy check on both branches — matches mark_seen() so an
+        # Truthy check on both branches, matching mark_seen() so an
         # empty-string id (which isn't a useful dedup key anyway)
         # doesn't get treated differently by the two entry points.
         if cmd_id and cmd_id in self._seen:
@@ -53,7 +48,7 @@ class AgentCommand(Sink):
             self.callback(cmd)
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
-            # Don't record cmd_id in _seen — a retry should be allowed to try again.
+            # Don't record cmd_id in _seen: a retry should be allowed to try again.
             return False
         if cmd_id:
             self._seen.append(cmd_id)

@@ -5,57 +5,62 @@
 # Runs after the .pkg payload has been copied to /Library/Locai.
 #
 # Payload provides:
-#     /Library/Locai/locai-link            (the launcher binary)
 #     /Library/Locai/boot.json             (production channel config)
-#     /Library/Locai/Setup Assistant.app   (the Tauri first-run app)
+#     /Library/Locai/Locai Link.app        (the app: supervisor + tray + first-run setup)
+#
+# The single `locai-link` binary lives inside the .app
+# (Contents/MacOS/locai-link); there is no separate launcher.
 #
 # This script:
-#     1. Ensures the launcher is executable and owned correctly.
-#     2. Symlinks /usr/local/bin/locai to the launcher so users can
+#     1. Ensures the .app is present and the state tree is user-owned.
+#     2. Symlinks /usr/local/bin/locai to the .app binary so users can
 #        invoke "locai …" from a terminal without a PATH edit.
-#     3. Launches Setup Assistant.app so the user picks up in the
-#        wizard the moment Installer.app's conclusion pane appears.
+#     3. Removes any legacy Setup Assistant.app (pre-merge installs shipped a
+#        separate onboarding app; onboarding is now a window of the main app).
+#     4. Launches Locai Link.app; on first run (no registered device) it opens
+#        the setup window so the user picks up in the wizard the moment
+#        Installer.app's conclusion pane appears.
 #
-# We deliberately do NOT register the runtime or LaunchAgents here — the
-# "Run at login" choice is captured by Setup Assistant's Permissions step,
-# so registration happens on Finish, not at .pkg install time.
+# We deliberately do NOT register the runtime or LaunchAgents here; the
+# "Run at login" choice is captured in the setup wizard's Permissions step, so
+# registration happens on Finish, not at .pkg install time.
 #
 # pkgbuild passes these positional args:
-#     $1 — the .pkg's own path (unused)
-#     $2 — the target-location inside the payload (unused)
-#     $3 — the target volume ("/" on a normal install)
-#     $4 — install location root ("/" for volume-only installs)
+#     $1: the .pkg's own path (unused)
+#     $2: the target-location inside the payload (unused)
+#     $3: the target volume ("/" on a normal install)
+#     $4: install location root ("/" for volume-only installs)
 set -euo pipefail
 
 INSTALL_ROOT="/Library/Locai"
-LAUNCHER="${INSTALL_ROOT}/locai-link"
 CLI_SYMLINK="/usr/local/bin/locai"
-SETUP_ASSISTANT="${INSTALL_ROOT}/Setup Assistant.app"
-SETUP_ASSISTANT_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 COMPANION_APP="${INSTALL_ROOT}/Locai Link.app"
 COMPANION_SYMLINK="/Applications/Locai Link.app"
+# The merged binary (supervisor + tray) lives inside the .app.
+MERGED_BIN="${COMPANION_APP}/Contents/MacOS/locai-link"
 UNINSTALLER="${INSTALL_ROOT}/uninstall.sh"
+# Legacy onboarding app from pre-merge installs; removed on upgrade.
+LEGACY_SA="${INSTALL_ROOT}/Setup Assistant.app"
+LEGACY_SA_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 
 log() {
     echo "[postinstall] $*"
 }
 
-# --- 1. Executable + ownership ---------------------------------------
-if [[ ! -f "$LAUNCHER" ]]; then
-    log "ERROR: launcher not found at $LAUNCHER"
+# --- 1. App present + ownership --------------------------------------
+if [[ ! -d "$COMPANION_APP" ]]; then
+    log "ERROR: app not found at $COMPANION_APP"
     exit 1
 fi
-chmod 755 "$LAUNCHER"
-# Root-owned: the launcher never needs write access. Only the binary is
-# locked down; the rest of INSTALL_ROOT stays writeable so the OTA updater
-# (running as the user via the LaunchAgent) can drop new versions, flip the
-# `current` pointer, and manage state.
-chown root:wheel "$LAUNCHER"
+# The .app binary keeps the perms + signature from the build; nothing to
+# chmod here. The whole .app is chowned to the user in section 4 so the OTA
+# (running as the user via the LaunchAgent) can swap it.
+#
 # Give the invoking user ownership of the install root + the subtrees the
 # runtime + OTA touch. Prefer $SUDO_USER (pkg installs run as root via sudo),
-# else fall back to the console user detected for the SA handoff.
+# else fall back to the console user.
 INSTALL_USER="${SUDO_USER:-$(stat -f "%Su" /dev/console 2>/dev/null || echo "root")}"
-# LaunchAgents write to $INSTALL_ROOT/logs/*.log — create it here so the
+# LaunchAgents write to $INSTALL_ROOT/logs/*.log; create it here so the
 # first launchctl kickstart doesn't fail on a fresh install.
 for d in versions state logs; do
     mkdir -p "$INSTALL_ROOT/$d"
@@ -66,14 +71,15 @@ if [[ "$INSTALL_USER" != "root" ]]; then
         chown -R "$INSTALL_USER:staff" "$INSTALL_ROOT/$d"
     done
 fi
-log "launcher installed at $LAUNCHER (writeable state → $INSTALL_USER)"
+log "app installed at $COMPANION_APP (writeable state → $INSTALL_USER)"
 
 # --- 2. /usr/local/bin/locai symlink ---------------------------------
-# /usr/local/bin isn't guaranteed writable everywhere. mkdir -p is safe; ln
-# -sf overwrites an existing symlink from a previous install.
+# Points at the .app binary so `locai …` works from a terminal without a PATH
+# edit. /usr/local/bin isn't guaranteed writable everywhere. mkdir -p is safe;
+# ln -sf overwrites an existing symlink from a previous install.
 mkdir -p "$(dirname "$CLI_SYMLINK")"
-ln -sf "$LAUNCHER" "$CLI_SYMLINK"
-log "CLI symlink: $CLI_SYMLINK -> $LAUNCHER"
+ln -sf "$MERGED_BIN" "$CLI_SYMLINK"
+log "CLI symlink: $CLI_SYMLINK -> $MERGED_BIN"
 
 # --- 3. Uninstaller script -------------------------------------------
 # pkgbuild doesn't guarantee copied files are executable. Force 755 so both
@@ -99,7 +105,7 @@ fi
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 # The console user (driving Installer.app). The LS database is per-user and
-# this runs as root — registering as root doesn't reliably surface the app
+# this runs as root; registering as root doesn't reliably surface the app
 # for the logged-in user (intermittently missing from search).
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 
@@ -153,50 +159,83 @@ else
     log "companion app not found at $COMPANION_APP — skipping /Applications copy"
 fi
 
-# --- 4b. /Applications/Locai Setup Assistant.app ---------------------
-# Copied into /Applications so it's discoverable via Spotlight / Launchpad.
-# Otherwise a user who quit the auto-launched SA before finishing couldn't
-# reopen it (the /Library/Locai copy isn't indexed by Launch Services).
-if [[ -d "$SETUP_ASSISTANT" ]]; then
-    rm -rf "$SETUP_ASSISTANT_IN_APPLICATIONS"
-    ditto "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
-    if [[ "$INSTALL_USER" != "root" ]]; then
-        chown -R "$INSTALL_USER:staff" "$SETUP_ASSISTANT" "$SETUP_ASSISTANT_IN_APPLICATIONS"
+# --- 4b. Remove legacy Setup Assistant.app ---------------------------
+# LEGACY-SA-CLEANUP: pre-merge installs shipped a separate onboarding app;
+# onboarding is now a window of the main app. Clear both copies + their
+# LaunchServices entries so a stale tile / Spotlight hit doesn't linger after an
+# upgrade. Remove this block once no pre-merge install remains.
+for legacy in "$LEGACY_SA" "$LEGACY_SA_IN_APPLICATIONS"; do
+    if [[ -d "$legacy" ]]; then
+        [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -u "$legacy" 2>/dev/null || true
+        rm -rf "$legacy"
+        log "removed legacy Setup Assistant: $legacy"
     fi
-    log "setup assistant copied: $SETUP_ASSISTANT -> $SETUP_ASSISTANT_IN_APPLICATIONS"
-    register_app "$SETUP_ASSISTANT_IN_APPLICATIONS"
-else
-    log "setup assistant not found at $SETUP_ASSISTANT — skipping /Applications copy"
-fi
+done
 
-# --- 5. Launch Setup Assistant ---------------------------------------
-# postinstall runs as root, but the SA must run as the actual user for
-# LaunchAgent registration + Keychain access. Hand off via "sudo -u".
+# --- 5. Launch Locai Link via launchd --------------------------------
+# postinstall runs as root; the app must run as the console user (its LaunchAgent
+# GUI domain + Keychain). We bootstrap the LaunchAgent rather than `open -a` so
+# launchd owns the one instance from install, required now that the tauri
+# single-instance guard is gone (an `open`-launched tray would run alongside the
+# launchd one). First run has no registered device, so the app opens the setup
+# window. `install_launchagents` at Finish only tweaks RunAtLoad; it does not
+# re-bootstrap (that would restart the wizard mid-onboarding).
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     # No graphical console user (headless / remote / root Terminal). Skip the
-    # launch — the user can open Setup Assistant.app manually.
-    log "no console user detected; skipping Setup Assistant auto-launch"
+    # launch; the user can open Locai Link manually (it self-bootstraps at login).
+    log "no console user detected; skipping launchd bootstrap"
     exit 0
 fi
 
-# Prefer the /Applications copy so LaunchServices registers the .app
-# by its indexed bundle identity; fall back to the /Library/Locai copy
-# if the copy step above failed.
-SA_TO_LAUNCH=""
-if [[ -d "$SETUP_ASSISTANT_IN_APPLICATIONS" ]]; then
-    SA_TO_LAUNCH="$SETUP_ASSISTANT_IN_APPLICATIONS"
-elif [[ -d "$SETUP_ASSISTANT" ]]; then
-    SA_TO_LAUNCH="$SETUP_ASSISTANT"
+USER_UID=$(id -u "$CONSOLE_USER")
+# Resolve the real home via directory-service: /Users/$CONSOLE_USER is wrong for
+# directory-service, mobile, or relocated accounts, and mkdir there would fail
+# under set -e before the LaunchAgent is installed.
+USER_HOME=$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
+    log "WARN: could not resolve home directory for $CONSOLE_USER; skipping launchd bootstrap"
+    exit 0
 fi
-if [[ -n "$SA_TO_LAUNCH" ]]; then
-    # `open` returns immediately once the .app is dispatched to
-    # launchd; the postinstall doesn't hold the Installer.app UI thread.
-    sudo -u "$CONSOLE_USER" open -a "$SA_TO_LAUNCH" || {
-        log "WARN: failed to launch $SA_TO_LAUNCH; user must launch it manually"
-    }
-    log "Setup Assistant handed off to $CONSOLE_USER (from $SA_TO_LAUNCH)"
+# If this device is already set up, drop the manage marker so the app opens the
+# "already set up" splash on this re-run instead of dropping straight to the tray.
+# (A .pkg always lays its payload, so this is macOS's re-run surface.)
+if compgen -G "${INSTALL_ROOT}/configs/session_*.json" >/dev/null 2>&1; then
+    mkdir -p "${INSTALL_ROOT}/state"
+    : > "${INSTALL_ROOT}/state/show-manage-on-start"
+    chown "${CONSOLE_USER}:staff" "${INSTALL_ROOT}/state/show-manage-on-start" 2>/dev/null || true
+fi
+
+USER_LA="${USER_HOME}/Library/LaunchAgents"
+
+# LEGACY-SA-CLEANUP: pre-merge installs ran the launcher/runtime under a separate
+# agent LaunchAgent; the merged app supervises now. Bootout + remove it so an
+# upgrade-in-place leaves a single LaunchAgent (the macOS twin of dropping the
+# Linux agent unit).
+sudo -u "$CONSOLE_USER" launchctl bootout "gui/${USER_UID}/uk.co.locai.link.agent" 2>/dev/null || true
+rm -f "${USER_LA}/uk.co.locai.link.agent.plist"
+# Drop the pre-merge standalone launcher binary (the merged binary lives in the
+# .app). A payload-only upgrade never overwrites it, so remove it explicitly.
+rm -f "${INSTALL_ROOT}/locai-link"
+
+PLIST_SRC="${INSTALL_ROOT}/LaunchAgents/uk.co.locai.link.companion.plist"
+PLIST_DST="${USER_LA}/uk.co.locai.link.companion.plist"
+SERVICE="gui/${USER_UID}/uk.co.locai.link.companion"
+
+if [[ -f "$PLIST_SRC" ]]; then
+    sudo -u "$CONSOLE_USER" mkdir -p "$USER_LA"
+    install -m 0644 "$PLIST_SRC" "$PLIST_DST"
+    chown "${CONSOLE_USER}:staff" "$PLIST_DST"
+    # bootout any stale job, then bootstrap + kickstart in the user's GUI domain.
+    sudo -u "$CONSOLE_USER" launchctl bootout "$SERVICE" 2>/dev/null || true
+    if sudo -u "$CONSOLE_USER" launchctl bootstrap "gui/${USER_UID}" "$PLIST_DST"; then
+        sudo -u "$CONSOLE_USER" launchctl kickstart -k "$SERVICE" \
+            || log "WARN: kickstart $SERVICE failed"
+        log "Locai Link bootstrapped into launchd for $CONSOLE_USER ($SERVICE)"
+    else
+        log "WARN: launchctl bootstrap failed; user must launch Locai Link manually"
+    fi
 else
-    log "Setup Assistant.app not found; user must launch it manually"
+    log "companion plist not at $PLIST_SRC; user must launch Locai Link manually"
 fi
 
 exit 0

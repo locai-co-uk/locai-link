@@ -86,8 +86,8 @@ def test_reset_does_not_descend_into_node_modules(link_repo_root):
     and delete those, wrecking every Tauri dev command until `npm
     install` restored them. Pin the fix.
     """
-    # Simulate: crates/companion/node_modules/vite/dist/node/cli.js
-    vite_dist = link_repo_root / "crates/companion/node_modules/vite/dist/node"
+    # Simulate: crates/link/node_modules/vite/dist/node/cli.js
+    vite_dist = link_repo_root / "crates/link/node_modules/vite/dist/node"
     vite_dist.mkdir(parents=True)
     (vite_dist / "cli.js").write_text("// vite entrypoint")
 

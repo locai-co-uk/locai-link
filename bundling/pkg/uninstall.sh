@@ -4,11 +4,14 @@
 #
 # Removes Locai Link from the machine.
 #
-# Invoked two ways: (1) from the Setup Assistant "Uninstall" action, which
-# runs this via osascript `with administrator privileges` (always root); or
+# Invoked two ways: (1) from the app's "Uninstall" action, which runs this via
+# osascript `with administrator privileges` (always root); or
 # (2) directly: `sudo /Library/Locai/uninstall.sh`.
 #
-# Refuses to run without root (see the $EUID check) — prior versions
+# Also clears any legacy Setup Assistant.app (pre-merge installs shipped a
+# separate onboarding app; it now lives inside the main app).
+#
+# Refuses to run without root (see the $EUID check); prior versions
 # swallowed permission-denied errors and exited 0, falsely claiming success.
 #
 # Approach 1 runs as root but LaunchAgents + Tauri caches live in the console
@@ -19,9 +22,9 @@
 # Locai + /Applications copies + CLI symlink, per-user Tauri data (caches /
 # WebKit / HTTPStorages / prefs / saved state), pinned Dock tiles, pkg receipt.
 #
-# The Setup Assistant deregisters the device from Control before it runs this
-# script, so the normal uninstall flow removes the dashboard row.
-# Running this script standalone does NOT deregister — delete the device row in
+# The app deregisters the device from Control before it runs this script, so the
+# normal uninstall flow removes the dashboard row.
+# Running this script standalone does NOT deregister; delete the device row in
 # Control manually in that case. No Keychain items are touched.
 set -uo pipefail
 
@@ -32,25 +35,27 @@ CLI_SYMLINK="/usr/local/bin/locai"
 COMPANION_APP_IN_APPLICATIONS="/Applications/Locai Link.app"
 SA_APP_IN_APPLICATIONS="/Applications/Locai Setup Assistant.app"
 PKG_RECEIPT="uk.co.locai.link.runtime"
-# Bundle identifiers for the two Tauri apps — used to clean per-user
-# caches / prefs / WebKit storage that live outside $INSTALL_ROOT.
+# Bundle identifiers used to clean per-user caches / prefs / WebKit storage that
+# live outside $INSTALL_ROOT. LEGACY-SA-CLEANUP: the legacy Setup Assistant id is
+# still cleaned on upgrade/uninstall (its onboarding is now part of the main
+# app); drop it once no pre-merge install remains.
 COMPANION_BUNDLE_ID="uk.co.locai.link.companion"
-SA_BUNDLE_ID="uk.co.locai.link.setup-assistant"
+LEGACY_SA_BUNDLE_ID="uk.co.locai.link.setup-assistant"
 
 log() {
     echo "[uninstall] $*"
 }
 
 # Refuse non-root. Every step writes into /Library, /Applications,
-# /usr/local/bin, or the console user's Library — without root the rm's fail
+# /usr/local/bin, or the console user's Library; without root the rm's fail
 # silently (`|| true`) and the script exits 0 while leaving the app installed.
 if [[ $EUID -ne 0 ]]; then
     cat >&2 <<EOF
 [uninstall] This script must run as root.
 
-  Option A (recommended): open the Locai Link Setup Assistant and
-                          click "Uninstall" — it invokes this script
-                          via osascript with an admin prompt.
+  Option A (recommended): open Locai Link and use the "Uninstall"
+                          action — it invokes this script via
+                          osascript with an admin prompt.
 
   Option B (Terminal):    sudo /Library/Locai/uninstall.sh
 
@@ -59,9 +64,18 @@ EOF
     exit 1
 fi
 
+# The app-driven uninstall runs this script via `launchctl submit`, a KeepAlive
+# job that re-launches it after it deletes itself. Left registered, it re-fires
+# whenever a later (re)install recreates this script and silently wipes that
+# install. Tear it down on ANY exit (including an early error) so it can never
+# re-fire. It was submitted as root, so it lives in the SYSTEM domain: `bootout
+# system/…` is the reliable teardown (legacy `remove` doesn't always reach it).
+# This script already runs as root; no-op for the direct `sudo uninstall.sh` path.
+trap 'launchctl bootout system/co.locai.link.uninstall 2>/dev/null; launchctl remove co.locai.link.uninstall 2>/dev/null || true' EXIT
+
 # --- 1. Stop + unload LaunchAgents (user domain) ---------------------
 # Per-user; `launchctl bootout gui/$UID/...` targets the console user's aqua
-# session. Best-effort — bootout on a stopped service returns non-zero.
+# session. Best-effort; bootout on a stopped service returns non-zero.
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
     log "no console user detected; skipping user-domain launchctl steps"
@@ -75,7 +89,7 @@ else
             "gui/$USER_UID/uk.co.locai.link.agent" 2>/dev/null || true
     fi
     # Delete the plists themselves (bootout only unloads, doesn't
-    # remove the file — a subsequent login would re-load them).
+    # remove the file; a subsequent login would re-load them).
     USER_LA_DIR="/Users/$CONSOLE_USER/Library/LaunchAgents"
     rm -f "$USER_LA_DIR/uk.co.locai.link.agent.plist"
     rm -f "$USER_LA_DIR/uk.co.locai.link.companion.plist"
@@ -85,14 +99,24 @@ fi
 # bootout SIGTERMs each service, but a runtime spawned outside launchd (e.g.
 # `locai run` from a terminal) isn't covered. Match `/<name>.app/` (leading +
 # trailing slashes) so we don't hit macOS's own /System .../Setup Assistant.app.
-# SA is killed LAST — it typically invoked us via osascript, so killing it
-# earlier cuts off our own error path.
+# The main app is killed LAST; it typically invoked us via osascript, so
+# killing it earlier cuts off our own error path.
 pkill -f "$INSTALL_ROOT/locai-link"                 2>/dev/null || true
-pkill -f "/Locai Link.app/"                         2>/dev/null || true
+# Legacy Setup Assistant copies (pre-merge installs).
 pkill -f "/Locai Setup Assistant.app/"              2>/dev/null || true
 # Install-root SA copy ("Setup Assistant.app", no "Locai " prefix); the
 # full path skips macOS's own /CoreServices copy.
 pkill -f "$INSTALL_ROOT/Setup Assistant.app/"       2>/dev/null || true
+pkill -f "/Locai Link.app/"                         2>/dev/null || true
+
+# Wait for the app to actually exit before the per-user wipe (section 5). pkill
+# only SIGTERMs; a still-shutting-down webview re-writes WebKit/Caches AFTER our
+# rm otherwise, leaving ~/Library artefacts behind. Bounded so a wedged process
+# can't hang the uninstall.
+for _ in $(seq 1 20); do
+    pgrep -f "/Locai Link.app/" >/dev/null 2>&1 || break
+    sleep 0.25
+done
 
 # --- 3. Unregister the .apps from LaunchServices --------------------
 # After removing a .app, LaunchServices can keep a stale entry pointing at the
@@ -118,7 +142,7 @@ log "removed $INSTALL_ROOT + /Applications copies + symlinks"
 # cookies, and WebKit state from the previous device.
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
     USER_HOME="/Users/$CONSOLE_USER"
-    for bundle_id in "$COMPANION_BUNDLE_ID" "$SA_BUNDLE_ID"; do
+    for bundle_id in "$COMPANION_BUNDLE_ID" "$LEGACY_SA_BUNDLE_ID"; do
         rm -rf "$USER_HOME/Library/Caches/$bundle_id"
         rm -rf "$USER_HOME/Library/WebKit/$bundle_id"
         rm -rf "$USER_HOME/Library/HTTPStorages/$bundle_id"
@@ -169,4 +193,5 @@ fi
 pkgutil --forget "$PKG_RECEIPT" 2>/dev/null || true
 
 log "Locai Link removed"
+# The EXIT trap (top of script) removes our launchd job so it can't re-fire.
 exit 0

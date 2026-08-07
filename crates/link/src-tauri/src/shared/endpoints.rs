@@ -1,0 +1,33 @@
+// SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+// SPDX-License-Identifier: BUSL-1.1
+
+//! Cross-app endpoints and paths: the external service URLs, the app
+//! <-> Setup Assistant IPC port, and the platform install root. Centralised so
+//! the two Tauri apps don't each hardcode (and drift on) their own copies.
+
+/// Control plane (dashboard) URL. Overridable at build time via
+/// `LOCAI_CONTROL_URL` (dev builds); unset defaults to production.
+pub const CONTROL_URL: &str = match option_env!("LOCAI_CONTROL_URL") {
+    Some(url) => url,
+    None => "https://control.locai.co.uk",
+};
+
+/// Workspace (chat) URL.
+pub const WORKSPACE_URL: &str = "https://workspace.locai.co.uk";
+
+/// Platform install root: macOS `/Library/Locai`, Linux `~/.local/share/locai`.
+pub fn install_root() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "/Library/Locai".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/.local/share/locai")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        String::new()
+    }
+}

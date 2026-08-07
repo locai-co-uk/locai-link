@@ -14,7 +14,7 @@ the plugins compiled into the bundle. Examples::
     locai-link-llm-stt-linux-x86_64-v1.0.14.tar.gz
 
 We only bundle plugins that have a code below. Bare (zero-plugin) bundles
-aren't a thing — that's the source-install path (``curl … | bash``).
+aren't a thing; that's the source-install path (``curl … | bash``).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ PLUGIN_ORDER: tuple[str, ...] = (
 def derive_asset_name(plugins: list[str] | tuple[str, ...]) -> str:
     """Translate a plugin list into the canonical asset-name stem.
 
-    Raises ``SystemExit`` on an empty list or any plugin with no code —
+    Raises ``SystemExit`` on an empty list or any plugin with no code;
     bundling without a code is unsupported by design (forces the convention
     conversation when a new plugin is added).
     """

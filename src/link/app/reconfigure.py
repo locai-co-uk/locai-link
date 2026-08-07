@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Hot-reconfiguration — apply a new AgentConfig to a running runtime.
+"""Hot-reconfiguration: apply a new AgentConfig to a running runtime.
 
 Triggered by the `UPDATE_AGENT_CONFIG` command. The backend sends a full
-`AgentConfig` (all placeholders resolved server-side, but we re-resolve
-defensively). The runtime validates it, snapshots the current state, swaps
-pipelines and handlers in place, and on failure reverts to the snapshot. If
-revert also fails the runtime requests a self-restart (execv) — main.py picks
-this up and re-execs without running `git pull`.
+`AgentConfig` (placeholders resolved server-side, but we re-resolve
+defensively). The runtime validates it, snapshots current state, swaps pipelines
+and handlers in place, and reverts to the snapshot on failure. If revert also
+fails the runtime requests a self-restart (execv) that main.py re-execs without
+running `git pull`.
 """
 
 from __future__ import annotations
@@ -38,14 +38,8 @@ class ApplyResult:
 
 
 def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyResult:
-    """Validate and apply a new AgentConfig to a running runtime.
-
-    Args:
-        runtime: The live `AgentRuntime` instance.
-        raw: The new config dict (from the backend command payload).
-
-    Returns:
-        `ApplyResult` describing success, failure reason, or scheduled restart.
+    """Validate and apply a new AgentConfig to a running runtime, returning an
+    `ApplyResult` (success, failure reason, or scheduled restart).
     """
     # 1. Resolve identity placeholders defensively.
     #    The backend should resolve these server-side, but if it sends a raw
@@ -71,7 +65,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
     except Exception as e:
         return ApplyResult(False, f"Invalid config: {e}")
 
-    # 3. Identity drift guard — defence in depth.
+    # 3. Identity drift guard (defence in depth).
     #    Only device_id is checked here. api_url and api_key are intentionally
     #    excluded: api_url is controlled by the --api-url CLI arg and the
     #    backend may store a different value (e.g. prod URL) in the identity
@@ -84,7 +78,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
             f"Identity drift — device_id mismatch: expected {cur_identity.device_id!r}, got {new_identity.device_id!r}",
         )
 
-    # Transport isn't hot-swappable — the live zenoh session was built from the
+    # Transport isn't hot-swappable: the live zenoh session was built from the
     # current transport, so reject rather than silently keep the old connection.
     if new_cfg.transport != runtime.agent_config.transport:
         return ApplyResult(False, "Transport change requires a restart, not hot-swappable")
@@ -95,7 +89,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
         runtime.state_manager.snapshot() if runtime.state_manager is not None else None
     )
 
-    # 5. Apply — hot-swap pipelines + handlers, then persist the new config.
+    # 5. Apply: hot-swap pipelines + handlers, then persist the new config.
     try:
         runtime.apply_config(new_cfg, previous_cfg=snapshot_cfg)
         if runtime.state_manager is not None:
@@ -119,7 +113,7 @@ def apply_agent_config(runtime: "AgentRuntime", raw: dict[str, Any]) -> ApplyRes
     except Exception as apply_err:
         logger.error(f"apply_agent_config failed: {apply_err}", exc_info=True)
 
-        # 6. Revert to snapshot — same hot-swap in reverse, then restore state.
+        # 6. Revert to snapshot: same hot-swap in reverse, then restore state.
         try:
             runtime.apply_config(snapshot_cfg, previous_cfg=new_cfg)
             if runtime.state_manager is not None:

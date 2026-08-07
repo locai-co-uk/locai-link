@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    Hardened-runtime entitlements for the Locai Link .app.
+
+    Not sandboxed (Developer ID distribution), so `com.apple.security.
+    network.client` is unnecessary. Only WebKit's JIT relaxation is
+    required for Tauri's embedded WebView to run under the hardened
+    runtime; watch for launch-time crashes and add
+    `com.apple.security.cs.allow-unsigned-executable-memory` if any
+    surface.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+</dict>
+</plist>

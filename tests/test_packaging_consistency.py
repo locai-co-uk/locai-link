@@ -39,11 +39,12 @@ def _load_plist(name: str) -> dict[str, Any]:
     return plistlib.loads((LAUNCH_AGENTS / name).read_bytes())
 
 
-def _cargo_package_name(crate: str) -> str:
-    """The Tauri app binary is named after the crate's cargo package (not the
-    productName), so this is the source of truth for what the plist must launch."""
+def _cargo_bin_name(crate: str) -> str:
+    """The launched binary is the crate's `[[bin]]` name (the merged app declares
+    `locai-link` explicitly), so this is the source of truth for what the plist
+    must launch."""
     cargo = REPO_ROOT / "crates" / crate / "src-tauri" / "Cargo.toml"
-    return tomllib.loads(cargo.read_text())["package"]["name"]
+    return tomllib.loads(cargo.read_text())["bin"][0]["name"]
 
 
 def test_companion_launchagent_matches_updater_destination(monkeypatch):
@@ -52,26 +53,13 @@ def test_companion_launchagent_matches_updater_destination(monkeypatch):
     dests = updater._ui_app_destinations("companion", MACOS_INSTALL_ROOT)  # pyright: ignore[reportArgumentType]
     assert dests == [MACOS_INSTALL_ROOT / "Locai Link.app"]
 
-    # The binary name comes from the cargo package, not productName. Derive it
-    # from Cargo.toml so a crate rename fails here instead of silently shipping a
-    # plist that points at a binary the build no longer produces.
-    binary = _cargo_package_name("companion")
+    # The binary name is the crate's [[bin]] name. Derive it from Cargo.toml so a
+    # rename fails here instead of silently shipping a plist that points at a
+    # binary the build no longer produces.
+    binary = _cargo_bin_name("link")
+    assert binary == "locai-link"
     prog = _load_plist("uk.co.locai.link.companion.plist")["ProgramArguments"]
     assert prog[0] == str(dests[0] / "Contents" / "MacOS" / binary)
-
-
-def test_setup_assistant_destination_is_install_root(monkeypatch):
-    monkeypatch.setattr(updater.sys, "platform", "darwin")
-    assert updater._ui_app_destinations("setup_assistant", MACOS_INSTALL_ROOT) == [  # pyright: ignore[reportArgumentType]
-        MACOS_INSTALL_ROOT / "Setup Assistant.app"
-    ]
-
-
-def test_agent_launchagent_points_at_launcher():
-    """The runtime LaunchAgent runs the launcher, which follows `current`."""
-    plist = _load_plist("uk.co.locai.link.agent.plist")
-    assert plist["ProgramArguments"][0] == str(MACOS_INSTALL_ROOT / "locai-link")
-    assert plist["WorkingDirectory"] == str(MACOS_INSTALL_ROOT)
 
 
 def test_launchagent_plists_are_well_formed():
@@ -180,11 +168,9 @@ def test_payload_names_match_release_workflow(monkeypatch):
     """The names the OTA looks for in the payload must match what release.yml stages."""
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     assert updater._ui_app_payload_name("companion") == "Locai Link.app"
-    assert updater._ui_app_payload_name("setup_assistant") == "Setup Assistant.app"
 
     release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert '"$OTA_ROOT/Locai Link.app"' in release
-    assert '"$OTA_ROOT/Setup Assistant.app"' in release
 
 
 def test_postinstall_makes_install_root_copy_swappable():
@@ -208,16 +194,17 @@ def test_postinstall_makes_install_root_copy_swappable():
 
 
 def _fake_companion_tree(root: Path, *, version: str, svelte: str) -> None:
-    """Minimal source layout inject_app_hashes walks for the companion."""
-    tauri = root / "crates" / "companion" / "src-tauri"
+    """Minimal source layout inject_app_hashes walks for the app (crates/link)."""
+    tauri = root / "crates" / "link" / "src-tauri"
     tauri.mkdir(parents=True)
     (tauri / "tauri.conf.json").write_text(f'{{"version": "{version}"}}\n', encoding="utf-8")
-    src = root / "crates" / "companion" / "src"
+    src = root / "crates" / "link" / "src"
     src.mkdir(parents=True)
     (src / "App.svelte").write_text(svelte, encoding="utf-8")
-    shared = root / "crates" / "shared"
+    # The folded-in platform/Control helpers now live under the crate.
+    shared = tauri / "src" / "shared"
     shared.mkdir(parents=True)
-    (shared / "lib.rs").write_text("// shared\n", encoding="utf-8")
+    (shared / "mod.rs").write_text("// shared\n", encoding="utf-8")
     (root / "crates" / "Cargo.lock").write_text("# lock\n", encoding="utf-8")
     (root / "crates" / "Cargo.toml").write_text("# workspace\n", encoding="utf-8")
 
@@ -256,8 +243,9 @@ def test_identical_source_keeps_stable_hash(tmp_path):
 
 def test_uninstaller_bundle_ids_match_tauri_apps():
     """The uninstaller cleans per-user caches/prefs by bundle id, so its ids must
-    match what the Tauri apps are actually built with — otherwise the cleanup
-    silently misses (the Setup Assistant used `.setup` vs the built `.setup-assistant`)."""
+    match what the Tauri app is actually built with — otherwise the cleanup
+    silently misses. The legacy Setup Assistant id is a literal (its crate is
+    gone, merged into the companion), still cleaned up on upgrade."""
     uninstall = (PKG / "uninstall.sh").read_text(encoding="utf-8")
 
     def _sh_var(name: str) -> str:
@@ -269,5 +257,6 @@ def test_uninstaller_bundle_ids_match_tauri_apps():
         conf = REPO_ROOT / "crates" / crate / "src-tauri" / "tauri.conf.json"
         return str(json.loads(conf.read_text(encoding="utf-8"))["identifier"])
 
-    assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("companion")
-    assert _sh_var("SA_BUNDLE_ID") == _tauri_id("setup_assistant")
+    assert _sh_var("COMPANION_BUNDLE_ID") == _tauri_id("link")
+    # Legacy id, hardcoded for upgrade cleanup now the SA crate is removed.
+    assert _sh_var("LEGACY_SA_BUNDLE_ID") == "uk.co.locai.link.setup-assistant"

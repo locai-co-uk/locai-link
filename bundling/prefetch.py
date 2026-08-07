@@ -5,7 +5,7 @@
 
 Each function stages one plugin's native binaries into
 `_artifacts/<os>-<arch>/<bin-subdir>/` so PyInstaller can pick them up as
-`datas`.  Plugin install.py modules are reused as-is — we just hand them a
+`datas`.  Plugin install.py modules are reused as-is; we just hand them a
 custom destination directory and build-cache root.
 
 Usage
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # prefetched bin-* dirs is dev/debug/bench tooling from the upstream archives;
 # we delete it before PyInstaller so the bundle is smaller and signs/notarises
 # faster. Listed per-platform (no ext on macOS/Linux, .exe on Windows). Shared
-# libraries are NEVER pruned — _is_shared_library() preserves them because
+# libraries are NEVER pruned; _is_shared_library() preserves them because
 # llama-server / whisper-server dynamically link against them.
 LLAMA_RUNTIME_EXECUTABLES: set[str] = {
     "llama-server",
@@ -113,9 +113,9 @@ def _prune_unused_executables(bin_dir: Path, keep: set[str]) -> None:
             kept.append(entry.name)
             continue
         if not _is_executable_file(entry):
-            # Plain data file with a non-shared-lib name — leave it; the
-            # byte savings aren't worth the risk of deleting something
-            # we don't recognise.
+            # Plain data file with a non-shared-lib name; leave it. The byte
+            # savings aren't worth the risk of deleting something we don't
+            # recognise.
             kept.append(entry.name)
             continue
         try:
@@ -125,7 +125,7 @@ def _prune_unused_executables(bin_dir: Path, keep: set[str]) -> None:
         except OSError as exc:
             logger.warning(f"Could not delete {entry.name}: {exc}")
 
-    # Drop dangling symlinks left by the deletion pass — some llama.cpp builds
+    # Drop dangling symlinks left by the deletion pass; some llama.cpp builds
     # ship short-name symlinks to versioned binaries. Skipping this leaves
     # notarytool with broken links.
     for entry in bin_dir.rglob("*"):
@@ -180,7 +180,7 @@ def prefetch_language_model(dest_root: Path) -> Path:
     cpp_tag = install.LLAMA_CPP_RELEASE
     swap_tag = install.LLAMA_SWAP_RELEASE
 
-    # llama.cpp — required.  No prebuilt = no bundle (we don't compile at bundle time).
+    # llama.cpp is required. No prebuilt = no bundle (we don't compile at bundle time).
     cpp_url = install._prebuilt_url(cpp_tag)
     if cpp_url is None:
         raise SystemExit(
@@ -191,7 +191,7 @@ def prefetch_language_model(dest_root: Path) -> Path:
     if not install._install_prebuilt(cpp_url, bin_dir, cpp_tag):
         raise SystemExit(f"Failed to install llama.cpp prebuilt from {cpp_url}")
 
-    # llama-swap — optional.
+    # llama-swap is optional.
     swap_url = install._swap_prebuilt_url(swap_tag)
     if swap_url is None:
         logger.warning("No llama-swap prebuilt for this platform; multi-model serving disabled in bundle.")
@@ -199,7 +199,7 @@ def prefetch_language_model(dest_root: Path) -> Path:
         raise SystemExit(f"Failed to install llama-swap prebuilt from {swap_url}")
 
     # Strip dev/bench tooling shipped alongside llama-server (llama-bench,
-    # llama-quantize, rpc-server, etc.) — each costs codesign+notarise time for
+    # llama-quantize, rpc-server, etc.); each costs codesign+notarise time for
     # zero runtime value. Keep only what the plugin invokes.
     _prune_unused_executables(bin_dir, LLAMA_RUNTIME_EXECUTABLES)
 
@@ -229,7 +229,7 @@ def prefetch_audio_transcriber(dest_root: Path) -> Path:
             return bin_dir
         raise SystemExit(f"Failed to install whisper.cpp prebuilt from {url}")
 
-    # No prebuilt for this platform — mirror install.py's source-build flags.
+    # No prebuilt for this platform; mirror install.py's source-build flags.
     cmake_flags = [
         "-DCMAKE_BUILD_TYPE=Release",
         "-DWHISPER_BUILD_SERVER=ON",
@@ -242,12 +242,12 @@ def prefetch_audio_transcriber(dest_root: Path) -> Path:
     install._cmake_build(tag, cmake_flags, bin_dir)
     # Source build only emits whisper-server as the cmake target, but the
     # examples build (-DWHISPER_BUILD_EXAMPLES=ON above) can drag in other
-    # tools — prune them out of the bundle.
+    # tools; prune them out of the bundle.
     _prune_unused_executables(bin_dir, WHISPER_RUNTIME_EXECUTABLES)
     return bin_dir
 
 
-# Public dispatch table — keys match plugin directory names under plugins/.
+# Public dispatch table; keys match plugin directory names under plugins/.
 PREFETCHERS = {
     "language_model": prefetch_language_model,
     "audio_transcriber": prefetch_audio_transcriber,

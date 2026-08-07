@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Zenoh router process management — spawn, monitor, session factory."""
+"""Zenoh router process management: spawn, monitor, session factory."""
 
 import json
 import logging
@@ -71,13 +71,8 @@ class ZenohRouter:
             root_key: str(self.working_dir),
         }
 
-    def _write_config_file(self, config: dict[str, Any], path: Path):
-        """Generates the router config file.
-
-        Args:
-            config (dict[str, Any]): The configuration dictionary.
-            path (Path): The output path.
-        """
+    def _write_config_file(self, config: dict[str, Any], path: Path) -> None:
+        """Generate the router config file at ``path``."""
         endpoints = config.get("endpoints", ["tcp/0.0.0.0:7447"])
 
         router_conf: dict[str, Any] = {"mode": "router", "listen": {"endpoints": endpoints}, "plugins": {}}
@@ -146,13 +141,7 @@ class ZenohRouter:
 
 
 def get_or_create_zenoh_session(config: TransportConfig) -> Any:
-    """Factory: Manages Infra and returns a Session.
-
-    Args:
-        config (TransportConfig): The transport configuration.
-
-    Returns:
-        zenoh.Session: The active Zenoh session.
+    """Provision infra as needed and return an active Zenoh session.
 
     Raises:
         RuntimeError: If connection fails after retries.
@@ -162,7 +151,7 @@ def get_or_create_zenoh_session(config: TransportConfig) -> Any:
 
     # 1. Provision + start a LOCAL router only when this device is hosting one.
     # In pure client mode the router lives elsewhere (e.g. central GCE VM) and
-    # we just dial it — no local zenohd binary, no service install, no .zenoh dir.
+    # we just dial it: no local zenohd binary, no service install, no .zenoh dir.
     if mode in ("router", "peer"):
         if not ZenohProvisioner.is_router_installed():
             ZenohProvisioner.install_router_env()
@@ -192,14 +181,11 @@ def get_or_create_zenoh_session(config: TransportConfig) -> Any:
             time.sleep(1)
 
 
-def _ensure_router_running(args: dict[str, Any]):
-    """Ensures the Zenoh Router is running, installing if necessary.
-
-    Args:
-        args (dict): Configuration for the router.
+def _ensure_router_running(args: dict[str, Any]) -> None:
+    """Ensure the Zenoh router is running, installing the service if necessary.
 
     Raises:
-        RuntimeError: If router fails to start.
+        RuntimeError: If the router fails to start.
     """
     router = ZenohRouter(config=args)
     if not router.is_running():

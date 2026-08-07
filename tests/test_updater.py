@@ -35,247 +35,6 @@ from link.app.updater import (
     ReleaseNotFound,
     VerifyFailed,
 )
-from link.config.models import AgentConfig
-
-# ===========================================================================
-# Source-install OTA tests
-# ===========================================================================
-
-
-def _config_with_types(*types: str) -> AgentConfig:
-    """Build a minimal AgentConfig whose pipelines reference the given component types."""
-    pipelines = [{"id": f"p{i}", "source": {"type": t}, "sink": {"type": "command"}} for i, t in enumerate(types)]
-    return AgentConfig.model_validate({"version": 2.1, "identity": {"device_id": "dev"}, "pipelines": pipelines})
-
-
-def _write_plugin(plugins_dir, name: str, entry_point_type: str | None = None):
-    """Create a fake plugin dir with install.py and optional pyproject entry-point."""
-    pdir = plugins_dir / name
-    pdir.mkdir(parents=True)
-    (pdir / "install.py").write_text(f"# {name}")
-    if entry_point_type:
-        (pdir / "pyproject.toml").write_text(
-            '[project]\nname = "x"\nversion = "0"\n'
-            f'[project.entry-points."locai.plugins"]\n{entry_point_type} = "x:Y"\n'
-        )
-
-
-# --- get_local_version ---
-
-
-def test_get_local_version(tmp_path):
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "1.2.3"\n')
-    assert updater.get_local_version(tmp_path) == "1.2.3"
-
-
-def test_get_local_version_missing(tmp_path):
-    assert updater.get_local_version(tmp_path) is None
-
-
-def test_get_local_version_no_version_line(tmp_path):
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
-    assert updater.get_local_version(tmp_path) is None
-
-
-# --- get_current_branch ---
-
-
-def test_get_current_branch_success(tmp_path, mocker):
-    mock_run = mocker.patch("link.app.updater.subprocess.run")
-    mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="dev\n", stderr="")
-
-    assert updater.get_current_branch(tmp_path) == "dev"
-
-
-def test_get_current_branch_detached_head(tmp_path, mocker):
-    mock_run = mocker.patch("link.app.updater.subprocess.run")
-    mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="HEAD\n", stderr="")
-
-    assert updater.get_current_branch(tmp_path) is None
-
-
-def test_get_current_branch_failure(tmp_path, mocker):
-    mock_run = mocker.patch("link.app.updater.subprocess.run")
-    mock_run.return_value = subprocess.CompletedProcess([], 128, stdout="", stderr="not a repo")
-
-    assert updater.get_current_branch(tmp_path) is None
-
-
-# --- pull_and_update ---
-
-
-def test_pull_up_to_date(tmp_path, mocker):
-    mocker.patch("link.app.updater._command_exists", return_value=True)
-    mocker.patch("link.app.updater.get_current_branch", return_value="main")
-
-    def fake_run(cmd, **kwargs):
-        # fetch: succeeds silently
-        if cmd[:2] == ["git", "fetch"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        # rev-list: 0 commits behind
-        if cmd[:2] == ["git", "rev-list"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
-        raise AssertionError(f"Unexpected command: {cmd}")
-
-    mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
-
-    assert updater.pull_and_update(tmp_path) is False
-
-
-def test_pull_behind_clean_tree(tmp_path, mocker):
-    mocker.patch("link.app.updater._command_exists", return_value=True)
-    mocker.patch("link.app.updater.get_current_branch", return_value="main")
-
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[:2] == ["git", "rev-list"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="3\n", stderr="")
-        if cmd[:3] == ["git", "status", "--porcelain"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
-
-    assert updater.pull_and_update(tmp_path) is True
-
-    # Verify key commands were run in order: fetch, rev-list, status, pull, uv install
-    fetch_called = any(c[:2] == ["git", "fetch"] for c in calls)
-    pull_called = any(c[:2] == ["git", "pull"] for c in calls)
-    uv_install_called = any(c[:4] == ["uv", "pip", "install", "-e"] for c in calls)
-    stash_called = any("stash" in c for c in calls)
-
-    assert fetch_called
-    assert pull_called
-    assert uv_install_called
-    assert not stash_called, "Should not stash a clean tree"
-
-
-def test_pull_behind_dirty_tree_stashes(tmp_path, mocker):
-    mocker.patch("link.app.updater._command_exists", return_value=True)
-    mocker.patch("link.app.updater.get_current_branch", return_value="main")
-
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[:2] == ["git", "rev-list"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="2\n", stderr="")
-        if cmd[:3] == ["git", "status", "--porcelain"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=" M file.py\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
-
-    assert updater.pull_and_update(tmp_path) is True
-
-    stash_push = any(c[:4] == ["git", "stash", "push", "--include-untracked"] for c in calls)
-    stash_pop = any(c[:3] == ["git", "stash", "pop"] for c in calls)
-    assert stash_push and stash_pop
-
-
-def test_pull_stash_failure_raises(tmp_path, mocker):
-    mocker.patch("link.app.updater._command_exists", return_value=True)
-    mocker.patch("link.app.updater.get_current_branch", return_value="main")
-
-    def fake_run(cmd, **kwargs):
-        if cmd[:2] == ["git", "rev-list"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="1\n", stderr="")
-        if cmd[:3] == ["git", "status", "--porcelain"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=" M file.py\n", stderr="")
-        if cmd[:3] == ["git", "stash", "push"]:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="conflict")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
-
-    with pytest.raises(RuntimeError, match="stash"):
-        updater.pull_and_update(tmp_path)
-
-
-def test_pull_no_git_raises(tmp_path, mocker):
-    mocker.patch("link.app.updater._command_exists", return_value=False)
-
-    with pytest.raises(RuntimeError, match="git is required"):
-        updater.pull_and_update(tmp_path)
-
-
-def test_pull_uses_current_branch_over_default(tmp_path, mocker):
-    """On a dev branch, the update should pull from origin/dev, not origin/main."""
-    mocker.patch("link.app.updater._command_exists", return_value=True)
-    mocker.patch("link.app.updater.get_current_branch", return_value="dev")
-
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[:2] == ["git", "rev-list"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
-
-    updater.pull_and_update(tmp_path, branch="main")
-
-    # Fetch should target dev, not main
-    fetch_cmd = next(c for c in calls if c[:2] == ["git", "fetch"])
-    assert fetch_cmd[2:] == ["origin", "dev"]
-
-
-# --- reinstall_plugin_binaries ---
-
-
-def test_reinstall_plugin_binaries_no_plugins_dir(tmp_path, mocker):
-    mock_run = mocker.patch("link.app.updater.subprocess.run")
-    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("alpha"))
-    mock_run.assert_not_called()
-
-
-def test_reinstall_plugin_binaries_runs_only_referenced_plugins(tmp_path, mocker):
-    plugins = tmp_path / "plugins"
-    _write_plugin(plugins, "alpha", entry_point_type="alpha")
-    _write_plugin(plugins, "bravo", entry_point_type="bravo")
-    (plugins / "no_installer").mkdir(parents=True)  # Should be skipped (no install.py)
-
-    mock_run = mocker.patch("link.app.updater.subprocess.run")
-    mock_run.return_value = subprocess.CompletedProcess([], 0)
-
-    # Config only references "alpha" — bravo should be skipped even though it has install.py
-    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("alpha"))
-
-    assert mock_run.call_count == 1
-    called_scripts = [str(call.args[0][-1]) for call in mock_run.call_args_list]
-    assert any("alpha" in s for s in called_scripts)
-    assert not any("bravo" in s for s in called_scripts)
-
-
-def test_reinstall_plugin_skips_plugin_without_pyproject(tmp_path, mocker):
-    """A plugin with no pyproject.toml has no declared entry points → always skipped."""
-    plugins = tmp_path / "plugins"
-    _write_plugin(plugins, "orphan", entry_point_type=None)  # no pyproject
-
-    mock_run = mocker.patch("link.app.updater.subprocess.run")
-    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("orphan"))
-    mock_run.assert_not_called()
-
-
-def test_reinstall_plugin_continues_on_failure(tmp_path, mocker):
-    """One plugin failing should not stop the others."""
-    plugins = tmp_path / "plugins"
-    _write_plugin(plugins, "alpha", entry_point_type="alpha")
-    _write_plugin(plugins, "bravo", entry_point_type="bravo")
-
-    def fake_run(cmd, **kwargs):
-        if "alpha" in str(cmd):
-            raise subprocess.CalledProcessError(1, cmd)
-        return subprocess.CompletedProcess(cmd, 0)
-
-    mocker.patch("link.app.updater.subprocess.run", side_effect=fake_run)
-
-    # Should not raise
-    updater.reinstall_plugin_binaries(tmp_path, _config_with_types("alpha", "bravo"))
-
 
 # ===========================================================================
 # Bundle OTA tests — exercise the in-process http.server, real tarballs/zips,
@@ -334,7 +93,7 @@ def _serve_dir(directory: Path):
         thread.join(timeout=2)
 
 
-# --- discover_install_root / read_manifest / read_boot_config ---
+# --- discover_install_root / read_manifest ---
 
 
 def test_discover_install_root_via_current_symlink(tmp_path):
@@ -387,26 +146,6 @@ def test_read_manifest_missing_field(tmp_path):
     (tmp_path / updater.CURRENT_LINK).symlink_to(Path(updater.VERSIONS_DIR) / "1.0.0", target_is_directory=True)
     with pytest.raises(ManifestMalformed):
         updater.read_manifest(tmp_path)
-
-
-def test_read_boot_config_present(tmp_path):
-    (tmp_path / updater.BOOT_NAME).write_text(
-        json.dumps(
-            {
-                "host_app": "host-app",
-                "plugin_set": ["llm"],
-                "channel": "stable",
-                "asset_repo": "locai-co-uk/locai-link",
-            }
-        )
-    )
-    cfg = updater.read_boot_config(tmp_path)
-    assert cfg is not None
-    assert cfg.host_app == "host-app"
-
-
-def test_read_boot_config_absent(tmp_path):
-    assert updater.read_boot_config(tmp_path) is None
 
 
 # --- latest_release_for ---
@@ -546,15 +285,14 @@ def test_sha256_from_checksums_matches_asset_line():
     assert got == "ab" * 32
 
 
-def test_sha256_from_checksums_missing_entry_raises():
-    body = f"{'ab' * 32}  something-else.tar.gz\n".encode()
-    session = _StubSession({"https://example/checksums.txt": (200, body)})
-    with pytest.raises(updater.VerifyFailed):
-        updater._sha256_from_checksums("https://example/checksums.txt", "wanted.tar.gz", session=session)
-
-
-def test_sha256_from_checksums_rejects_bad_hex():
-    body = b"nothex  wanted.tar.gz\n"
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"{'ab' * 32}  something-else.tar.gz\n".encode(),  # wanted asset not listed
+        b"nothex  wanted.tar.gz\n",  # entry present but hash isn't valid hex
+    ],
+)
+def test_sha256_from_checksums_rejects(body):
     session = _StubSession({"https://example/checksums.txt": (200, body)})
     with pytest.raises(updater.VerifyFailed):
         updater._sha256_from_checksums("https://example/checksums.txt", "wanted.tar.gz", session=session)
@@ -826,18 +564,18 @@ def test_gc_keeps_extra_when_keep_higher(tmp_path):
     reason="Fixture uses a #!/usr/bin/env bash shebang script which Windows can't exec. "
     "Windows OTA validation exercises health_check with a real locai-link.exe in CI.",
 )
-def test_health_check_passes_on_exit_zero(tmp_path):
+@pytest.mark.parametrize(
+    "script_body,expected",
+    [
+        ("#!/usr/bin/env bash\nexit 0\n", True),
+        ('#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n', False),
+    ],
+)
+def test_health_check_reflects_exit_code(tmp_path, script_body, expected):
     script = tmp_path / "fake_runtime"
-    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    script.write_text(script_body)
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    assert updater.health_check(script, timeout=5.0) is True
-
-
-def test_health_check_fails_on_exit_nonzero(tmp_path):
-    script = tmp_path / "fake_runtime"
-    script.write_text('#!/usr/bin/env bash\necho "boom" >&2\nexit 1\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    assert updater.health_check(script, timeout=5.0) is False
+    assert updater.health_check(script, timeout=5.0) is expected
 
 
 def test_health_check_fails_on_missing_binary(tmp_path):
@@ -888,17 +626,11 @@ def test_swap_bundle_short_circuits_when_already_at_latest(tmp_path, mocker):
     flip_spy.assert_not_called()
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="fake_extract lays down a bash-script runtime the Windows loader can't exec; "
-    "health_check fails for the wrong reason. Windows OTA is validated separately.",
-)
-def test_swap_bundle_happy_path(tmp_path, mocker):
-    """End-to-end mock: newer release available -> chain runs, current flipped."""
-    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
-    new_version = "1.0.16"
+def _prime_swap(mocker, new_version, *, exit_code):
+    """Mock the swap_bundle chain (release/download/verify/extract) so only the
+    on-disk flip + health-check run for real. The extracted runtime stub exits
+    with ``exit_code`` (0 = healthy; nonzero triggers rollback)."""
     asset_name = f"locai-link-llm-linux-x86_64-v{new_version}.tar.gz"
-
     mocker.patch.object(
         updater,
         "latest_release_for",
@@ -911,8 +643,6 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
         ),
     )
 
-    # Stub download + verify so we don't need a network. extract gets a real
-    # tarball so the on-disk flip / health-check exercise real code paths.
     def fake_download(url, dest, **kw):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"placeholder")
@@ -920,35 +650,43 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
 
     mocker.patch.object(updater, "download", side_effect=fake_download)
     mocker.patch.object(updater, "verify")
-    # verify_extracted_macos shells out to `codesign` on macOS runners;
-    # the fake bash-script runtime we lay down isn't signed, so mock it.
+    # verify_extracted_macos shells out to codesign; the fake bash runtime isn't signed.
     mocker.patch.object(updater, "verify_extracted_macos")
 
     def fake_extract_archive(archive, staging):
-        # Lay down a versioned payload (manifest + runnable runtime stub) in the
-        # extract staging; _locate_versioned_payload finds it by the runtime.
         payload = staging / "payload"
         payload.mkdir(parents=True, exist_ok=True)
         (payload / updater.MANIFEST_NAME).write_text(
             f'{{"manifest_version": 1, "asset_name": "locai-link-llm-linux-x86_64", "version": "{new_version}"}}'
         )
         runtime = payload / updater.RUNTIME_BINARY
-        runtime.write_text("#!/usr/bin/env bash\nexit 0\n")
+        runtime.write_text(f"#!/usr/bin/env bash\nexit {exit_code}\n")
         runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     mocker.patch.object(updater, "_extract_archive", side_effect=fake_extract_archive)
 
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fake_extract lays down a bash-script runtime the Windows loader can't exec; "
+    "health_check fails for the wrong reason. Windows OTA is validated separately.",
+)
+def test_swap_bundle_happy_path(tmp_path, mocker):
+    """End-to-end mock: newer release available -> chain runs, current flipped."""
+    root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
+    _prime_swap(mocker, "1.0.16", exit_code=0)
+
     assert updater.swap_bundle(install_root=root) is True
-    assert (root / updater.CURRENT_LINK).resolve().name == new_version
+    assert (root / updater.CURRENT_LINK).resolve().name == "1.0.16"
     assert (root / updater.PREVIOUS_LINK).resolve().name == "1.0.15"
 
     # Phase 4: the launcher's post-update health window is gated on this stamp.
     stamp = root / updater.UPDATE_PENDING_STAMP
     assert stamp.is_file(), "swap_bundle must write .update-pending after flip"
-    lines = stamp.read_text(encoding="utf-8").splitlines()
-    assert len(lines) >= 2
-    assert int(lines[0]) > 0, "stamp first line must be a unix timestamp"
-    assert lines[1] == "1.0.15", "stamp second line must record the previous version"
+    stamp_lines = stamp.read_text(encoding="utf-8").splitlines()
+    assert len(stamp_lines) >= 2
+    assert int(stamp_lines[0]) > 0, "stamp first line must be a unix timestamp"
+    assert stamp_lines[1] == "1.0.15", "stamp second line must record the previous version"
 
 
 @pytest.mark.skipif(
@@ -960,53 +698,24 @@ def test_swap_bundle_happy_path(tmp_path, mocker):
 def test_swap_bundle_rolls_back_on_health_check_failure(tmp_path, mocker):
     """A failing self-check should remove the staged version and raise."""
     root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
-    new_version = "1.0.16"
-    asset_name = f"locai-link-llm-linux-x86_64-v{new_version}.tar.gz"
-
-    mocker.patch.object(
-        updater,
-        "latest_release_for",
-        return_value=ReleaseInfo(
-            version=new_version,
-            tag=f"v{new_version}",
-            asset_name=asset_name,
-            download_url="https://example/" + asset_name,
-            sha256_url="https://example/" + asset_name + ".sha256",
-        ),
-    )
-    mocker.patch.object(updater, "download", side_effect=lambda url, dest, **_: dest)
-    mocker.patch.object(updater, "verify")
-    # Same as the happy-path test: codesign would reject the fake runtime.
-    mocker.patch.object(updater, "verify_extracted_macos")
-
-    def fake_extract_archive(archive, staging):
-        # A runtime that exits nonzero so health_check fails.
-        payload = staging / "payload"
-        payload.mkdir(parents=True, exist_ok=True)
-        (payload / updater.MANIFEST_NAME).write_text(
-            f'{{"manifest_version": 1, "asset_name": "locai-link-llm-linux-x86_64", "version": "{new_version}"}}'
-        )
-        runtime = payload / updater.RUNTIME_BINARY
-        runtime.write_text("#!/usr/bin/env bash\nexit 17\n")
-        runtime.chmod(runtime.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    mocker.patch.object(updater, "_extract_archive", side_effect=fake_extract_archive)
+    _prime_swap(mocker, "1.0.16", exit_code=17)
     flip_spy = mocker.patch.object(updater, "flip_current")
 
     with pytest.raises(updater.HealthCheckFailed):
         updater.swap_bundle(install_root=root)
 
     # The staged version dir should be cleaned up on failure.
-    assert not (root / updater.VERSIONS_DIR / new_version).exists()
+    assert not (root / updater.VERSIONS_DIR / "1.0.16").exists()
     # And no flip should have happened.
     flip_spy.assert_not_called()
     assert (root / updater.CURRENT_LINK).resolve().name == "1.0.15"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="whole-app swap targets macOS/Linux")
-def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
-    """A real tarball carrying runtime + a changed companion: swap_bundle flips
-    the runtime and replaces the companion binary."""
+def test_swap_bundle_flips_runtime_no_app_swap_linux(tmp_path, mocker, monkeypatch):
+    """A real tarball carrying runtime + a changed companion on Linux: swap_bundle
+    flips the runtime but leaves the single locai-link binary alone (no separate
+    UI app to whole-app swap; the binary self-swap is tracked separately)."""
     monkeypatch.setattr(updater.sys, "platform", "linux")
     root = _install_root_with_runtime_stub(tmp_path, "1.0.15")
     (root / "companion").write_bytes(b"OLD-COMPANION")
@@ -1023,7 +732,6 @@ def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
             f"{wrap}/bundle/versions/{new_version}/manifest.json": manifest_json,
             f"{wrap}/bundle/versions/{new_version}/{updater.RUNTIME_BINARY}": b"runtime",
             f"{wrap}/companion": b"NEW-COMPANION",
-            f"{wrap}/setup-assistant": b"NEW-SA",
         }
     )
 
@@ -1052,8 +760,79 @@ def test_swap_bundle_swaps_changed_companion(tmp_path, mocker, monkeypatch):
 
     assert updater.swap_bundle(install_root=root) is True
     assert (root / updater.CURRENT_LINK).resolve().name == new_version
-    assert (root / "companion").read_bytes() == b"NEW-COMPANION"
-    restart.assert_any_call("companion")
+    # Linux has no separate UI app to whole-app swap, so 'companion' is left as-is
+    # and no UI app is restarted.
+    assert (root / "companion").read_bytes() == b"OLD-COMPANION"
+    restart.assert_not_called()
+
+
+def test_ota_sweeps_legacy_setup_assistant_linux(tmp_path, monkeypatch):
+    """An OTA-only device keeps a pre-merge Setup Assistant on disk (the pkg /
+    uninstall scripts never run for it) — swap_bundle's sweep removes it."""
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "setup-assistant").write_bytes(b"legacy")
+    desktop = tmp_path / "home" / ".local" / "share" / "applications"
+    desktop.mkdir(parents=True)
+    (desktop / "locai-setup-assistant.desktop").write_text("[Desktop Entry]\n")
+    monkeypatch.setattr(updater.Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+    updater._remove_legacy_setup_assistant(root)
+
+    assert not (root / "setup-assistant").exists()
+    assert not (desktop / "locai-setup-assistant.desktop").exists()
+
+
+def test_stop_legacy_supervisor_macos(tmp_path, monkeypatch):
+    """Silent, no-admin: remove the agent LaunchAgent plist + boot the agent out
+    detached so the device drops to a single runtime right after the OTA."""
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    agent_plist = home / "Library" / "LaunchAgents" / f"{updater._LEGACY_AGENT_LABEL}.plist"
+    agent_plist.write_text("<plist/>")
+    monkeypatch.setattr(updater, "_macos_console_uid", lambda: "501")
+    monkeypatch.setattr(updater, "_home_for_uid", lambda uid: home)
+    popen_calls: list = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: popen_calls.append((args, kw)))
+
+    updater._stop_legacy_supervisor_macos(tmp_path / "root")
+
+    assert not agent_plist.exists()  # agent unit removed (second supervisor gone)
+    assert popen_calls, "expected a detached launchctl bootout of the agent"
+    args, kw = popen_calls[0]
+    assert args[:2] == ["launchctl", "bootout"] and updater._LEGACY_AGENT_LABEL in args[2]
+    assert kw.get("start_new_session") is True
+
+
+def test_run_admin_finish_macos_prompts_once(tmp_path, monkeypatch):
+    """One admin prompt (osascript) runs the version-matched finisher; gated to at
+    most once per version so a dismissed prompt doesn't nag every boot."""
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    root = tmp_path / "root"
+    (root / "current").mkdir(parents=True)
+    finisher = root / "current" / "finish-migration.sh"
+    finisher.write_text("#!/bin/bash\n")
+    (root / "state").mkdir()
+
+    class _Man:
+        version = "1.3.0"
+
+    monkeypatch.setattr(updater, "read_manifest", lambda r: _Man)
+    calls: list = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: calls.append((args, kw)))
+
+    updater._run_admin_finish_macos(root)
+    updater._run_admin_finish_macos(root)  # gated: no second prompt
+
+    assert len(calls) == 1, "should prompt at most once per version"
+    args, kw = calls[0]
+    assert args[0] == "osascript"
+    assert str(finisher) in args  # the finisher path is passed as an argv item
+    assert "administrator privileges" in args[2]
+    assert kw.get("start_new_session") is True
+    assert (root / "state" / updater._MIGRATION_PROMPTED_MARKER).read_text().strip() == "1.3.0"
 
 
 # --- check_update_available --------------------------------------
@@ -1205,7 +984,10 @@ def test_swap_changed_ui_apps_skips_unchanged(tmp_path, monkeypatch):
     assert (root / "companion").read_text() == "OLD", "unchanged app must not be touched"
 
 
-def test_swap_changed_ui_apps_replaces_changed(tmp_path, monkeypatch):
+def test_swap_changed_ui_apps_noop_on_linux(tmp_path, monkeypatch):
+    # Post-merge the Linux UI ships inside the single locai-link binary, so there
+    # is no separate app to whole-app swap (the binary self-swap is tracked
+    # separately). A changed-app hash must therefore be a no-op, not touch disk.
     monkeypatch.setattr(updater.sys, "platform", "linux")
     staging = tmp_path / "extract"
     staging.mkdir()
@@ -1215,8 +997,8 @@ def test_swap_changed_ui_apps_replaces_changed(tmp_path, monkeypatch):
     (root / "companion").write_text("OLD")
 
     swapped = updater.swap_changed_ui_apps(staging, root, {"companion": "old"}, {"companion": "new"})
-    assert swapped == ["companion"]
-    assert (root / "companion").read_text() == "NEW"
+    assert swapped == []
+    assert (root / "companion").read_text() == "OLD"  # left untouched
 
 
 def test_swap_changed_ui_apps_skips_when_missing_from_payload(tmp_path, monkeypatch):

@@ -1,27 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 #
-# systemd user service for the Locai Link companion (menubar tray).
+# The single Locai Link user service: one `locai-link` binary that supervises
+# the Python runtime child in-process AND shows the menubar tray. (The former
+# separate agent+companion split is folded into this one unit.)
 #
-# Installed to ~/.config/systemd/user/ by the Setup Assistant on
-# Finish. Auto-starts at graphical login when enabled via:
+# Installed to ~/.config/systemd/user/ on Finish. Auto-starts at graphical login
+# when enabled via:
 #
 #     systemctl --user daemon-reload
 #     systemctl --user enable --now locai-link-companion.service
 #
-# The `Environment=` block bakes in the two workarounds our WebKit
-# runtime needs on modern Linux — DMABUF renderer off (Nvidia + some
-# Intel drivers throw GBM errors otherwise) and X11 backend forced
-# (Wayland's tray-icon story is DE-dependent; XWayland + AppIndicator
-# is the universally-working path). Users who want to try native
-# Wayland can override with a drop-in file.
+# The `Environment=` block bakes in the two workarounds our WebKit runtime needs
+# on modern Linux: DMABUF renderer off (Nvidia + some Intel drivers throw GBM
+# errors otherwise) and X11 backend forced (Wayland's tray-icon story is
+# DE-dependent; XWayland + AppIndicator is the universally-working path). Users
+# who want to try native Wayland can override with a drop-in file.
 
 [Unit]
-Description=Locai Link Companion (menubar)
+Description=Locai Link
 Documentation=https://control.locai.co.uk
-# Companion is a GUI tray app — only starts once a graphical session
-# is up. Without this it would race the graphical session on bring-up
-# and fail to attach to the tray.
+# GUI tray app — only starts once a graphical session is up. Without this it
+# would race the graphical session on bring-up and fail to attach to the tray.
 After=graphical-session.target
 PartOf=graphical-session.target
 
@@ -29,11 +29,13 @@ PartOf=graphical-session.target
 Type=simple
 Environment=WEBKIT_DISABLE_DMABUF_RENDERER=1
 Environment=GDK_BACKEND=x11
-ExecStart=%h/.local/share/locai/companion
+# No args: the tray + in-process supervisor. (`locai-link run` is the headless
+# CLI/service path.)
+ExecStart=%h/.local/share/locai/locai-link
 Restart=on-failure
 RestartSec=5s
-StandardOutput=append:%h/.local/share/locai/logs/companion.stdout.log
-StandardError=append:%h/.local/share/locai/logs/companion.stderr.log
+StandardOutput=append:%h/.local/share/locai/logs/link.stdout.log
+StandardError=append:%h/.local/share/locai/logs/link.stderr.log
 
 [Install]
 WantedBy=graphical-session.target

@@ -157,8 +157,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Rust toolchain (for launcher)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Sync deps
         shell: bash
@@ -294,90 +294,39 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_bytes().decode())['project']['version'])")"
-          for conf in crates/companion/src-tauri/tauri.conf.json crates/setup_assistant/src-tauri/tauri.conf.json; do
-            python3 -c "import json,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d['version']=sys.argv[2]; p.write_text(json.dumps(d,indent=2)+chr(10))" "$conf" "$VERSION"
-          done
-          echo "stamped UI app versions to $VERSION"
-
-      - name: Build Setup Assistant binary (Linux)
-        # --no-bundle: skip .deb/.rpm/AppImage — pack.sh ships the raw
-        # binary alongside the runtime bundle in the tarball layout.
-        if: runner.os == 'Linux'
-        shell: bash
-        working-directory: crates/setup_assistant
-        run: |
-          set -euo pipefail
-          npm ci
-          npm run tauri build -- --no-bundle
+          conf=crates/link/src-tauri/tauri.conf.json
+          python3 -c "import json,sys,pathlib; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d['version']=sys.argv[2]; p.write_text(json.dumps(d,indent=2)+chr(10))" "$conf" "$VERSION"
+          echo "stamped UI app version to $VERSION"
 
       - name: Build companion binary (Linux)
         if: runner.os == 'Linux'
         shell: bash
-        working-directory: crates/companion
+        working-directory: crates/link
         run: |
           set -euo pipefail
           npm ci
           npm run tauri build -- --no-bundle
 
-      - name: Build Setup Assistant .app (macOS)
-        # `tauri build` invokes the frontend build (npm run build)
-        # first via tauri.conf.json's beforeBuildCommand, then compiles
-        # the Rust side. Output lands under crates/target/release/bundle/macos/.
-        if: runner.os == 'macOS'
-        shell: bash
-        working-directory: crates/setup_assistant
-        run: |
-          set -euo pipefail
-          npm ci
-          npm run tauri build -- --bundles app
-
-      - name: Codesign Setup Assistant .app (macOS)
-        # Reuses the same sign_macos.py runner as the runtime bundle,
-        # pointed at the .app and the SA-specific entitlements (which
-        # only ask for allow-jit — see crates/setup_assistant/src-tauri/
-        # entitlements.plist for why).
-        if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
-        env:
-          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Setup Assistant.app is the only .app in the SA crate's
-          # target/bundle/macos — but the companion build below will
-          # add another. Scope this find to just the SA sub-tree by
-          # naming the productName ("setup_assistant" from
-          # crates/setup_assistant/src-tauri/tauri.conf.json).
-          SA_APP=$(find crates/target/release/bundle/macos -maxdepth 2 -type d -iname "setup_assistant.app" | head -n 1)
-          if [ -z "$SA_APP" ]; then
-            echo "::error::Setup Assistant .app not found after tauri build"
-            exit 1
-          fi
-          echo "Signing $SA_APP"
-          uv run python bundling/sign_macos.py \
-            --bundle "$SA_APP" \
-            --entitlements crates/setup_assistant/src-tauri/entitlements.plist \
-            --skip-notarise
-          echo "SA_APP_PATH=$SA_APP" >> "$GITHUB_ENV"
-
       - name: Build companion .app (macOS)
-        # Same pattern as the Setup Assistant build above. Companion's
-        # productName is "Locai Link" (with space) so its .app basename
-        # is "Locai Link.app" — that's exactly what we want in
-        # /Applications so it's the user-facing entry point.
+        # `tauri build` invokes the frontend build (npm run build) first via
+        # tauri.conf.json's beforeBuildCommand, then compiles the Rust side.
+        # Companion's productName is "Locai Link" (with space) so its .app
+        # basename is "Locai Link.app" — exactly what we want in /Applications
+        # as the user-facing entry point. Output lands under
+        # crates/target/release/bundle/macos/.
         if: runner.os == 'macOS'
         shell: bash
-        working-directory: crates/companion
+        working-directory: crates/link
         run: |
           set -euo pipefail
           npm ci
           npm run tauri build -- --bundles app
 
       - name: Codesign companion .app (macOS)
-        # Reuses the SA's entitlements.plist — allow-jit is the only
-        # relaxation the WebKit view needs. Same signing chain as the
-        # SA. If the companion needs different entitlements later
-        # (e.g. Login Items via SMAppService), split out to a
-        # companion-specific entitlements file.
+        # allow-jit is the only relaxation the WebKit view needs
+        # (crates/link/src-tauri/entitlements.plist). If the app needs
+        # different entitlements later (e.g. Login Items via SMAppService),
+        # extend that file.
         if: runner.os == 'macOS' && steps.sign_check.outputs.ready == 'true'
         env:
           APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
@@ -392,7 +341,7 @@ jobs:
           echo "Signing $COMPANION_APP"
           uv run python bundling/sign_macos.py \
             --bundle "$COMPANION_APP" \
-            --entitlements crates/setup_assistant/src-tauri/entitlements.plist \
+            --entitlements crates/link/src-tauri/entitlements.plist \
             --skip-notarise
           echo "COMPANION_APP_PATH=$COMPANION_APP" >> "$GITHUB_ENV"
 
@@ -412,7 +361,6 @@ jobs:
           rm -rf "$NOTARY_DIR"
           mkdir -p "$NOTARY_DIR"
           cp -R "$COMPANION_APP_PATH" "$NOTARY_DIR/"
-          cp -R "$SA_APP_PATH" "$NOTARY_DIR/"
 
           # Zip both apps into one submission (notarytool notarises all
           # nested code; stapler then resolves each app's ticket by cdhash).
@@ -428,9 +376,7 @@ jobs:
           # every downstream copy carries the ticket. Validate hard-fails
           # the build if the ticket didn't attach.
           xcrun stapler staple "$COMPANION_APP_PATH"
-          xcrun stapler staple "$SA_APP_PATH"
           xcrun stapler validate "$COMPANION_APP_PATH"
-          xcrun stapler validate "$SA_APP_PATH"
 
       - name: Codesign runtime bundle (macOS)
         # Signs the Python runtime tree (dist/locai-link/) but skips
@@ -476,26 +422,22 @@ jobs:
             --template bundling/pkg/boot.json \
             --output "$STAGING/boot.json"
 
-          # Setup Assistant .app — path was stashed by the codesign step.
-          cp -R "$SA_APP_PATH" "$STAGING/Setup Assistant.app"
-
           # Companion menubar .app — the user-facing "Locai Link" in
-          # /Applications post-install (postinstall symlinks it there).
+          # /Applications post-install (postinstall symlinks it there). Also
+          # hosts the first-run setup window.
           cp -R "$COMPANION_APP_PATH" "$STAGING/Locai Link.app"
 
-          # App content hashes for whole-app OTA: record companion /
-          # setup-assistant source hashes in the manifest so swap_bundle re-swaps
-          # them only when they changed.
+          # App content hash for whole-app OTA: record the companion source
+          # hash in the manifest so swap_bundle re-swaps it only when changed.
           python3 bundling/inject_app_hashes.py \
             --manifest "$STAGING/current/manifest.json" --repo-root .
 
-          # LaunchAgent plists — bundled but NOT bootstrapped at
-          # install time. The Setup Assistant registers them on
-          # Finish (always) and toggles RunAtLoad based on the
-          # "Start at login" checkbox on the Permissions step.
+          # LaunchAgent plist — bundled but NOT bootstrapped at
+          # install time. The app registers it on Finish (always) and
+          # toggles RunAtLoad based on the "Start at login" checkbox on the
+          # setup wizard's Permissions step. One unit: the merged binary
+          # supervises the runtime in-process.
           mkdir -p "$STAGING/LaunchAgents"
-          cp bundling/pkg/LaunchAgents/uk.co.locai.link.agent.plist \
-             "$STAGING/LaunchAgents/uk.co.locai.link.agent.plist"
           cp bundling/pkg/LaunchAgents/uk.co.locai.link.companion.plist \
              "$STAGING/LaunchAgents/uk.co.locai.link.companion.plist"
 
@@ -603,7 +545,6 @@ jobs:
           mkdir -p "$OTA_ROOT/versions"
           cp -R "$STAGING/versions/$VERSION_DIR" "$OTA_ROOT/versions/$VERSION_DIR"
           cp -R "$STAGING/Locai Link.app"        "$OTA_ROOT/Locai Link.app"
-          cp -R "$STAGING/Setup Assistant.app"   "$OTA_ROOT/Setup Assistant.app"
           TAR_NAME="${ASSET_BASE}-macos-arm64-${TAG}.tar.gz"
           tar -czf "release-assets/$TAR_NAME" -C "$OTA_ROOT" .
           python - <<EOF > "release-assets/${TAR_NAME}.sha256"

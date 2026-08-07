@@ -31,43 +31,10 @@ def _args(**overrides):
         token=None,
         api_url=None,
         fleet_key=None,
-        prod=True,  # short-circuit after _deploy_service so the runtime never starts
+        headless=True,  # short-circuit after _deploy_service so the runtime never starts
     )
     base.update(overrides)
     return argparse.Namespace(**base)
-
-
-def _install_args(**overrides):
-    base = dict(
-        repo_url="https://example.invalid/repo.git",
-        branch="main",
-        device_name=None,
-        email=None,
-        password=None,
-        token=None,
-        registration_key=None,
-        fleet_key=None,
-        device_type="other",
-        start_running=False,
-        api_url=None,
-        dev=False,
-    )
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def test_install_fleet_key_skips_interactive_flow(mocker, tmp_path, monkeypatch):
-    """install --fleet-key must not prompt and must forward the key to run."""
-    (tmp_path / "pyproject.toml").write_text("")
-    monkeypatch.chdir(tmp_path)
-    run_mock = mocker.patch("link.main.subprocess.run")
-    mocker.patch("builtins.input", side_effect=AssertionError("must not prompt"))
-
-    mainmod.install(_install_args(fleet_key="flk_abc", api_url=API_URL))
-
-    cmds = [c.args[0] for c in run_mock.call_args_list]
-    reg = [c for c in cmds if "--fleet-key" in c]
-    assert reg == [["uv", "run", "main.py", "run", "--fleet-key", "flk_abc", "--api-url", API_URL]]
 
 
 def test_headless_enrolls_when_no_session_and_fleet_key(mocker):

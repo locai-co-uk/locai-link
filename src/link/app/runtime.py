@@ -99,6 +99,13 @@ class AgentRuntime:
         self.shutdown_event = threading.Event()
         # Guards read-modify-write of the pending uninstall-reports file.
         self._pending_reports_lock = threading.Lock()
+        # Serializes concurrent DEPLOY_MODEL downloads that target the SAME file
+        # (e.g. two catalog aliases for one GGUF, deployed together at onboarding).
+        # Without it both stream into the same `<name>.partial` and race the
+        # rename — the loser hits FileNotFoundError. Keyed on model_name; the
+        # waiter then hits the `target_path.exists()` cache guard and skips.
+        self._download_locks: dict[str, threading.Lock] = {}
+        self._download_locks_guard = threading.Lock()
         self.update_requested = False
         self.config_restart_requested = False
 
@@ -107,6 +114,10 @@ class AgentRuntime:
             version=resolve_agent_version(),
             models_provider=self._snapshot_models,
             command_handler=self.handle_command,
+            # Decline a companion /update synchronously when there's no
+            # installable asset — mirrors the UPDATE_AGENT handler's pre-flight
+            # so the UI never hangs on "Updating" for a decline.
+            update_preflight=self._can_update,
         )
         # Transport diagnostic: the session is opened before AgentRuntime exists,
         # so holding one here means connected=True. Mid-session disconnects aren't
@@ -120,7 +131,7 @@ class AgentRuntime:
             )
         # Health server owns the update-available field; inject the checker.
         # Version check uses the device's api_url (Control); download uses GitHub.
-        from link.app.updater import check_ui_version_drift, check_update_available
+        from link.app.updater import check_ui_version_drift, check_update_available, heal_legacy_layout
 
         control_base = getattr(agent_config.identity, "api_url", None) if agent_config.identity else None
         self.health_server = HealthServer(
@@ -132,6 +143,9 @@ class AgentRuntime:
         # apps (pre-fix root-owned bundles), prompt a one-time reinstall. No-op
         # off macOS / on source installs.
         check_ui_version_drift()
+        # If a frictionless OTA landed this runtime on a pre-merge layout, reinstall
+        # the current release so every component migrates to this version (Linux).
+        heal_legacy_layout()
 
         if threading.current_thread() is threading.main_thread():
             try:
@@ -139,6 +153,15 @@ class AgentRuntime:
                 signal.signal(signal.SIGTERM, self._signal_handler)
             except ValueError:
                 logger.debug("Signal handlers skipped (not main thread).")
+
+    def _can_update(self) -> bool:
+        """Whether an OTA can actually proceed. A frozen install needs a
+        published per-platform asset; source installs update via git (always
+        True). Shared by the UPDATE_AGENT handler and the health server's
+        /update pre-flight so a decline is decided one way."""
+        from link.app.updater import bundle_asset_available, running_frozen_bundle
+
+        return not (running_frozen_bundle() and not bundle_asset_available())
 
     def handle_command(self, data: dict[str, Any]) -> None:
         """Validate an incoming command against the shared contract and dispatch it.
@@ -286,13 +309,11 @@ class AgentRuntime:
 
             elif isinstance(cmd, UpdateAgentCommand):
                 logger.info("OTA update command received. Preparing to update...", extra={"category": "deployment"})
-                from link.app.updater import bundle_asset_available, running_frozen_bundle
-
                 # Pre-flight: a frozen install with no published per-platform asset
                 # can't update. Accepting anyway shuts down, fails in swap_bundle,
                 # relaunches, and loops forever (cancelling in-flight work each
                 # time). Decline and stay on the current version instead.
-                if running_frozen_bundle() and not bundle_asset_available():
+                if not self._can_update():
                     logger.warning("Update requested but no installable asset is published yet; staying put.")
                     self.status_logger.report_command(cmd.id, "failed", "No installable update asset available yet")
                 else:
@@ -608,6 +629,13 @@ class AgentRuntime:
             logger.info(f"Initiating deployment for command '{command_id}'...")
             thread.start()
 
+    def _download_lock_for(self, model_name: str) -> threading.Lock:
+        """Per-model_name download lock, created on first use. Concurrent deploys
+        of the same target file share it so they serialize instead of racing the
+        `.partial` staging path."""
+        with self._download_locks_guard:
+            return self._download_locks.setdefault(model_name, threading.Lock())
+
     def _deploy_worker(self, cmd: DeployModelCommand, cancel_event: threading.Event) -> None:
         """Orchestrate download → publish → commit for a single DEPLOY_MODEL.
 
@@ -633,10 +661,19 @@ class AgentRuntime:
                 + "/agent"
             )
 
-            if target_path.exists():
-                logger.info(f"Model {cmd.model_name} already exists. Using cached file.")
-            elif not self._download_and_publish(cmd, cancel_event, download_url, target_path, partial_path):
-                return
+            # Serialize downloads that share this target file so a concurrent
+            # same-file deploy doesn't race the `.partial` rename; the waiter
+            # then sees the cached file below and skips the re-download.
+            with self._download_lock_for(cmd.model_name):
+                # A cancel (or shutdown) may have arrived while we waited for the
+                # lock; don't open a download we're about to abandon.
+                if cancel_event.is_set():
+                    self._report_cancelled(cmd, "while queued behind a same-file download")
+                    return
+                if target_path.exists():
+                    logger.info(f"Model {cmd.model_name} already exists. Using cached file.")
+                elif not self._download_and_publish(cmd, cancel_event, download_url, target_path, partial_path):
+                    return
 
             if not self._commit_deploy(cmd, cancel_event):
                 self._report_cancelled(cmd, "before configuring")

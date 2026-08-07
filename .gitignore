@@ -23,6 +23,7 @@ models/**
 **/.pytest_cache
 **/.benchmarks
 **/*.tmp*
+**/*.bak
 **/.todo
 
 configs/session*.json
@@ -41,4 +42,3 @@ crates/*/node_modules/
 crates/*/dist/
 crates/*/.svelte-kit/
 crates/*/.vite/
-

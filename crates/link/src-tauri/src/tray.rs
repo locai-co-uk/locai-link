@@ -1,0 +1,1091 @@
+// SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+// SPDX-License-Identifier: BUSL-1.1
+
+//! Locai Link menu-bar app — tray-only Tauri app that polls the local
+//! agent's `/healthz` and `/models` and reflects state in the tray icon,
+//! header text, and Models submenu.
+
+// `preferences`, `setup`, `supervisor` are declared in lib.rs; reference them
+// here so the bare `preferences::` / `setup::` / `supervisor::` paths work.
+use crate::{preferences, setup, supervisor};
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use crate::shared::{
+    agent_health, list_models, toggle_serving, trigger_update, DeploymentProgress, HealthStatus,
+    ModelInfo, ModelsStatus, ServingAction, DEFAULT_HEALTH_URL, DEFAULT_MODELS_URL,
+    DEFAULT_MODEL_ACTION_BASE, DEFAULT_UPDATE_URL,
+};
+use tauri::{
+    image::Image,
+    menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    tray::{TrayIcon, TrayIconBuilder},
+    AppHandle, Emitter, Manager, WindowEvent, Wry,
+};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_opener::OpenerExt;
+
+// All four consts point at the same 32×32 asset for now — cfg structure
+// lets the design drop in template + Down variants later without code change.
+#[cfg(target_os = "macos")]
+const TRAY_ICON_UP: &[u8] = include_bytes!("../icons/32x32.png");
+#[cfg(target_os = "macos")]
+const TRAY_ICON_DOWN: &[u8] = include_bytes!("../icons/32x32.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON_UP: &[u8] = include_bytes!("../icons/32x32.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_ICON_DOWN: &[u8] = include_bytes!("../icons/32x32.png");
+
+/// The brand tray icon is a filled badge not a monochrome glyph
+const TRAY_ICON_IS_TEMPLATE: bool = false;
+
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+const CONTROL_URL: &str = crate::shared::CONTROL_URL;
+
+// TODO(env-config): hardcoded to prod; wire dev/staging via env!() when needed.
+const WORKSPACE_URL: &str = crate::shared::WORKSPACE_URL;
+
+const MENU_ID_STATUS: &str = "status";
+const MENU_ID_CONTROL: &str = "control";
+const MENU_ID_MODELS_PLACEHOLDER: &str = "models_placeholder";
+const MENU_ID_PREFERENCES: &str = "preferences";
+const MENU_ID_DOWNLOAD: &str = "download_models";
+const MENU_ID_QUIT: &str = "quit";
+const MENU_ID_UPDATE: &str = "update";
+// Pre-onboarding escape hatches so closing the setup window isn't a dead-end.
+const MENU_ID_CONTINUE_SETUP: &str = "continue_setup";
+const MENU_ID_UNINSTALL: &str = "uninstall";
+
+/// Emitted to the Preferences window when the user picks "Download models…" so
+/// the UI opens on the available-models section.
+const EVENT_SHOW_DOWNLOADS: &str = "show-downloads";
+
+/// Suffix after this prefix is the pipeline id.
+const MENU_ID_MODEL_PREFIX: &str = "model:";
+
+/// Menu id for the "Open a Workspace" action.
+const MENU_ID_WORKSPACE: &str = "workspace";
+
+/// True while a Preferences/setup window is on screen. Gates the tray-menu
+/// rebuild: replacing the NSStatusItem menu while a window is foreground
+/// miniaturizes that window on macOS, so we defer the rebuild until it hides
+/// (the icon + tooltip still update live meanwhile). Maintained by the window
+/// show/hide paths.
+pub(crate) static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+/// Release-channel suffix baked in from VITE_CHANNEL at compile time
+/// (defaults to "alpha" when unset — matches the SA side). "prod" or
+/// empty → the suffix is empty and no channel marker renders.
+static CHANNEL_SUFFIX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let raw = option_env!("VITE_CHANNEL")
+        .unwrap_or("alpha")
+        .to_ascii_lowercase();
+    if raw.is_empty() || raw == "prod" {
+        String::new()
+    } else {
+        let mut chars = raw.chars();
+        let capitalized: String = chars
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+            .into_iter()
+            .chain(chars)
+            .collect();
+        format!(" · {capitalized}")
+    }
+});
+
+fn status_text_initial() -> String {
+    format!("Locai Link{} · Checking…", *CHANNEL_SUFFIX)
+}
+fn status_text_up() -> String {
+    format!("Locai Link{} · ONLINE", *CHANNEL_SUFFIX)
+}
+fn status_text_down() -> String {
+    format!("Locai Link{} · OFFLINE", *CHANNEL_SUFFIX)
+}
+fn status_text_updating() -> String {
+    format!("Locai Link{} · UPDATING", *CHANNEL_SUFFIX)
+}
+fn status_text_registering() -> String {
+    format!("Locai Link{} · REGISTERING", *CHANNEL_SUFFIX)
+}
+
+/// Malformed and Down collapse into `Down` — both mean "no usable data".
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum TrayState {
+    Up,
+    Down,
+}
+
+impl From<&HealthStatus> for TrayState {
+    fn from(status: &HealthStatus) -> Self {
+        match status {
+            HealthStatus::Up(_) => TrayState::Up,
+            HealthStatus::Down | HealthStatus::Malformed(_) => TrayState::Down,
+        }
+    }
+}
+
+/// Mutated in place by the poll loop; the click handler reads `models` to
+/// pick start-vs-stop without an extra GET on the click path.
+/// `in_flight` blocks re-clicks on a pipeline while its Serve/Stop HTTP is
+/// outstanding — a rapid stop→start clobbered the runtime otherwise.
+pub(crate) struct MenuHandles {
+    status_item: MenuItem<Wry>,
+    models: Vec<ModelInfo>,
+    // Row handles for in-place updates (serving checkmark, labels, progress),
+    // so value changes don't need a full set_menu rebuild.
+    models_submenu: Option<Submenu<Wry>>,
+    model_items: Vec<(String, CheckMenuItem<Wry>)>,
+    deploy_items: Vec<(String, MenuItem<Wry>)>,
+    in_flight: std::collections::HashSet<String>,
+    /// Blocks repeat "Update" clicks while a swap is in flight, and drives the
+    /// Preferences "updating, will restart" lock. Held from the trigger until
+    /// the supervisor reports an exit-42 restart-for-update (authoritative) or
+    /// the trigger POST fails.
+    pub(crate) update_in_flight: bool,
+    /// The supervisor's `update_restart_epoch` captured when the update was
+    /// triggered. The lock clears once that epoch advances — i.e. the supervisor
+    /// actually restarted the runtime for the update. Replaces the old
+    /// wall-clock timeout (INFRA-466 item 1).
+    pub(crate) update_restart_epoch_at_trigger: Option<u64>,
+}
+
+pub(crate) type SharedHandles = Arc<Mutex<MenuHandles>>;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // In-process supervision of the Python runtime child (replaces the separate
+    // agent service). One clone drives the supervise thread; one lives in Tauri
+    // state so the prefs Start/Stop/Restart commands can signal it.
+    let control = supervisor::SupervisorControl::running();
+    let supervise_control = control.clone();
+
+    tauri::Builder::default()
+        // No single-instance guard: the OS service unit is the one launcher
+        // (systemd `locai-link-companion.service` / the launchd agent), so only
+        // one instance ever runs. A guard here previously reaped the service
+        // instance when install.sh's own launch already held the lock, orphaning
+        // the supervisor. The `.desktop` / Dock relaunch just re-`start`s the
+        // unit, which is idempotent.
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        // Onboarding sign-in session (JWT held Rust-side, never crosses IPC).
+        .manage(setup::SignInState::default())
+        // Runtime supervisor control (prefs Start/Stop/Restart signal this).
+        .manage(control)
+        .invoke_handler(tauri::generate_handler![
+            preferences::get_prefs_state,
+            preferences::poll_status,
+            preferences::toggle_model_serving,
+            preferences::cancel_model_deploy,
+            preferences::uninstall_model,
+            preferences::list_available_models,
+            preferences::request_model_deploy,
+            preferences::supported_model_types,
+            preferences::install_update,
+            preferences::set_run_at_login,
+            preferences::runtime_start,
+            preferences::runtime_stop,
+            preferences::runtime_restart,
+            preferences::reveal_log_file,
+            preferences::open_install_root,
+            preferences::open_control_device,
+            // Onboarding wizard (setup window).
+            setup::check_install,
+            setup::get_install_root,
+            setup::get_platform,
+            setup::sign_in_start,
+            setup::sign_in_poll,
+            setup::suggest_device_name,
+            setup::list_models,
+            setup::deploy_model,
+            setup::mark_deployment_pending,
+            setup::wait_for_agent_ready,
+            setup::re_register,
+            setup::open_re_register,
+            setup::apply_pending_update,
+            setup::open_preferences_window,
+            setup::finish_setup,
+            setup::launch_uninstaller,
+            setup::mint_registration_key,
+            setup::register_device,
+            setup::install_agent_config,
+            setup::install_launchagents,
+            setup::exit_app,
+        ])
+        // Close-button hides Preferences; tray keeps running. macOS: flip back
+        // to Accessory so the Dock icon drops while no window is visible.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                WINDOW_VISIBLE.store(false, Ordering::Relaxed);
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            }
+        })
+        .setup(move |app| {
+            // Publish our running build version so the runtime's post-OTA drift
+            // check can tell whether the app actually relaunched onto the
+            // new build. macOS-only: the drift check is Darwin-only, and
+            // install_root() is empty on Windows, which would otherwise write
+            // ./state/companion-running-version into the process working directory.
+            #[cfg(target_os = "macos")]
+            {
+                let version = app.package_info().version.to_string();
+                let vpath = std::path::Path::new(&preferences::install_root())
+                    .join("state")
+                    .join("companion-running-version");
+                if let Some(parent) = vpath.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&vpath, version);
+            }
+
+            // Accessory activation policy is the load-bearing switch that keeps
+            // this off the Dock and out of Cmd-Tab; tauri.conf's `visible: false`
+            // isn't enough on macOS.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Supervise the Python runtime child in-process (replaces the
+            // separate agent service). Backgrounded so the tray icon appears
+            // immediately; the prefs Start/Stop/Restart commands drive the same
+            // control via managed state.
+            thread::spawn(move || supervisor::supervise_forever(supervise_control));
+
+            let registered_at_start = device_registered();
+            let initial_status = if registered_at_start {
+                status_text_initial()
+            } else {
+                status_text_registering()
+            };
+            let built = build_tray_menu(
+                app.handle(),
+                &[],
+                &[],
+                &initial_status,
+                None,
+                registered_at_start,
+            )?;
+
+            let icon = Image::from_bytes(TRAY_ICON_UP)?;
+            let tray = TrayIconBuilder::with_id("main")
+                .icon(icon)
+                .icon_as_template(TRAY_ICON_IS_TEMPLATE)
+                .tooltip("Locai Link")
+                .menu(&built.menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(handle_menu_event)
+                .build(app)?;
+
+            let handles: SharedHandles = Arc::new(Mutex::new(MenuHandles {
+                status_item: built.status,
+                models: Vec::new(),
+                models_submenu: built.submenu,
+                model_items: built.model_items,
+                deploy_items: built.deploy_items,
+                in_flight: std::collections::HashSet::new(),
+                update_in_flight: false,
+                update_restart_epoch_at_trigger: None,
+            }));
+            app.manage(handles.clone());
+            let app_handle = app.handle().clone();
+            thread::spawn(move || poll_forever(app_handle, tray, handles));
+
+            // Open the setup window on first run (no identity yet), or when the
+            // installer dropped the manage marker (a re-run on an already-set-up
+            // device -> the setup window lands on the "already set up" splash).
+            let show_manage = consume_show_manage_marker();
+            if !device_registered() || show_manage {
+                show_setup_window(app.handle());
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+/// Whether a device identity has been registered — the signal that onboarding
+/// is complete. Drives first-run window selection.
+fn device_registered() -> bool {
+    crate::shared::read_identity(&std::path::PathBuf::from(preferences::install_root())).is_some()
+}
+
+/// One-shot marker the installer drops so a re-run on an installed device opens
+/// the manage/splash window even when a device is already registered (otherwise
+/// a registered start goes straight to the tray). Consumed (deleted) on read.
+fn consume_show_manage_marker() -> bool {
+    let marker = std::path::PathBuf::from(preferences::install_root())
+        .join("state")
+        .join("show-manage-on-start");
+    if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        return true;
+    }
+    false
+}
+
+/// Route a re-launch (single-instance) to the window that matters: the setup
+/// wizard while unregistered, Preferences once onboarding is done.
+/// Show + focus the first-run setup window; macOS flips to Regular so it gets a
+/// Dock icon + focus during onboarding (mirrors the Preferences window).
+pub(crate) fn show_setup_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("setup") else {
+        eprintln!("[link] setup window not found");
+        return;
+    };
+    if let Err(e) = window.show() {
+        eprintln!("[link] setup window.show failed: {e}");
+        return;
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("[link] setup window.set_focus failed: {e}");
+    }
+    WINDOW_VISIBLE.store(true, Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+}
+
+/// Show + focus the Preferences window; un-hides if the user closed it earlier.
+pub(crate) fn show_preferences_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[link] preferences window not found");
+        return;
+    };
+    if let Err(e) = window.show() {
+        eprintln!("[link] window.show failed: {e}");
+        return;
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("[link] window.set_focus failed: {e}");
+    }
+    WINDOW_VISIBLE.store(true, Ordering::Relaxed);
+    // macOS: switch to Regular while visible so we get Dock + Cmd-Tab + focus.
+    // Flipped back to Accessory in on_window_event when the window hides.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+}
+
+/// Handles the poll loop keeps so it can update the tray in place (set_checked /
+/// set_text) for value changes, instead of replacing the whole menu — a full
+/// `set_menu` while a window is foreground miniaturizes it on macOS.
+struct BuiltTray {
+    menu: Menu<Wry>,
+    status: MenuItem<Wry>,
+    submenu: Option<Submenu<Wry>>,
+    model_items: Vec<(String, CheckMenuItem<Wry>)>,
+    deploy_items: Vec<(String, MenuItem<Wry>)>,
+}
+
+/// Identity-only signature of the menu structure: which model + deployment rows
+/// exist, whether the update row shows, and the registration gate. Excludes
+/// values updated in place (serving state, labels, progress) so a serving toggle
+/// or a progress tick doesn't force a full `set_menu` rebuild.
+type StructureSig = (Vec<String>, Vec<String>, bool, bool);
+
+fn structure_sig(
+    models: &[ModelInfo],
+    deployments: &[DeploymentProgress],
+    update: Option<&str>,
+    registered: bool,
+) -> StructureSig {
+    let mut m: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    m.sort();
+    let mut d: Vec<String> = deployments.iter().map(|d| d.pipeline_id.clone()).collect();
+    d.sort();
+    (m, d, update.is_some(), registered)
+}
+
+/// Parent label for the Models submenu ("Models - N serving").
+fn models_serving_label(models: &[ModelInfo]) -> String {
+    let n = models.iter().filter(|m| m.is_serving).count();
+    if n > 0 {
+        format!("Models - {n} serving")
+    } else {
+        "Models".to_string()
+    }
+}
+
+/// Assemble the tray menu; returns the menu plus handles (status header, models
+/// submenu, per-row items) so the poll loop can update rows in place. A full
+/// rebuild happens only when the menu structure changes.
+fn build_tray_menu(
+    app: &AppHandle,
+    models: &[ModelInfo],
+    deployments: &[DeploymentProgress],
+    status_text: &str,
+    update: Option<&str>,
+    registered: bool,
+) -> tauri::Result<BuiltTray> {
+    // `enabled: false` renders as grey/unclickable — informational only.
+    let status = MenuItem::with_id(app, MENU_ID_STATUS, status_text, false, None::<&str>)?;
+
+    // Before the device is registered (onboarding still running) the runtime
+    // isn't up and none of these actions apply — show a minimal menu: the
+    // status header + Quit, nothing else.
+    if !registered {
+        // Onboarding not finished. Offer a way to resume (reopen the wizard) or
+        // back out cleanly (uninstall) so closing the setup window isn't a
+        // dead-end that leaves only Quit and a background agent that nags at
+        // next login.
+        let sep1 = PredefinedMenuItem::separator(app)?;
+        let continue_setup = MenuItem::with_id(
+            app,
+            MENU_ID_CONTINUE_SETUP,
+            "Continue Setup…",
+            true,
+            None::<&str>,
+        )?;
+        let uninstall = MenuItem::with_id(
+            app,
+            MENU_ID_UNINSTALL,
+            "Uninstall Locai Link…",
+            true,
+            None::<&str>,
+        )?;
+        let sep2 = PredefinedMenuItem::separator(app)?;
+        let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
+        let menu = Menu::with_items(
+            app,
+            &[
+                &status as &dyn IsMenuItem<Wry>,
+                &sep1,
+                &continue_setup,
+                &uninstall,
+                &sep2,
+                &quit,
+            ],
+        )?;
+        return Ok(BuiltTray {
+            menu,
+            status,
+            submenu: None,
+            model_items: Vec::new(),
+            deploy_items: Vec::new(),
+        });
+    }
+
+    let sep1 = PredefinedMenuItem::separator(app)?;
+
+    let (models_submenu, model_items, deploy_items) =
+        build_models_submenu(app, models, deployments)?;
+
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let control = MenuItem::with_id(
+        app,
+        MENU_ID_CONTROL,
+        "Open Control Plane",
+        true,
+        None::<&str>,
+    )?;
+    let workspace = MenuItem::with_id(
+        app,
+        MENU_ID_WORKSPACE,
+        "Open a Workspace",
+        true,
+        None::<&str>,
+    )?;
+    let download = MenuItem::with_id(
+        app,
+        MENU_ID_DOWNLOAD,
+        "Download models…",
+        true,
+        None::<&str>,
+    )?;
+    let preferences = MenuItem::with_id(
+        app,
+        MENU_ID_PREFERENCES,
+        "Preferences…",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
+    let quit = MenuItem::with_id(app, MENU_ID_QUIT, "Quit", true, Some("CmdOrCtrl+Q"))?;
+
+    // "Update to vX.Y.Z" appears only when the agent reports one available.
+    let update_item = match update {
+        Some(v) => Some(MenuItem::with_id(
+            app,
+            MENU_ID_UPDATE,
+            format!("Update to v{v}"),
+            true,
+            None::<&str>,
+        )?),
+        None => None,
+    };
+
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![
+        &status as &dyn IsMenuItem<Wry>,
+        &sep1,
+        &models_submenu,
+        &sep2,
+    ];
+    if let Some(u) = &update_item {
+        items.push(u);
+    }
+    items.push(&control);
+    items.push(&workspace);
+    items.push(&download);
+    items.push(&preferences);
+    items.push(&quit);
+
+    let menu = Menu::with_items(app, &items)?;
+    Ok(BuiltTray {
+        menu,
+        status,
+        submenu: Some(models_submenu),
+        model_items,
+        deploy_items,
+    })
+}
+
+/// (submenu, model check-items by pipeline id, deploy rows by id) — the item
+/// handles the poll loop updates in place.
+type ModelsSubmenu = (
+    Submenu<Wry>,
+    Vec<(String, CheckMenuItem<Wry>)>,
+    Vec<(String, MenuItem<Wry>)>,
+);
+
+/// Populate the Models submenu: in-flight deployments (disabled text) first,
+/// deployed rows (CheckMenuItems) below. Empty → single disabled placeholder.
+fn build_models_submenu(
+    app: &AppHandle,
+    models: &[ModelInfo],
+    deployments: &[DeploymentProgress],
+) -> tauri::Result<ModelsSubmenu> {
+    // Native menu items can't right-align trailing text, so the serving summary
+    // folds into the parent label.
+    let submenu_label = models_serving_label(models);
+
+    if models.is_empty() && deployments.is_empty() {
+        let placeholder = MenuItem::with_id(
+            app,
+            MENU_ID_MODELS_PLACEHOLDER,
+            "(no models serving)",
+            false,
+            None::<&str>,
+        )?;
+        let submenu =
+            Submenu::with_id_and_items(app, "models", &submenu_label, true, &[&placeholder])?;
+        return Ok((submenu, Vec::new(), Vec::new()));
+    }
+
+    // MenuItem and CheckMenuItem are distinct types; own them separately
+    // and collect refs of both into a single Vec<&dyn IsMenuItem>.
+    let deploy_items: Vec<MenuItem<Wry>> = deployments
+        .iter()
+        .map(|d| {
+            MenuItem::with_id(
+                app,
+                format!("deploy-{}", d.pipeline_id),
+                deployment_label(d),
+                false,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+
+    // Native checkmark = serving state.
+    let items: Vec<CheckMenuItem<Wry>> = models
+        .iter()
+        .map(|m| {
+            CheckMenuItem::with_id(
+                app,
+                format!("{MENU_ID_MODEL_PREFIX}{}", m.id),
+                model_label(m),
+                true,
+                m.is_serving,
+                None::<&str>,
+            )
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+
+    let mut refs: Vec<&dyn IsMenuItem<Wry>> = deploy_items
+        .iter()
+        .map(|i| i as &dyn IsMenuItem<Wry>)
+        .collect();
+    refs.extend(items.iter().map(|i| i as &dyn IsMenuItem<Wry>));
+    let submenu = Submenu::with_id_and_items(app, "models", &submenu_label, true, &refs)?;
+    let model_pairs = models
+        .iter()
+        .zip(&items)
+        .map(|(m, it)| (m.id.clone(), it.clone()))
+        .collect();
+    let deploy_pairs = deployments
+        .iter()
+        .zip(&deploy_items)
+        .map(|(d, it)| (d.pipeline_id.clone(), it.clone()))
+        .collect();
+    Ok((submenu, model_pairs, deploy_pairs))
+}
+
+/// Label for a model row; port suffix disambiguates mixed-port llama-swap
+/// instances. Serving state is shown via the leading icon on the IconMenuItem.
+fn model_label(m: &ModelInfo) -> String {
+    match m.port {
+        Some(port) => format!("{} · :{}", m.alias, port),
+        None => m.alias.clone(),
+    }
+}
+
+/// Label for a deployment row: stage + integer percent + model file name.
+fn deployment_label(d: &DeploymentProgress) -> String {
+    let name = d.model_name.as_deref().unwrap_or(&d.pipeline_id);
+    // "Queued foo.gguf" is complete on its own — the 0% tail adds no signal.
+    if d.stage == "queued" {
+        return format!("Queued {name}");
+    }
+    let verb = match d.stage.as_str() {
+        "downloading" => "Downloading",
+        "configuring" => "Configuring",
+        // Surface the raw string for future stages so the row still says something.
+        other => other,
+    };
+    format!("{verb} {name} — {}%", d.progress_pct as u32)
+}
+
+/// Digest of what the tray menu structure depends on. Progress is bucketed to
+/// 5% steps to match the runtime's reporter cadence; alias/port renames don't rebuild.
+fn menu_digest(
+    models: &[ModelInfo],
+    deployments: &[DeploymentProgress],
+    update: Option<&str>,
+    registered: bool,
+) -> MenuDigest {
+    let mut m: Vec<(String, bool)> = models
+        .iter()
+        .map(|m| (m.id.clone(), m.is_serving))
+        .collect();
+    m.sort();
+    let mut d: Vec<(String, String, u32)> = deployments
+        .iter()
+        .map(|dep| {
+            (
+                dep.pipeline_id.clone(),
+                dep.stage.clone(),
+                (dep.progress_pct as u32) / 5,
+            )
+        })
+        .collect();
+    d.sort();
+    MenuDigest {
+        models: m,
+        deployments: d,
+        update: update.map(str::to_string),
+        registered,
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Default)]
+struct MenuDigest {
+    models: Vec<(String, bool)>,
+    deployments: Vec<(String, String, u32)>,
+    update: Option<String>,
+    /// Onboarding-vs-registered gate; a transition swaps the whole menu shape.
+    registered: bool,
+}
+
+fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    let id = event.id().as_ref();
+    match id {
+        MENU_ID_CONTROL => {
+            if let Err(e) = app.opener().open_url(CONTROL_URL, None::<&str>) {
+                eprintln!("[link] failed to open {CONTROL_URL}: {e}");
+            }
+        }
+        MENU_ID_PREFERENCES => {
+            show_preferences_window(app);
+        }
+        MENU_ID_DOWNLOAD => {
+            show_preferences_window(app);
+            // Tell the window to open on the available-models section. Best-effort:
+            // if it isn't listening yet (cold open), the emit is a harmless no-op
+            // and the section is still reachable by scrolling.
+            if let Err(e) = app.emit(EVENT_SHOW_DOWNLOADS, ()) {
+                eprintln!("[link] emit {EVENT_SHOW_DOWNLOADS} failed: {e}");
+            }
+        }
+        MENU_ID_UPDATE => {
+            // Claim the in-flight slot so a rapid double-click can't fire
+            // overlapping /update POSTs (the second would hit a shutting-down
+            // agent and pop a spurious failure dialog).
+            let shared: SharedHandles = (*app.state::<SharedHandles>()).clone();
+            {
+                let mut guard = match shared.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                if guard.update_in_flight {
+                    return;
+                }
+                guard.update_in_flight = true;
+                guard.update_restart_epoch_at_trigger = Some(
+                    app.state::<supervisor::SupervisorControl>()
+                        .update_restart_epoch(),
+                );
+            }
+            // Off the menu-event thread: the loopback POST shouldn't block the
+            // tray. The next poll picks up the "Updating" state; poll_forever
+            // releases the slot when the update finishes.
+            let app_handle = app.clone();
+            thread::spawn(move || {
+                if let Err(e) = trigger_update(DEFAULT_UPDATE_URL) {
+                    eprintln!("[link] trigger_update failed: {e}");
+                    // Failed before the agent went down — release so a retry works.
+                    if let Ok(mut g) = shared.lock() {
+                        g.update_in_flight = false;
+                        g.update_restart_epoch_at_trigger = None;
+                    }
+                    // Otherwise the click looks like it did nothing — tell the user.
+                    let dialog_handle = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        dialog_handle
+                            .dialog()
+                            .message("Couldn't start the update. Check that Link is running, then try again.")
+                            .title("Update failed")
+                            .kind(MessageDialogKind::Error)
+                            .show(|_| {});
+                    });
+                }
+            });
+        }
+        MENU_ID_CONTINUE_SETUP => show_setup_window(app),
+        MENU_ID_UNINSTALL => trigger_uninstall(),
+        MENU_ID_QUIT => {
+            // The app is tied to the runtime, so quitting stops Link too —
+            // no "keep running" choice. Signal the supervisor to stop the child,
+            // then quit; the service manager reaps anything left in the unit.
+            app.state::<supervisor::SupervisorControl>().stop();
+            app.exit(0);
+        }
+        _ if id.starts_with(MENU_ID_MODEL_PREFIX) => {
+            let pipeline_id = id[MENU_ID_MODEL_PREFIX.len()..].to_string();
+            handle_model_toggle(app, pipeline_id);
+        }
+        MENU_ID_WORKSPACE => {
+            if let Err(e) = app.opener().open_url(WORKSPACE_URL, None::<&str>) {
+                eprintln!("[link] failed to open {WORKSPACE_URL}: {e}");
+            }
+        }
+        // Disabled items — shouldn't fire, ignore if they do.
+        MENU_ID_STATUS | MENU_ID_MODELS_PLACEHOLDER => {}
+        other => eprintln!("[link] unhandled menu id: {other}"),
+    }
+}
+
+/// Fire the uninstaller from the pre-onboarding tray. Detached: launch_uninstaller
+/// shows a blocking admin prompt and the menu-event thread is UI-adjacent. The
+/// admin prompt is the confirm gate; cancelling it is a no-op (the "cancelled"
+/// sentinel). The (detached) uninstaller tears down the app itself on success.
+fn trigger_uninstall() {
+    thread::spawn(|| {
+        let root = preferences::install_root();
+        if let Err(e) = setup::launch_uninstaller(root) {
+            if e != "cancelled" {
+                eprintln!("[link] uninstall from tray failed: {e}");
+            }
+        }
+    });
+}
+
+/// Toggle a model's serving state. Runs the POST on a detached thread —
+/// the Tauri menu-event thread is UI-adjacent and blocking on HTTP freezes the menu.
+fn handle_model_toggle(app: &AppHandle, pipeline_id: String) {
+    let handles_state: tauri::State<'_, SharedHandles> = app.state();
+    let shared = (*handles_state).clone();
+
+    // Lock once: read current state, claim the in-flight slot, flip is_serving
+    // optimistically so an immediate second click reads the new state.
+    let action = {
+        let mut guard = match shared.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("[link] handles mutex poisoned: {e}");
+                return;
+            }
+        };
+        if guard.in_flight.contains(&pipeline_id) {
+            // A prior click is still in flight; drop this one.
+            return;
+        }
+        let Some(model) = guard.models.iter_mut().find(|m| m.id == pipeline_id) else {
+            eprintln!("[link] click on unknown pipeline: {pipeline_id}");
+            return;
+        };
+        let action = if model.is_serving {
+            ServingAction::Stop
+        } else {
+            ServingAction::Start
+        };
+        model.is_serving = !model.is_serving;
+        guard.in_flight.insert(pipeline_id.clone());
+        action
+    };
+
+    thread::spawn(move || {
+        let result = toggle_serving(DEFAULT_MODEL_ACTION_BASE, &pipeline_id, action);
+        if let Err(e) = &result {
+            eprintln!("[link] toggle_serving({pipeline_id}, {action:?}) failed: {e}");
+        }
+        // Release the slot. On failure, revert the optimistic flip so the next
+        // poll doesn't see a torn state; on success the poll reconciles anyway.
+        if let Ok(mut guard) = shared.lock() {
+            guard.in_flight.remove(&pipeline_id);
+            if result.is_err() {
+                if let Some(m) = guard.models.iter_mut().find(|m| m.id == pipeline_id) {
+                    m.is_serving = !m.is_serving;
+                }
+            }
+        }
+    });
+}
+
+/// Poll `/healthz` and `/models` on a fixed cadence. Tray icon flips only on
+/// Up↔Down transitions; the full menu is rebuilt only when the digest changes.
+fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>) {
+    let mut current_tray = TrayState::Up;
+    // Value digest (serving, labels, progress) drives in-place row updates;
+    // the structure sig drives the rarer full rebuild.
+    let mut current_digest = MenuDigest::default();
+    let mut current_sig: StructureSig = structure_sig(&[], &[], None, device_registered());
+    let mut current_status_text = status_text_initial();
+    // Update-in-progress inference: the agent's health server goes down during
+    // the swap. If it was up with an update available and just dropped, treat
+    // it as updating (clicking the tray Update item produces exactly this) and
+    // hold that until it returns — success/failure both resolve on next Up.
+    let mut updating = false;
+    let mut update_saw_down = false;
+    let mut prev_up_with_update = false;
+    // Bound how long we display "Updating" while the agent is down, so a swap
+    // that never comes back (crash, failed relaunch) falls back to OFFLINE
+    // instead of showing "Updating" forever. ~5 min at a 5s poll.
+    let mut update_down_polls = 0u32;
+    const MAX_UPDATE_DOWN_POLLS: u32 = 60;
+
+    loop {
+        let health = agent_health(DEFAULT_HEALTH_URL);
+        let models = list_models(DEFAULT_MODELS_URL);
+
+        let (is_up, has_update) = match &health {
+            HealthStatus::Up(h) => (true, h.update_available),
+            HealthStatus::Down | HealthStatus::Malformed(_) => (false, false),
+        };
+        let was_updating = updating;
+        if prev_up_with_update && !is_up {
+            updating = true;
+        }
+        if updating && !is_up {
+            update_saw_down = true;
+            update_down_polls += 1;
+            if update_down_polls >= MAX_UPDATE_DOWN_POLLS {
+                updating = false;
+                update_saw_down = false;
+            }
+        }
+        if updating && update_saw_down && is_up {
+            updating = false;
+            update_saw_down = false;
+        }
+        if !updating {
+            update_down_polls = 0;
+        }
+        // Release the OTA lock on an authoritative signal — never a wall-clock
+        // timeout (INFRA-466 item 1). Primary: the supervisor bumped its
+        // update_restart_epoch past what we captured at trigger, i.e. it saw the
+        // runtime exit 42 and restarted it for the update. Secondary: the health
+        // Up->Down->Up inference above resolved. Both are signals, not a cap.
+        if let Ok(mut h) = handles.lock() {
+            let epoch = app
+                .state::<supervisor::SupervisorControl>()
+                .update_restart_epoch();
+            let epoch_advanced = h.update_restart_epoch_at_trigger.is_some_and(|e| epoch > e);
+            if epoch_advanced || (was_updating && !updating) {
+                h.update_in_flight = false;
+                h.update_restart_epoch_at_trigger = None;
+            }
+        }
+        prev_up_with_update = is_up && has_update;
+
+        // Keep the icon on the Up glyph while updating so it doesn't flash the
+        // offline icon during the swap.
+        let next_tray = if updating {
+            TrayState::Up
+        } else {
+            TrayState::from(&health)
+        };
+
+        // Onboarding still running: minimal tray + "REGISTERING" header until a
+        // device identity exists (cheap file check each tick).
+        let registered = device_registered();
+        let status_text = if !registered {
+            status_text_registering()
+        } else if updating {
+            status_text_updating()
+        } else {
+            status_label(&health, &models)
+        };
+
+        // Tray tooltip mirrors serving state — Discord/Slack-style hover hint.
+        let brand = format!("Locai Link{}", *CHANNEL_SUFFIX);
+        let tooltip = match (&health, &models) {
+            (HealthStatus::Up(_), ModelsStatus::Ok(list)) => {
+                let n = list.iter().filter(|m| m.is_serving).count();
+                match n {
+                    0 => brand.clone(),
+                    1 => format!("{brand} · Serving 1 model"),
+                    n => format!("{brand} · Serving {n} models"),
+                }
+            }
+            (HealthStatus::Up(_), _) => brand.clone(),
+            _ => format!("{brand} · Offline"),
+        };
+
+        // Treat transient /models Down/Malformed as "keep last-known empty"
+        // rather than clearing — avoids flapping when /models is briefly out
+        // but /healthz still works. TODO: dedicated "stale" state.
+        let new_models: Vec<ModelInfo> = match &models {
+            ModelsStatus::Ok(list) => list.clone(),
+            ModelsStatus::Down | ModelsStatus::Malformed(_) => Vec::new(),
+        };
+        let new_deployments: Vec<DeploymentProgress> = match &health {
+            HealthStatus::Up(h) => h.deployments.clone(),
+            HealthStatus::Down | HealthStatus::Malformed(_) => Vec::new(),
+        };
+        let update_latest: Option<String> = match &health {
+            HealthStatus::Up(h) if h.update_available => h.latest_version.clone(),
+            _ => None,
+        };
+        let new_digest = menu_digest(
+            &new_models,
+            &new_deployments,
+            update_latest.as_deref(),
+            registered,
+        );
+        let text_changed = status_text != current_status_text;
+
+        // Every NSStatusItem / muda mutation MUST run on the main thread — this
+        // loop is a background thread, and touching the menu/icon off-main races
+        // AppKit (it read a half-written icon and panicked in muda, crashing the
+        // tray). Decide what changed here, then apply it all in one main-thread hop.
+        let icon_bytes: Option<&'static [u8]> =
+            (next_tray != current_tray).then_some(match next_tray {
+                TrayState::Up => TRAY_ICON_UP,
+                TrayState::Down => TRAY_ICON_DOWN,
+            });
+        // Full set_menu only on a structural change (rows added/removed) and
+        // only while no window is open (replacing the menu miniaturizes a
+        // foreground macOS window). Value changes (serving, labels, progress,
+        // header) update the existing rows in place, so they apply either way.
+        let sig = structure_sig(
+            &new_models,
+            &new_deployments,
+            update_latest.as_deref(),
+            registered,
+        );
+        let structure_changed = sig != current_sig;
+        let rebuild_menu = structure_changed && !WINDOW_VISIBLE.load(Ordering::Relaxed);
+        let values_changed = new_digest != current_digest || text_changed;
+        let tray_main = tray.clone();
+        let app_main = app.clone();
+        let handles_main = handles.clone();
+        let menu_models = new_models.clone();
+        let menu_deployments = new_deployments;
+        let menu_status = status_text.clone();
+        let menu_update = update_latest;
+        let _ = app.run_on_main_thread(move || {
+            if let Some(bytes) = icon_bytes {
+                if let Ok(img) = Image::from_bytes(bytes) {
+                    // Atomic swap keeps the template flag in sync with the new image.
+                    if let Err(e) =
+                        tray_main.set_icon_with_as_template(Some(img), TRAY_ICON_IS_TEMPLATE)
+                    {
+                        eprintln!("[link] tray.set_icon failed: {e}");
+                    }
+                }
+            }
+            if let Err(e) = tray_main.set_tooltip(Some(&tooltip)) {
+                eprintln!("[link] tray.set_tooltip failed: {e}");
+            }
+            if rebuild_menu {
+                match build_tray_menu(
+                    &app_main,
+                    &menu_models,
+                    &menu_deployments,
+                    &menu_status,
+                    menu_update.as_deref(),
+                    registered,
+                ) {
+                    Ok(built) => {
+                        if let Err(e) = tray_main.set_menu(Some(built.menu)) {
+                            eprintln!("[link] tray.set_menu failed: {e}");
+                        }
+                        if let Ok(mut h) = handles_main.lock() {
+                            h.status_item = built.status;
+                            h.models_submenu = built.submenu;
+                            h.model_items = built.model_items;
+                            h.deploy_items = built.deploy_items;
+                            h.models = menu_models;
+                        }
+                    }
+                    Err(e) => eprintln!("[link] build_tray_menu failed: {e}"),
+                }
+            } else if values_changed {
+                // Update rows in place — no set_menu, so no window miniaturize.
+                if let Ok(mut h) = handles_main.lock() {
+                    if let Some(sm) = &h.models_submenu {
+                        let _ = sm.set_text(models_serving_label(&menu_models));
+                    }
+                    for (id, item) in &h.model_items {
+                        if let Some(m) = menu_models.iter().find(|m| &m.id == id) {
+                            let _ = item.set_checked(m.is_serving);
+                            let _ = item.set_text(model_label(m));
+                        }
+                    }
+                    for (id, item) in &h.deploy_items {
+                        if let Some(d) = menu_deployments.iter().find(|d| &d.pipeline_id == id) {
+                            let _ = item.set_text(deployment_label(d));
+                        }
+                    }
+                    let _ = h.status_item.set_text(&menu_status);
+                    h.models = menu_models;
+                }
+            }
+        });
+
+        // Optimistic local trackers: this loop drives the state and the hop above
+        // applies it, so advance them now rather than awaiting the main thread.
+        if icon_bytes.is_some() {
+            current_tray = next_tray;
+        }
+        // Advance the structure sig only on an actual rebuild, so a change
+        // deferred while a window was open still rebuilds once it hides.
+        if rebuild_menu {
+            current_sig = sig;
+        }
+        if rebuild_menu || values_changed {
+            current_digest = new_digest;
+            current_status_text = status_text;
+        }
+
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Binary status header. Version + serving count live in Preferences and on
+/// the Models submenu label respectively — this row is a single "up or not" cue.
+fn status_label(health: &HealthStatus, _models: &ModelsStatus) -> String {
+    match health {
+        HealthStatus::Up(_) => status_text_up(),
+        HealthStatus::Down | HealthStatus::Malformed(_) => status_text_down(),
+    }
+}

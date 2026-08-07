@@ -1,0 +1,31 @@
+/* =============================================================================
+   Setup-window globals. Loaded only by the setup entry (setup-main.ts), so the
+   scrollable Preferences window keeps its own layout. Shared design tokens come
+   from tokens.css; these are the wizard's single-viewport shell rules.
+
+   Kept out of the Svelte component so they reach html/body reliably regardless
+   of Svelte's per-component class scoping: the fixed-size window neutralises the
+   default 8px body margin, enforces border-box everywhere, and hides native
+   scrollbars (content still scrolls via wheel/touch on any overflowing element).
+============================================================================= */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100vh; overflow: hidden; }
+#app { height: 100vh; }
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/* Wizard shell layout — unscoped so Svelte's class hashing can't leave it as
+   `display: block`. Scoped `.wizard` rules in SetupApp still cascade for
+   background/color/font; the load-bearing flex-row + full-height lives here. */
+#app > main {
+  display: flex;
+  flex-direction: row;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Live status dot pulse */
+@keyframes locaiPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+/* Installer progress spinner */
+@keyframes locaiSpin { to { transform: rotate(360deg); } }

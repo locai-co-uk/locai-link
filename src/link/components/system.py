@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""SystemMonitor source — CPU, RAM, storage, temperature metrics via psutil."""
+"""SystemMonitor source: CPU, RAM, storage, temperature metrics via psutil."""
 
 import logging
 import platform
@@ -30,11 +30,7 @@ class SystemMonitor(Source):
     def __init__(self, interval: float = 1.0, metrics: list[str] | None = None):
         """Initialises the SystemMonitor.
 
-        Args:
-            interval (float): Seconds to wait between collections.
-            metrics (list[str] | None): Optional list of specific metrics to collect.
-                If None, defaults to ALL available metrics.
-                Options: ["cpu_usage", "ram_usage", "storage_available_gb", "temperature_celsius"]
+        metrics: subset to collect (from AVAILABLE_METRICS); None means all.
         """
         self.interval = interval
         self.last_poll = 0.0
@@ -52,11 +48,7 @@ class SystemMonitor(Source):
 
     @override
     def __call__(self) -> dict[str, float] | None:
-        """Collects metrics (Non-Blocking).
-
-        Returns:
-            dict | None: The collected metrics or None if interval hasn't passed.
-        """
+        """Collects metrics, or None if the interval hasn't passed (non-blocking)."""
         now = time.time()
         if now - self.last_poll < self.interval:
             return None
@@ -85,9 +77,9 @@ class SystemMonitor(Source):
     def _read_temp(self) -> float:
         """Reads CPU temperature in degrees Celsius across platforms.
 
-        psutil.sensors_temperatures() only exists on Linux/FreeBSD; macOS and
-        Windows need their own paths. All branches fall back to 0.0 on any
-        failure rather than raise — telemetry should never crash the agent.
+        psutil.sensors_temperatures() exists only on Linux/FreeBSD; macOS and Windows
+        use their own paths. All branches fall back to 0.0 rather than raise, since
+        telemetry must never crash the agent.
         """
         try:
             system = platform.system()
@@ -112,21 +104,16 @@ class SystemMonitor(Source):
         return 0.0
 
     def _read_temp_windows(self) -> float:
-        """Windows temperature via PowerShell, two-tiered:
+        """Windows temperature via PowerShell, two-tiered, all paths falling back to 0.0:
 
-        1. `Win32_PerfFormattedData_Counters_ThermalZoneInformation` in
-           `root/cimv2` — Performance Counter, **no admin required**. Works on
-           any unprivileged user shell. Caveat: vendor must populate the
-           counter; some laptops return only the Microsoft dummy 30.15°C
-           (kelvin × 10 = 3030) which we filter out.
-        2. `MSAcpi_ThermalZoneTemperature` in `root/wmi` — ACPI thermal zone,
-           **requires admin**. Used as fallback when the perf counter is
-           empty/dummy and the process happens to be elevated (e.g. running
-           as a Windows service / Local System).
-
-        All paths fall back to 0.0 on any failure.
+        1. Win32_PerfFormattedData_Counters_ThermalZoneInformation (root/cimv2):
+           perf counter, no admin required. Some laptops return only the Microsoft
+           dummy 30.15°C (kelvin x 10 = 3030), which we filter out.
+        2. MSAcpi_ThermalZoneTemperature (root/wmi): ACPI thermal zone, admin only.
+           Fallback when the perf counter is empty/dummy and the process is elevated
+           (e.g. running as a Windows service / Local System).
         """
-        # Tier 1 — non-admin perf counter
+        # Tier 1: non-admin perf counter
         try:
             cmd = [
                 "powershell.exe",
@@ -143,14 +130,14 @@ class SystemMonitor(Source):
             raw = res.stdout.strip()
             if raw:
                 k_x10 = float(raw)
-                # 3030 = 30.15°C — Microsoft's "no real sensor" placeholder.
+                # 3030 = 30.15°C, Microsoft's "no real sensor" placeholder.
                 # 0 / negative also obvious junk.
                 if k_x10 > 0 and k_x10 != 3030:
                     return round((k_x10 / 10.0) - 273.15, 1)
         except Exception as e:
             logger.debug(f"perf-counter temperature read failed: {e}")
 
-        # Tier 2 — ACPI (admin-only) fallback
+        # Tier 2: ACPI (admin-only) fallback
         try:
             cmd = [
                 "powershell.exe",

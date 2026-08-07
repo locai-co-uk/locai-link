@@ -1,19 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-# Cargo workspace root. Members are the launcher (existing), the shared
-# helper crate (agent-status polling, boot.json reading, version lookup),
-# and the two Tauri apps that drive the installer UX.
+# Cargo workspace root. One member: the single locai-link binary (supervisor +
+# optional ui). `src-tauri/` houses the Rust backend; the Svelte frontend lives
+# alongside it under `src/`. The former standalone launcher and shared helper
+# crate are both folded in.
 
 [workspace]
 resolver = "2"
 members = [
-    "launcher",
-    "shared",
-    # Tauri apps. Each has a `src-tauri/` directory housing the Rust
-    # backend; the Svelte frontend lives alongside it under `src/`.
-    "setup_assistant/src-tauri",
-    "companion/src-tauri",
+    "link/src-tauri",
 ]
 
 [workspace.package]
@@ -29,7 +25,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
 
-# Release profile applies to the whole workspace. The launcher targets a
+# Release profile applies to the whole workspace. The headless build targets a
 # small static binary; tuning here keeps the Tauri builds small too.
 [profile.release]
 opt-level = "z"

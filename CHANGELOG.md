@@ -6,6 +6,211 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [1.2.3]
+
+- Setup and Preferences are now one desktop app. First-run onboarding opens in a
+  window of Locai Link instead of a separate Setup Assistant, so there is a
+  single app, one bundle to install, and one thing to update. Upgrades and
+  uninstalls automatically remove the old Setup Assistant.
+- The launcher and the desktop app are now one `locai-link` binary managed by a
+  single background service. Headless installs run the supervisor alone; desktop
+  installs add the tray and setup in the same process. Fewer moving parts to
+  install, supervise, and update; upgrades migrate away the old second service.
+  On macOS, an over-the-air upgrade from an older version drops to the single
+  service immediately and asks once for your password to finish the switch (fix
+  the CLI symlink and refresh the Applications copy); declining just leaves it on
+  the new version and asks again next time.
+- Fixed: selecting two models that are the same file no longer fails one of
+  them. Concurrent deploys that target the same download now serialize instead
+  of racing, so both succeed.
+- Fixed: clicking Update when no installable release is available no longer
+  leaves Preferences stuck on "Updating". The update is now declined
+  immediately with a clear message instead of hanging.
+- Fixed: dismissing the admin prompt when uninstalling no longer shows a false
+  "uninstall failed" error, and no longer deregisters the device — cancelling is
+  now a clean no-op that leaves everything installed.
+- Fixed: the menu-bar app could vanish (and silently relaunch) when its menu
+  updated — e.g. starting/stopping a model, or a large model finishing its
+  download. The tray now updates safely on macOS.
+- Fixed: Preferences no longer flashes "Stopped" for a moment when reopened; it
+  shows the last-known state until the next status check.
+- Fixed: the Logs "Open" button in Preferences now reveals the current log file
+  (it pointed at an old filename and opened nothing).
+- Fixed: uninstalling on macOS now removes the install completely; the
+  uninstaller could stop halfway when it shut the app down, leaving files behind.
+- Fixed: the menu-bar window no longer minimises to the Dock when the tray
+  updates (for example when a model starts serving).
+- Added: before onboarding finishes, the menu-bar menu now offers "Continue
+  Setup…" and "Uninstall Locai Link…" so closing the setup window is not a
+  dead-end.
+- Fixed: onboarding no longer reports a false "deploy failed" when the deploy
+  request to Control is slow; the timeout now allows for a cold backend, as the
+  deploy is queued and the model still installs.
+- Removed: the source-install deployment path. Field and headless devices use
+  the pre-built `.pkg` / `.tar.gz` releases; source is now developer-only via
+  `uv`. Dropped the one-line installers, the `setup` / `install` CLI
+  subcommands, and the git-based OTA.
+- Hardened (pre-release review): percent-encode device ids in Control URLs,
+  resolve the Linux uninstaller path canonically, escape autostart plist values,
+  cap OTA extraction size, split the bootstrap download timeout so large fetches
+  aren't aborted mid-transfer, resolve the macOS install home for
+  directory-service accounts, and guard the Linux install's user-service start.
+
+### Fixed: race in concurrent same-file model deploys (`src/link/app/runtime.py`)
+
+- Two `DEPLOY_MODEL` commands resolving to the same GGUF filename (e.g. two
+  catalog aliases deployed together at onboarding) both streamed into the same
+  `<name>.partial` and raced the rename — the loser hit `FileNotFoundError`.
+- A per-`model_name` download lock now serializes same-file deploys; the waiter
+  then hits the existing `target_path.exists()` cache guard and skips the
+  re-download. Distinct filenames are unaffected.
+
+### Removed: source-install deployment path (`main.py`, `updater.py`, `constants.py`, root installers)
+
+- Source installs are developer-only now (per the single-supervisor direction),
+  so the deployment machinery for them is gone: the `install.sh` / `install.ps1`
+  / `install.cmd` one-line installers, the `setup` and `install` CLI subcommands,
+  and the git-based OTA (`pull_and_update` and its `get_current_branch` /
+  `get_local_version` / `reinstall_plugin_binaries` helpers). `_apply_update_and_reexec`
+  is now bundle-only; a source install declines OTA and updates via `git pull`.
+- `constants.REPO_URL` / `DEFAULT_BRANCH` dropped; `REPO_SLUG` stays (the frozen
+  OTA resolves release assets from it). Obsolete installer tests removed and the
+  README / docs point at `uv` + the release artifacts.
+
+### Fixed: tray-menu rebuild is deferred while a window is open (`crates/link/src-tauri/src/tray.rs`)
+
+- Replacing the macOS status-item menu (`set_menu`) while a Preferences/setup
+  window is foreground miniaturised that window to the Dock. Any serving-state
+  change or progress tick triggers a rebuild, so it fired on, e.g., a model
+  going to "1 Serving". The poll loop now defers the menu rebuild while a window
+  is visible (tracked by `WINDOW_VISIBLE`, set from the show/hide paths) and
+  applies it once the window hides; the tray icon and tooltip still update live.
+
+### Added: pre-onboarding tray offers Continue Setup + Uninstall (`crates/link/src-tauri/src/tray.rs`)
+
+- Closing the setup window before onboarding finished left a menu-bar icon whose
+  only action was Quit, while the background agent kept running and reopened
+  setup at next login. The unregistered tray now offers "Continue Setup…" (reopen
+  the wizard) and "Uninstall Locai Link…" (deregister if needed, then remove the
+  install). Uninstall runs on a detached thread; the admin prompt is the confirm
+  gate and cancelling is a no-op.
+
+### Fixed: macOS uninstaller runs detached so it always completes (`crates/link/src-tauri/src/setup.rs`)
+
+- The uninstaller kills the main app partway through, but on macOS it ran as a
+  synchronous child of that app (via `osascript`), so killing the app tore down
+  the uninstaller's own process subtree before it reached the file removal,
+  leaving `/Library/Locai`, the `/Applications` copy, and the CLI symlink
+  behind. It now runs detached (`nohup ... &`, output to `/tmp/locai-uninstall.log`),
+  matching the Linux path's `systemd-run --collect`.
+
+### Fixed: Logs "Open" points at the current log file (`crates/link/src-tauri/src/preferences.rs`)
+
+- `runtime_log_file()` still referenced `agent.stdout.log`; the logs were renamed
+  to `link.*.log`, so `open -R` targeted a nonexistent file and revealed nothing.
+
+### Fixed: tray menu/icon updates now run on the main thread (`crates/link/src-tauri/src/tray.rs`)
+
+- The tray poll loop runs on a background thread but mutated the macOS status
+  item directly (`set_icon`/`set_menu`/`set_tooltip`) and built `muda` menu
+  objects off-main. AppKit is main-thread-only, so this raced: `muda`
+  occasionally read a half-initialised icon (width 0) and panicked in its
+  unguarded `to_png().write_header().unwrap()`, killing the tray (launchd then
+  relaunched it). A menu rebuild is forced by any serving-state change or a
+  progress-row tick, so a long model download made it near-certain to hit.
+- The loop now computes state off-main, then applies the icon/tooltip/menu in a
+  single `run_on_main_thread` hop. No behaviour change beyond thread-safety.
+
+### Fixed: Preferences seeds the last-known status on reopen (`crates/link/src/App.svelte`)
+
+- `load()` runs on every window show and overwrote the live status with
+  `get_prefs_state`'s cold-start probe (often Down), flashing "Stopped" for one
+  tick. It now carries the last-polled status/uptime/version/network over until
+  the next poll (≤ `POLL_INTERVAL_MS`) reconfirms.
+
+### Fixed: a declined OTA no longer wedges the UI on "Updating" (`src/link/infra/health_server.py`, `src/link/app/runtime.py`)
+
+- When the runtime declined an update (frozen install, no published per-platform
+  asset), it did so only after the `/update` POST had already returned `202`, and
+  it stayed up — so the companion saw neither the `Up→Down→Up` health transition
+  nor an `update_restart_epoch` bump, and the "updating…" lock never cleared.
+- The `/update` endpoint now runs the same pre-flight synchronously and returns
+  `409` when there is no installable asset, so the trigger fails fast and the UI
+  releases the lock (as it already does on any trigger-POST failure). The
+  pre-flight is shared with the `UPDATE_AGENT` handler so accept/decline is
+  decided one way.
+
+### Fixed: cancelling an uninstall is a clean no-op (`crates/link/src-tauri/src/setup.rs`, `App.svelte`, `SetupApp.svelte`)
+
+- The macOS uninstaller deregistered the device before showing the admin
+  prompt, then reported the dismissed dialog (`User canceled`, error `-128`) as
+  `uninstall.sh failed: …`. Cancelling therefore both left a false error in
+  Preferences and deregistered a still-installed device.
+- Admin auth is now acquired up-front with a no-op command; a dismissed dialog
+  returns a `cancelled` sentinel before any deregister or removal, and the
+  frontends treat it as a benign no-op (no error, wizard returns to the splash).
+  The credential macOS caches for the session is reused for the uninstaller run,
+  so there is no second prompt.
+
+### Changed: OTA lock clears on an authoritative signal, not a timeout (`crates/link`)
+
+- The "updating…" lock that disables Preferences during an OTA no longer relies
+  on a 5-minute wall-clock expiry. Now that the supervisor and UI share a
+  process, the supervisor exposes an `update_restart_epoch` it bumps when it
+  sees the runtime exit 42 (restart-for-update); the lock clears the moment that
+  epoch advances past what was captured at trigger. The health `Up→Down→Up`
+  resolution stays as a secondary signal; a trigger POST failure still releases
+  immediately. (INFRA-466 item 1.)
+
+### Changed: graceful runtime shutdown on Stop/Restart (`crates/link`)
+
+- When the tray/Preferences stop or restart the runtime, the supervisor now
+  SIGTERMs the child (Unix), waits ~5s, then SIGKILLs as a fallback — so the
+  runtime runs its shutdown (stop pipelines, publish offline, stop
+  llama-swap/llama-server) instead of being SIGKILLed and orphaning its engine
+  subprocesses. Windows uses the standard terminate.
+
+### Changed: merge the Setup Assistant into the companion (`crates/link`, `bundling/`, `src/link/app/updater.py`)
+
+- The onboarding wizard is now a second window (`setup.html`) of the companion
+  app; the tray/preferences window is `index.html`. First run (no registered
+  device) opens the setup window; completing onboarding reveals Preferences.
+- The cross-process loopback handshake (companion IPC on 20506) is gone —
+  revealing Preferences after onboarding is a direct in-process window call.
+- Whole-app OTA now tracks a single app; the manifest `apps` map carries only
+  `companion`. Installers launch the one app for first-run setup.
+- Legacy cleanup: the pkg postinstall, both uninstallers, and the OTA path
+  remove any pre-merge Setup Assistant left on disk (search `LEGACY-SA-CLEANUP`;
+  remove once no pre-merge install remains).
+
+### Changed: fold the launcher into one feature-flagged binary (`crates/link`, `bundling/`, `.github/workflows/`)
+
+- The standalone launcher crate is gone; its supervisor loop moved into the
+  companion crate behind a `ui` cargo feature. `--no-default-features` builds the
+  headless supervisor; the default build adds the tray, setup, and preferences
+  and drives the supervisor on a background thread.
+- One background service per OS instead of two: the runtime and the tray share a
+  single unit (`locai-link-companion.service` on Linux,
+  `uk.co.locai.link.companion` on macOS). Install and OTA disable and remove the
+  old second unit.
+- macOS ships the single binary inside the `.app`; the `locai` CLI symlink and a
+  terminal `locai run` dispatch to the headless supervisor from the same binary.
+- Packaging and CI build both variants: the desktop app end-to-end and the
+  headless supervisor via `--no-default-features`.
+
+### Internal: consolidate the crate workspace (no behaviour change) (`crates/`)
+
+- The `locai-link-shared` crate is folded into the binary crate as a `shared`
+  module — with the launcher and Setup Assistant gone it had a single consumer.
+- The crate is renamed `companion` → `link`: directory `crates/link/`, package
+  `locai-link`, lib `link_lib`. External identifiers are unchanged — the binary
+  stays `locai-link`, the service unit `locai-link-companion.service`, and the
+  bundle id `uk.co.locai.link.companion` — so there is no migration or wire change.
+
+- The companion now shows an "Updating…" state during an app update: the
+  runtime and model controls are locked while the update applies and the app
+  restarts, so an update no longer interrupts a mid-action user.
+
 ## [1.2.2]
 
 - The companion now shows an "Updating…" state during an app update: the

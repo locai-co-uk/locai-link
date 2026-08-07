@@ -16,16 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(path: Path) -> AgentConfig:
-    """Loads a JSON config file, resolves `${path.to.key}` placeholders against itself, and validates.
+    """Load a JSON config file, resolve `${path.to.key}` placeholders against itself, and validate.
 
-    Placeholders in the file resolve self-referentially — e.g. a sink URL can
-    reference `${identity.device_id}` defined earlier in the same file.
-
-    Args:
-        path (Path): Path to the configuration file.
-
-    Returns:
-        AgentConfig: The validated AgentConfig object.
+    Placeholders resolve self-referentially: e.g. a sink URL can reference
+    `${identity.device_id}` defined earlier in the same file.
 
     Raises:
         FileNotFoundError: If the config file does not exist.

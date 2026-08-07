@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Binary provisioning — downloads pinned Zenoh and plugin artefacts."""
+"""Binary provisioning: downloads pinned Zenoh and plugin artefacts."""
 
 import logging
 import os
@@ -16,7 +16,6 @@ from .utils import get_platform_arch
 
 logger = logging.getLogger(__name__)
 
-# Constants
 ZENOH_VERSION = "1.9.0"
 ZENOH_DIR = Path.cwd() / ".zenoh"
 
@@ -30,21 +29,13 @@ class ZenohProvisioner:
 
     @staticmethod
     def is_router_installed() -> bool:
-        """Checks if the Router binary exists.
-
-        Returns:
-            bool: True if installed, False otherwise.
-        """
+        """Return True if the router binary is installed."""
         binary_name = "zenohd.exe" if platform.system() == "Windows" else "zenohd"
         return (ZENOH_DIR / binary_name).exists()
 
     @staticmethod
-    def install_router_env(backend: str = "rocksdb"):
-        """Downloads Zenoh Router and specified storage backend.
-
-        Args:
-            backend (str): "rocksdb" (default) or "filesystem".
-        """
+    def install_router_env(backend: str = "rocksdb") -> None:
+        """Download the Zenoh router and a storage backend ("rocksdb" or "filesystem")."""
         logger.info(f"Provisioning Zenoh Infrastructure ({ZENOH_VERSION})...")
         logger.info(f"Selected Storage Backend: {backend}")
 
@@ -82,14 +73,8 @@ class ZenohProvisioner:
             logger.warning(f"Unknown backend '{backend}'. Skipping plugin download.")
 
     @staticmethod
-    def _download_component(name: str, url: str, target_dir: Path):
-        """Downloads and extracts a component archive.
-
-        Args:
-            name (str): Display name of the component.
-            url (str): The download URL.
-            target_dir (Path): Directory to extract to.
-        """
+    def _download_component(name: str, url: str, target_dir: Path) -> None:
+        """Download and extract a component archive into ``target_dir``."""
         filename = Path(url).name
         file_path = target_dir / filename
 
