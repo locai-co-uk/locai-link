@@ -8,6 +8,20 @@ sections below the summary. -->
 
 ## [1.3.0]
 
+- Added: a headless install for Linux, macOS, and Windows servers. One pasted
+  command installs Locai Link with no desktop UI, registers the device with just
+  a key (no email, password, or browser on the box), and runs it as a background
+  service. The device names itself and appears in your dashboard; re-running the
+  command is safe.
+- Headless devices fetch their inference engines on demand at first use instead
+  of bundling them, so the install is a fraction of the size and pulls only what
+  a deployed model needs.
+- Managing a device is the same everywhere: start, stop, restart, update, and
+  uninstall work identically on desktop and headless, and uninstalling now
+  removes the device from Control automatically.
+
+## [1.2.3]
+
 - Setup and Preferences are now one desktop app. First-run onboarding opens in a
   window of Locai Link instead of a separate Setup Assistant, so there is a
   single app, one bundle to install, and one thing to update. Upgrades and
@@ -20,17 +34,6 @@ sections below the summary. -->
   service immediately and asks once for your password to finish the switch (fix
   the CLI symlink and refresh the Applications copy); declining just leaves it on
   the new version and asks again next time.
-- Added: a headless install for Linux and macOS servers. One pasted command
-  installs Locai Link with no desktop UI, registers the device with just a key
-  (no email, password, or browser on the box), and runs it as a background
-  service. The device names itself and appears in your dashboard; re-running the
-  command is safe.
-- Headless devices fetch their inference engines on demand at first use instead
-  of bundling them, so the install is a fraction of the size and pulls only what
-  a deployed model needs.
-- Managing a device is the same everywhere: start, stop, restart, update, and
-  uninstall work identically on desktop and headless, and uninstalling now
-  removes the device from Control automatically.
 - Fixed: selecting two models that are the same file no longer fails one of
   them. Concurrent deploys that target the same download now serialize instead
   of racing, so both succeed.
