@@ -17,10 +17,12 @@
 #
 #     pwsh bundling/windows/pack.ps1            # -> dist/...-DEV.tar.gz
 #     pwsh bundling/windows/pack.ps1 -Release   # drop the -DEV suffix
+#     pwsh bundling/windows/pack.ps1 -Dev       # bake dev Control + dev artifact store
 
 [CmdletBinding()]
 param(
     [switch]$Release,
+    [switch]$Dev,
     [string]$Output
 )
 $ErrorActionPreference = "Stop"
@@ -44,9 +46,19 @@ if (-not $assetStem -or -not $m.version) { throw "manifest.json missing asset_na
 if ($shape -ne "headless") { throw "windows pack.ps1 handles the headless shape only (got '$shape'); desktop Windows is the tauri bundle." }
 
 # --- Build the matching Rust binary (headless = no tray/setup) ---
+if ($Dev) {
+    $env:LOCAI_CONTROL_URL     = "https://dev.control.locai.co.uk"
+    $env:LOCAI_CONTROL_API_URL = "https://dev.api.locai.co.uk/api/v1"
+    $env:LOCAI_ARTIFACT_BASE   = "https://storage.googleapis.com/locai-platform-artifacts-dev"
+    Write-Host "[pack] DEV build - Control=$env:LOCAI_CONTROL_URL, artifacts=$env:LOCAI_ARTIFACT_BASE"
+}
 Write-Host "[pack] building locai-link.exe (headless)..."
 Push-Location (Join-Path $RepoRoot "crates")
 try {
+    # Always clean the crate: the endpoint bake is compile-time (option_env) and
+    # cargo won't recompile on env-only changes, so a cached binary would keep
+    # the previous pack's endpoints.
+    cargo clean -p locai-link
     cargo build -p locai-link --no-default-features --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 } finally { Pop-Location }
