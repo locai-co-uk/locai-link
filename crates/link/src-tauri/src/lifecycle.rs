@@ -252,6 +252,9 @@ pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
         remove_cli_symlink(root);
         std::fs::remove_dir_all(root).map_err(|e| format!("remove {}: {e}", root.display()))?;
     }
+    #[cfg(target_os = "windows")]
+    eprintln!("Locai Link removal finishing in the background (a few seconds).");
+    #[cfg(not(target_os = "windows"))]
     eprintln!("Locai Link removed.");
     Ok(())
 }
@@ -279,7 +282,19 @@ fn windows_remove_files(root: &Path) -> Result<(), String> {
 
     // PowerShell single-quoted literal (with '' escaping) + -LiteralPath: the
     // path is never parsed as command syntax, unlike an interpolated `cmd /C`.
-    let del = format!("Start-Sleep -Seconds 2; Remove-Item -LiteralPath '{esc}' -Recurse -Force");
+    // A surviving service instance holds the exe open and defeats a single
+    // Remove-Item, so the cleanup first stops this install's processes
+    // (path-scoped: other checkouts' binaries share the image name) and then
+    // retries the delete until the handles release.
+    let del = format!(
+        "Start-Sleep -Seconds 2; \
+         Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Path -like '{esc}*' }} | Stop-Process -Force -ErrorAction SilentlyContinue; \
+         for ($i = 0; $i -lt 30; $i++) {{ \
+           Remove-Item -LiteralPath '{esc}' -Recurse -Force -ErrorAction SilentlyContinue; \
+           if (-not (Test-Path -LiteralPath '{esc}')) {{ break }}; \
+           Start-Sleep -Milliseconds 500 }}"
+    );
     Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &del])
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)

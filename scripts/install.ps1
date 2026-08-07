@@ -61,9 +61,38 @@ function Show-LocaiFooter {
     Log "To uninstall: locai uninstall"
 }
 
-# Re-run guard (parity with install.sh): don't clobber an existing install.
+# Register + start the per-user Scheduled Task (idempotent): run at logon,
+# restart on failure, no admin. The logon trigger and principal are scoped to
+# the installing user - an any-user trigger needs elevation, which this
+# per-user installer must never require. Keyless (`run`): the supervisor idles
+# until a session exists; registration is out-of-band via `locai register`.
+function Install-LocaiTask {
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    # The headless exe keeps a console subsystem (CLI output), so an interactive
+    # task would pop a console window at every logon. A hidden PowerShell parent
+    # suppresses the window while keeping the exe inside the task's process
+    # tree, so stop/restart (schtasks /End) still terminate it.
+    $binEsc  = $bin -replace "'", "''"
+    # All streams append to a service log: the hidden console would otherwise
+    # swallow supervisor/runtime output (journald/launchd cover this elsewhere).
+    $logEsc  = (Join-Path $InstallRoot "logs\service.log") -replace "'", "''"
+    $runArgs = "-NoProfile -WindowStyle Hidden -Command `"& '$binEsc' run *>> '$logEsc'`""
+    $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $runArgs -WorkingDirectory $InstallRoot
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
+    $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive
+    # -Force replaces only the definition; a running instance (old action)
+    # survives it. Stop it so the new action takes over immediately.
+    Stop-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $Label -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
+}
+
+# Re-run guard (parity with install.sh): don't clobber an existing install,
+# but ensure the task exists and is up (self-heals a failed registration).
 if ((Test-Path $bin) -and -not $Force) {
     Log "Locai Link is already installed at $InstallRoot."
+    Install-LocaiTask
     if (Test-LocaiSession) {
         Log "Already registered (set LOCAI_FORCE=1 to reinstall in place)."
     } else {
@@ -155,14 +184,7 @@ if ($env:LOCAI_ARTIFACT_BASE) {
     [Environment]::SetEnvironmentVariable("LOCAI_ARTIFACT_BASE", $env:LOCAI_ARTIFACT_BASE, "User")
 }
 
-# Register a per-user Scheduled Task: run at logon, restart on failure, no admin.
-# Keyless (`run`): the supervisor idles until a session exists; registration is
-# out-of-band via `locai register`, so no key is written into the task.
-$action  = New-ScheduledTaskAction -Execute $bin -Argument "run" -WorkingDirectory $InstallRoot
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName $Label -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
-Start-ScheduledTask -TaskName $Label
+Install-LocaiTask
 
 Log ""
 Log "Locai Link is installed and the service is running."
