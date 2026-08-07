@@ -440,6 +440,10 @@ jobs:
 
       - name: Install Whisper Server
         shell: bash
+        env:
+          # Native source build: the prebuilt's CPU-variant loader SIGILLs on
+          # the runners' CPUs (no newest instruction sets).
+          LOCAI_WHISPER_FORCE_SOURCE: "1"
         run: uv run python plugins/audio_transcriber/install.py
 
       - name: Test Audio Classifier
@@ -544,6 +548,10 @@ jobs:
 
       - name: Install Whisper Server
         shell: bash
+        env:
+          # Native source build: the prebuilt's CPU-variant loader SIGILLs on
+          # the runners' CPUs (no newest instruction sets).
+          LOCAI_WHISPER_FORCE_SOURCE: "1"
         run: uv run python plugins/audio_transcriber/install.py
 
       - name: Test Audio Classifier

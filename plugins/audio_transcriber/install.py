@@ -398,7 +398,14 @@ def install_inference_engine():
         return  # silent no-op — caller decides whether to announce anything
 
     logger.info("Installing Audio Transcription Engine (whisper.cpp)")
-    url = _prebuilt_url(tag)
+    # LOCAI_WHISPER_FORCE_SOURCE=1 skips the prebuilt: a native source build
+    # sidesteps the prebuilt's CPU-variant loader, which can SIGILL on CPUs
+    # without the newest instruction sets (observed on CI runners).
+    force_source = os.environ.get("LOCAI_WHISPER_FORCE_SOURCE") == "1"
+    if force_source and platform.system() == "Windows":
+        logger.warning("LOCAI_WHISPER_FORCE_SOURCE ignored on Windows (prebuilt only).")
+        force_source = False
+    url = None if force_source else _prebuilt_url(tag)
     if url:
         if _install_prebuilt(url, BIN_WHISPER_DIR, tag):
             return

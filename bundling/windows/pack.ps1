@@ -31,10 +31,19 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 
 $BundleDir = Join-Path $RepoRoot "dist\locai-link"
-$Manifest  = Join-Path $BundleDir "current\manifest.json"
 $BootJson  = Join-Path $RepoRoot "bundling\boot.json"
 
-if (-not (Test-Path $Manifest)) { throw "manifest.json not at $Manifest - run ``uv run python bundling/build.py --shape headless --plugins ...`` first." }
+# `current` is a symlink where supported; Windows without symlink rights gets
+# build.py's CURRENT text-pointer file instead. Accept both, like the launcher.
+$Manifest = Join-Path $BundleDir "current\manifest.json"
+if (-not (Test-Path $Manifest)) {
+    $pointer = Join-Path $BundleDir "CURRENT"
+    if (Test-Path $pointer) {
+        $ver = (Get-Content $pointer -Raw).Trim()
+        $Manifest = Join-Path $BundleDir "versions\$ver\manifest.json"
+    }
+}
+if (-not (Test-Path $Manifest)) { throw "manifest.json not found under $BundleDir (current\ or CURRENT pointer) - run ``uv run python bundling/build.py --shape headless --plugins ...`` first." }
 if (-not (Test-Path $BootJson))  { throw "boot.json not at $BootJson." }
 
 # --- Derive asset name + shape from manifest (single source of truth) ---
