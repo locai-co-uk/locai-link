@@ -513,24 +513,12 @@ jobs:
           FINAL_NAME="${ASSET_BASE}-macos-arm64-${TAG}.pkg"
           cp "$SIGNED_PKG" "release-assets/$FINAL_NAME"
 
-          python - <<EOF > "release-assets/${FINAL_NAME}.sha256"
-          import hashlib, pathlib
-          p = pathlib.Path("release-assets/${FINAL_NAME}")
-          digest = hashlib.sha256(p.read_bytes()).hexdigest()
-          print(f"{digest}  ${FINAL_NAME}")
-          EOF
-
           # Stable-named copy for the permanent "latest" download URL.
           # Shape- + platform-scoped, version-agnostic so the URL never changes:
           #   .../releases/latest/download/locai-link-desktop-macos-arm64.pkg
           # One canonical bundle per shape per platform per release.
           STABLE_NAME="${ASSET_BASE}-macos-arm64.pkg"
           cp "$SIGNED_PKG" "release-assets/$STABLE_NAME"
-          python - <<EOF > "release-assets/${STABLE_NAME}.sha256"
-          import hashlib, pathlib
-          p = pathlib.Path("release-assets/${STABLE_NAME}")
-          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  ${STABLE_NAME}")
-          EOF
 
           # 9. OTA tarball. swap_bundle downloads this, not the .pkg. Whole-app
           #    OTA: include the runtime version payload AND the notarised +
@@ -549,11 +537,6 @@ jobs:
           cp -R "$STAGING/Locai Link.app"        "$OTA_ROOT/Locai Link.app"
           TAR_NAME="${ASSET_BASE}-macos-arm64-${TAG}.tar.gz"
           tar -czf "release-assets/$TAR_NAME" -C "$OTA_ROOT" .
-          python - <<EOF > "release-assets/${TAR_NAME}.sha256"
-          import hashlib, pathlib
-          p = pathlib.Path("release-assets/${TAR_NAME}")
-          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  ${TAR_NAME}")
-          EOF
           ls -lah release-assets/
 
       - name: Wipe ephemeral keychain + notary key
@@ -577,22 +560,9 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
           bash bundling/linux/pack.sh --release --output "release-assets/${ASSET}"
-          python - <<'EOF' > "release-assets/${ASSET}.sha256"
-          import hashlib, os, pathlib
-          name = os.environ["ASSET"]
-          p = pathlib.Path("release-assets") / name
-          digest = hashlib.sha256(p.read_bytes()).hexdigest()
-          print(f"{digest}  {name}")
-          EOF
 
           # Stable-named copy for the permanent "latest" download URL.
           cp "release-assets/${ASSET}" "release-assets/${STABLE}"
-          python - <<'EOF' > "release-assets/${STABLE}.sha256"
-          import hashlib, os, pathlib
-          name = os.environ["STABLE"]
-          p = pathlib.Path("release-assets") / name
-          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {name}")
-          EOF
           ls -lah release-assets/
 
       - name: Package bundle (Windows)
@@ -607,22 +577,9 @@ jobs:
           cd dist
           7z a -tzip -mx=9 "../release-assets/${ASSET}" locai-link
           cd ..
-          python - <<'EOF' > "release-assets/${ASSET}.sha256"
-          import hashlib, os, pathlib
-          name = os.environ["ASSET"]
-          p = pathlib.Path("release-assets") / name
-          digest = hashlib.sha256(p.read_bytes()).hexdigest()
-          print(f"{digest}  {name}")
-          EOF
 
           # Stable-named copy for the permanent "latest" download URL.
           cp "release-assets/${ASSET}" "release-assets/${STABLE}"
-          python - <<'EOF' > "release-assets/${STABLE}.sha256"
-          import hashlib, os, pathlib
-          name = os.environ["STABLE"]
-          p = pathlib.Path("release-assets") / name
-          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {name}")
-          EOF
           ls -lah release-assets/
 
       - name: Upload release assets
@@ -655,11 +612,11 @@ jobs:
             # GitHub-hosted macos-latest is arm64.
             platform_tag: macos-arm64
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release.outputs.checkout_ref }}
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Install Rust toolchain
@@ -695,16 +652,9 @@ jobs:
           [ -n "$BUILT" ] || { echo "::error::headless tarball not produced for ${{ matrix.platform_tag }}"; exit 1; }
           cp "$BUILT" "release-assets/$(basename "$BUILT")"
           cp "$BUILT" "release-assets/${STABLE}"
-          for f in "release-assets/$(basename "$BUILT")" "release-assets/${STABLE}"; do
-            python - "$f" > "${f}.sha256" <<'PY'
-          import hashlib, pathlib, sys
-          p = pathlib.Path(sys.argv[1])
-          print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")
-          PY
-          done
           ls -lah release-assets/
       - name: Upload headless assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets-headless-${{ runner.os }}
           path: release-assets/
@@ -736,9 +686,8 @@ jobs:
 
       - name: Generate checksums.txt
         # One release-wide checksum file (sha256sum format) over every real
-        # asset. The updater and launcher prefer it; the per-asset .sha256
-        # sidecars stay published until the fleet is past the transition
-        # release, then their generation can be dropped.
+        # asset. checksums.txt is the single verification source: this release
+        # publishes no per-asset .sha256 sidecars.
         shell: bash
         run: |
           set -euo pipefail
@@ -756,7 +705,6 @@ jobs:
             release-assets/*.tar.gz
             release-assets/*.zip
             release-assets/*.pkg
-            release-assets/*.sha256
             release-assets/checksums.txt
           # Don't abort the whole release when one platform's leg
           # failed to produce its artifact; the other platforms are

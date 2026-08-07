@@ -37,12 +37,16 @@ log() { printf '%s\n' "$*"; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 FORCE=0
-for a in "$@"; do [ "$a" = "--force" ] && FORCE=1; done
+# `if` (not `&& ...`) so a non-matching last argument can't exit 1 under set -e.
+for a in "$@"; do if [ "$a" = "--force" ]; then FORCE=1; fi; done
 
 # Optional registration key (one-time) or fleet key (reusable), from Control.
+# The key itself is never passed on argv (argv is world-readable via /proc);
+# `locai register` reads it from the environment. REG_KIND is hint text only.
 REG_KIND=""; REG_KEY=""
 if [ -n "${LOCAI_REGISTRATION_KEY:-}" ]; then REG_KIND="--registration-key"; REG_KEY="$LOCAI_REGISTRATION_KEY"; fi
 if [ -n "${LOCAI_FLEET_KEY:-}" ];        then REG_KIND="--fleet-key";        REG_KEY="$LOCAI_FLEET_KEY"; fi
+export LOCAI_REGISTRATION_KEY LOCAI_FLEET_KEY
 
 has_session() { for f in "$INSTALL_ROOT"/configs/session_*.json; do [ -f "$f" ] && return 0; done; return 1; }
 on_path()     { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
@@ -73,7 +77,15 @@ fetch_verified() {
         || err "no checksums.txt at $CHECKSUMS_URL - refusing to install unverified"
     want="$(awk -v f="$asset" '$2 == f || $2 == "*" f {print $1}' "$sums" | head -1)"
     [ -n "$want" ] || err "no checksum for $asset in checksums.txt"
-    got="$(sha256sum "$dest" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$dest" | cut -d' ' -f1)"
+    # Pick the hash tool first: a `cmd | cut || fallback` pipeline takes cut's
+    # exit status, so the fallback would never run (and macOS has no sha256sum).
+    if command -v sha256sum >/dev/null 2>&1; then
+        got="$(sha256sum "$dest" | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        got="$(shasum -a 256 "$dest" | cut -d' ' -f1)"
+    else
+        err "neither sha256sum nor shasum found - cannot verify $asset"
+    fi
     [ "$want" = "$got" ] || err "checksum mismatch for $asset (want $want, got $got)"
     log "checksum verified"
 }
@@ -97,7 +109,9 @@ install_service() {
         command -v systemctl >/dev/null 2>&1 || err "systemctl not found - headless Linux requires systemd (--user)"
         UNIT_DIR="$HOME/.config/systemd/user"; mkdir -p "$UNIT_DIR"
         {
-            echo "[Unit]"; echo "Description=Locai Link (headless)"; echo "After=network-online.target"; echo ""
+            echo "[Unit]"; echo "Description=Locai Link (headless)"
+            # Wants= actually pulls the target in; After= alone is a no-op here.
+            echo "Wants=network-online.target"; echo "After=network-online.target"; echo ""
             echo "[Service]"
             echo "ExecStart=$BIN run"
             [ -n "${LOCAI_ARTIFACT_BASE:-}" ] && echo "Environment=LOCAI_ARTIFACT_BASE=$LOCAI_ARTIFACT_BASE"
@@ -105,8 +119,9 @@ install_service() {
             echo "[Install]"; echo "WantedBy=default.target"
         } > "$UNIT_DIR/$UNIT"
         systemctl --user daemon-reload
-        # >/dev/null: hide systemctl's "Created symlink ..." line; keep failures.
-        systemctl --user enable --now "$UNIT" >/dev/null 2>&1 || err "failed to enable the service"
+        # >/dev/null: hide systemctl's "Created symlink ..." line; keep stderr
+        # so a failure surfaces its cause.
+        systemctl --user enable --now "$UNIT" >/dev/null || err "failed to enable the service"
         loginctl enable-linger "$(id -un)" 2>/dev/null || true
     elif [ "$os" = "Darwin" ]; then
         PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"; mkdir -p "$HOME/Library/LaunchAgents"
@@ -130,7 +145,8 @@ install_service() {
 # env). Writes the session; the idle service auto-picks it up within a poll.
 register_now() {
     log "registering this device with your key..."
-    "$BIN" register "$REG_KIND" "$REG_KEY" || err "registration failed; re-run: locai register $REG_KIND <KEY>"
+    # The key reaches `register` via the exported env, never argv.
+    "$BIN" register || err "registration failed; re-run: locai register $REG_KIND <KEY>"
 }
 
 installed_note() {

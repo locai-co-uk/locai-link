@@ -180,11 +180,19 @@ def _from_dir(store_dir: Path, source: Path) -> None:
                 stem = stem[: -len(ext)]
                 break
         parts = stem.split("-")
-        # name may contain hyphens (llama-cpp); platform-arch is the last two,
-        # version is the token before them.
-        arch = "-".join(parts[-2:])
-        version = parts[-3]
-        name = "-".join(parts[:-3])
+        # name may contain hyphens (llama-cpp) and the platform tuple may carry a
+        # variant suffix (linux-x64-vulkan), so anchor on the platform token:
+        # everything from it is platform-arch[-variant], the token before it is
+        # the version, the rest is the name.
+        plat_idx = next((i for i, p in enumerate(parts) if p in ("linux", "macos", "windows")), None)
+        if plat_idx is None or plat_idx < 2:
+            raise SystemExit(
+                f"unrecognised artifact name {archive.name!r}: "
+                "expected {name}-{version}-{platform-arch[-variant]}"
+            )
+        arch = "-".join(parts[plat_idx:])
+        version = parts[plat_idx - 1]
+        name = "-".join(parts[: plat_idx - 1])
         place_artifact(store_dir, CAPABILITY_ENGINES, name, version, arch, archive)
     rebuild_manifest(store_dir)
 

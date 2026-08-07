@@ -167,45 +167,70 @@ def _request_with_retry(
     raise RuntimeError(f"{op_name} failed: no response received.")
 
 
+def _redeem_device_key(
+    *,
+    endpoint: str,
+    bearer_key: str,
+    op_name: str,
+    extra_payload: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str, str]:
+    """POST a machine-bound key redemption and validate the credential response.
+
+    Shared body of enroll_device / register_with_key: payload assembly, bearer
+    auth, retry/backoff, JSON parse, device_id/api_key validation. Returns
+    (data, device_id, api_key).
+    """
+    from link.infra.utils import get_machine_id_hash
+
+    payload: dict[str, Any] = {
+        "machine_id_hash": get_machine_id_hash(),
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "hostname": platform.node(),
+    }
+    if extra_payload:
+        payload.update(extra_payload)
+    _agent_ver = resolve_agent_version()
+    if _agent_ver:
+        payload["agent_version"] = _agent_ver
+    headers = {"Authorization": f"Bearer {bearer_key}"}
+
+    resp = _request_with_retry(
+        lambda: requests.post(endpoint, json=payload, headers=headers, timeout=15),
+        op_name=op_name,
+    )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f"{op_name} response was not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{op_name} response was not a JSON object.")
+
+    device_id = data.get("device_id")
+    api_key = data.get("api_key")
+    if not device_id or not api_key:
+        # Keys only: the body can hold a live api_key, which must never reach
+        # the exception message (callers log it into the service journal).
+        raise RuntimeError(f"{op_name} response missing device_id or api_key (got keys: {sorted(data)})")
+
+    return data, device_id, api_key
+
+
 def enroll_device(fleet_key: str, api_url: str) -> AgentConfig:
     """Headless fleet enrollment via a reusable org-scoped fleet key.
 
     Resolves file: key references, posts to /devices/enroll with retry/backoff,
     and writes the fleet marker on success. No user credentials required.
     """
-    from link.infra.utils import get_machine_id_hash
-
     fleet_key = _resolve_fleet_key(fleet_key)
 
     logger.info("Starting headless fleet enrollment...")
 
-    machine_id_hash = get_machine_id_hash()
-
-    _agent_ver = resolve_agent_version()
-    payload: dict[str, Any] = {
-        "machine_id_hash": machine_id_hash,
-        "os": platform.system(),
-        "arch": platform.machine(),
-        "hostname": platform.node(),
-    }
-    if _agent_ver:
-        payload["agent_version"] = _agent_ver
-
-    headers = {"Authorization": f"Bearer {fleet_key}"}
-
-    resp = _request_with_retry(
-        lambda: requests.post(f"{api_url}/devices/enroll", json=payload, headers=headers, timeout=15),
+    data, device_id, api_key = _redeem_device_key(
+        endpoint=f"{api_url}/devices/enroll",
+        bearer_key=fleet_key,
         op_name="Fleet enrollment",
     )
-    try:
-        data = resp.json()
-    except ValueError as exc:
-        raise RuntimeError(f"Enrollment response was not valid JSON: {exc}") from exc
-
-    device_id = data.get("device_id")
-    api_key = data.get("api_key")
-    if not device_id or not api_key:
-        raise RuntimeError(f"Enrollment response missing device_id or api_key: {data}")
 
     device_name = data.get("device_name") or device_id
     logger.info(f"Fleet enrollment successful. Device: {device_name} ({device_id})")
@@ -238,38 +263,14 @@ def register_with_key(reg_key: str, api_url: str) -> AgentConfig:
     and Control assigns the device_id. Re-redemption from the same machine is an
     idempotent retry that rotates the api_key, so installer re-runs are safe.
     """
-    from link.infra.utils import get_machine_id_hash
-
     logger.info("Registering device with registration key...")
 
-    payload: dict[str, Any] = {
-        "machine_id_hash": get_machine_id_hash(),
-        "device_name": _default_device_name(),
-        "os": platform.system(),
-        "arch": platform.machine(),
-        "hostname": platform.node(),
-        "device_type": "other",
-    }
-    _agent_ver = resolve_agent_version()
-    if _agent_ver:
-        payload["agent_version"] = _agent_ver
-    headers = {"Authorization": f"Bearer {reg_key}"}
-
-    resp = _request_with_retry(
-        lambda: requests.post(
-            f"{api_url}/devices/headless/register-with-reg-key", json=payload, headers=headers, timeout=15
-        ),
+    data, device_id, api_key = _redeem_device_key(
+        endpoint=f"{api_url}/devices/headless/register-with-reg-key",
+        bearer_key=reg_key,
         op_name="Device registration",
+        extra_payload={"device_name": _default_device_name(), "device_type": "other"},
     )
-    try:
-        data = resp.json()
-    except ValueError as exc:
-        raise RuntimeError(f"Registration response was not valid JSON: {exc}") from exc
-
-    device_id = data.get("device_id")
-    api_key = data.get("api_key")
-    if not device_id or not api_key:
-        raise RuntimeError(f"Registration response missing device_id or api_key: {data}")
 
     # The server name is final (it may suffix on collision); persist what it returns.
     device_name = data.get("device_name") or platform.node() or device_id

@@ -18,14 +18,14 @@ The installer sets up the background service; you register out-of-band with the 
 
 **Linux / macOS:**
 
-```
-curl -fsSL https://locai.co.uk/install.sh | sh
+```sh
+curl -fsSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 
-```
-irm https://locai.co.uk/install.ps1 | iex
+```powershell
+irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.ps1 | iex
 ```
 
 You will now have the `locai` service installed on your machine. To register, run `locai register --registration-key "YOUR_REG_KEY"`. For a fleet, register with `--fleet-key` instead. To register unattended in one step, set `LOCAI_REGISTRATION_KEY` (or `LOCAI_FLEET_KEY`) before running the install command. Check status any time with `locai status`; update with `locai update`.
@@ -50,7 +50,7 @@ The Quick start installers above are the recommended path for most users. Build 
 
 Clone the repo and onboard the device with a single `run`. `uv` provisions the Python environment on first invocation, so no separate install step is needed:
 
-```
+```sh
 git clone https://github.com/locai-co-uk/locai-link.git
 cd locai-link
 uv run main.py run --registration-key "YOUR_REG_KEY"
@@ -100,7 +100,7 @@ The key is the credential; Control binds the device to this machine and assigns 
 
 On subsequent runs, resume the saved session:
 
-```
+```sh
 uv run main.py run
 ```
 
@@ -114,9 +114,12 @@ Deploy as a background service (systemd/launchd/Windows) with the release instal
 | `register [options]`    | Register this device with a key, write the session, and exit.       |
 | `status`                | Show registration, service, and update status.                      |
 | `update [--force]`      | Update the running service to the latest version.                   |
-| `stop`                  | Stop all running services (`locai-link`, `zenohd`).                 |
-| `reset [--hard]`        | Clean up venv, caches, and (with `--hard`) session files.           |
-| `install-plugin <name>` | Install a plugin by name.                                           |
+| `reset [--hard]`        | Clean up venv, caches, and (with `--hard`) session files. Source builds only. |
+| `install-plugin <name>` | Install a plugin by name. Source builds only.                       |
+
+Installed devices (the release builds) additionally get the native lifecycle
+commands `locai start|stop|restart|uninstall`; those are not available from a
+source checkout, which runs in the foreground under `uv run main.py run`.
 
 ### API reference
 

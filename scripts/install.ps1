@@ -16,7 +16,14 @@
 # machine that must serve before any user logs in.
 #
 # Config (env overrides, all optional): LOCAI_HEADLESS_URL, LOCAI_BINARY_BASE,
-# LOCAI_ARTIFACT_BASE, LOCAI_INSTALL_ROOT.
+# LOCAI_CHECKSUMS_URL, LOCAI_ARTIFACT_BASE, LOCAI_INSTALL_ROOT, LOCAI_FORCE=1
+# (reinstall in place over an existing install), LOCAI_REGISTRATION_KEY /
+# LOCAI_FLEET_KEY (unattended registration; read from the environment, never
+# passed on a command line).
+#
+# Re-run behaviour mirrors install.sh: a re-run on an installed device does NOT
+# clobber; it reports status or re-surfaces the register steps. LOCAI_FORCE=1
+# reinstalls in place (the session is preserved).
 
 $ErrorActionPreference = "Stop"
 
@@ -26,6 +33,45 @@ $Label       = "uk.co.locai.link.headless"
 
 function Log($m) { Write-Host $m }
 function Die($m) { Write-Error $m; exit 1 }
+
+$bin   = Join-Path $InstallRoot "locai-link.exe"
+$Force = ($env:LOCAI_FORCE -eq "1")
+
+function Test-LocaiSession { [bool](Test-Path (Join-Path $InstallRoot "configs\session_*.json")) }
+
+# One-shot out-of-band registration for unattended installs. The key reaches
+# `register` via the inherited environment, never argv (command lines are
+# readable by other local processes).
+function Invoke-LocaiRegistration {
+    if ($env:LOCAI_REGISTRATION_KEY -or $env:LOCAI_FLEET_KEY) {
+        & $bin register
+        if ($LASTEXITCODE -ne 0) { Die "registration failed; re-run: locai register (with your key in the env)" }
+        Log "This device is now connected."
+    } else {
+        Log ""
+        Log "This device isn't connected yet. Register it with a key from Control:"
+        Log "  locai register --registration-key <KEY>     # single device"
+        Log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+    }
+}
+
+function Show-LocaiFooter {
+    Log ""
+    Log "Check it with 'locai status', or 'locai --help' for all commands."
+    Log "To uninstall: locai uninstall"
+}
+
+# Re-run guard (parity with install.sh): don't clobber an existing install.
+if ((Test-Path $bin) -and -not $Force) {
+    Log "Locai Link is already installed at $InstallRoot."
+    if (Test-LocaiSession) {
+        Log "Already registered (set LOCAI_FORCE=1 to reinstall in place)."
+    } else {
+        Invoke-LocaiRegistration
+    }
+    Show-LocaiFooter
+    return
+}
 
 # Detect platform-arch (only Windows x64/arm64 published today).
 $machine = $env:PROCESSOR_ARCHITECTURE
@@ -59,6 +105,10 @@ try {
     Log "checksum verified"
 
     New-Item -ItemType Directory -Force -Path $InstallRoot, (Join-Path $InstallRoot "logs"), (Join-Path $InstallRoot "engines") | Out-Null
+    # A running instance locks locai-link.exe; stop the task first so a --force
+    # reinstall can overwrite it (no-op on a fresh install).
+    Stop-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
     # tar ships with Windows 10+. --strip-components=1 drops the <name>/ wrapper so
     # locai-link.exe + versions/ + boot.json land at the install-root top (matches install.sh).
     tar -xzf $tarball -C $InstallRoot --strip-components=1
@@ -66,7 +116,6 @@ try {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
-$bin = Join-Path $InstallRoot "locai-link.exe"
 if (-not (Test-Path $bin)) { Die "headless binary not found at $bin after extract" }
 
 # Put `locai` on PATH: a shim that calls the binary, plus the install dir on the
@@ -75,7 +124,10 @@ $shim = Join-Path $InstallRoot "locai.cmd"
 Set-Content -Path $shim -Value '@"%~dp0locai-link.exe" %*' -Encoding ASCII
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$InstallRoot*") {
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallRoot", "User")
+    # An unset user Path must not become ";C:\..." - an empty PATH entry
+    # resolves to the current directory.
+    $newPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallRoot } else { "$userPath;$InstallRoot" }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
     Log "added $InstallRoot to your PATH (open a new terminal to pick up 'locai')"
 }
 Log "CLI: locai -> $bin"
@@ -99,19 +151,10 @@ Log "Locai Link is installed and the service is running."
 
 # Unattended installs can supply a key via env -> one-shot register now (the idle
 # service picks up the session). Otherwise show how to register.
-if ($env:LOCAI_REGISTRATION_KEY) {
-    & $bin register --registration-key $env:LOCAI_REGISTRATION_KEY
-    Log "This device is now connected."
-} elseif ($env:LOCAI_FLEET_KEY) {
-    & $bin register --fleet-key $env:LOCAI_FLEET_KEY
-    Log "This device is now connected."
+if (Test-LocaiSession) {
+    Log "Existing registration preserved."
 } else {
-    Log ""
-    Log "This device isn't connected yet. Register it with a key from Control:"
-    Log "  locai register --registration-key <KEY>     # single device"
-    Log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+    Invoke-LocaiRegistration
 }
 
-Log ""
-Log "Check it with 'locai status', or 'locai --help' for all commands."
-Log "To uninstall: locai uninstall"
+Show-LocaiFooter

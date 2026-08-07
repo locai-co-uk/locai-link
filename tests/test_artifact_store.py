@@ -48,13 +48,16 @@ def served_store(tmp_path, monkeypatch):
 
     handler = functools.partial(_QuietHandler, directory=str(store_dir))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     monkeypatch.setenv("LOCAI_ARTIFACT_BASE", base)
     try:
         yield base, store_dir
     finally:
         httpd.shutdown()
+        httpd.server_close()  # shutdown() stops serve_forever but keeps the socket
+        server_thread.join(timeout=5)
 
 
 def test_platform_arch(monkeypatch):

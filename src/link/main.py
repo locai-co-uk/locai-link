@@ -13,6 +13,7 @@ import sys
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 from link import constants
 from link.app.onboarding import (
@@ -184,13 +185,20 @@ def register(args: argparse.Namespace) -> int:
         return 0
 
     api_url = args.api_url or constants.DEFAULT_API_URL
+    # Env fallback for unattended installers: argv is readable by other local
+    # processes, so the installers hand the key over via the environment.
+    fleet_key = args.fleet_key or os.environ.get("LOCAI_FLEET_KEY")
+    reg_key = args.registration_key or os.environ.get("LOCAI_REGISTRATION_KEY")
     try:
-        if args.fleet_key:
-            agent_config = enroll_device(fleet_key=args.fleet_key, api_url=api_url)
-        elif args.registration_key:
-            agent_config = register_with_key(reg_key=args.registration_key, api_url=api_url)
+        if fleet_key:
+            agent_config = enroll_device(fleet_key=fleet_key, api_url=api_url)
+        elif reg_key:
+            agent_config = register_with_key(reg_key=reg_key, api_url=api_url)
         else:
-            logger.critical("Provide --registration-key or --fleet-key to register a headless device.")
+            logger.critical(
+                "Provide --registration-key or --fleet-key (flag or "
+                "LOCAI_REGISTRATION_KEY/LOCAI_FLEET_KEY env) to register a headless device."
+            )
             return 1
         state_manager.bootstrap(agent_config)
     except Exception as e:
@@ -201,7 +209,7 @@ def register(args: argparse.Namespace) -> int:
     return 0
 
 
-def _health_get(path: str, timeout: float = 3.0):
+def _health_get(path: str, timeout: float = 3.0) -> Any:
     """GET the running service's loopback health endpoint; returns parsed JSON."""
     import requests
 
@@ -209,6 +217,15 @@ def _health_get(path: str, timeout: float = 3.0):
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+
+def _emit(line: str = "") -> None:
+    """Human-facing CLI output for the one-shot commands (status/update).
+
+    Deliberately stdout, not the logger: this is the command's result, and the
+    logger may be wired to service handlers.
+    """
+    print(line)  # noqa: T201
 
 
 def status(args: argparse.Namespace) -> int:
@@ -220,21 +237,21 @@ def status(args: argparse.Namespace) -> int:
     from link.utils.version import resolve_agent_version
 
     installed = resolve_agent_version() or "unknown"
-    print(f"Version:      {installed}")
-    print(f"Host:         {platform.node()} ({platform.system().lower()}/{platform.machine()})")
+    _emit(f"Version:      {installed}")
+    _emit(f"Host:         {platform.node()} ({platform.system().lower()}/{platform.machine()})")
 
     saved = StateManager().load_state()
     if saved is None:
-        print("Registration: not registered (run `locai register`).")
+        _emit("Registration: not registered (run `locai register`).")
     else:
         try:
             ident = AgentConfig(**saved).identity
-            print(f"Device:       {ident.device_name} ({ident.device_id})")
-            print("Registration: registered.")
+            _emit(f"Device:       {ident.device_name} ({ident.device_id})")
+            _emit("Registration: registered.")
             if ident.api_url:
-                print(f"Control URL:  {ident.api_url}")
+                _emit(f"Control URL:  {ident.api_url}")
         except Exception:
-            print("Registration: session present but unreadable.")
+            _emit("Registration: session present but unreadable.")
 
     try:
         health = _health_get("/healthz")
@@ -242,29 +259,29 @@ def status(args: argparse.Namespace) -> int:
         # No health endpoint means the agent isn't up. Unregistered, that is by
         # design (the supervisor idles until a session exists), not a fault.
         if saved is None:
-            print("Service:      idle (awaiting registration).")
+            _emit("Service:      idle (awaiting registration).")
         else:
-            print("Service:      not running.")
+            _emit("Service:      not running.")
         return 0
     except Exception as e:  # noqa: BLE001
-        print(f"Service:      unreachable ({type(e).__name__}).")
+        _emit(f"Service:      unreachable ({type(e).__name__}).")
         return 0
 
     # The running runtime's version can lag the installed one between an OTA
     # flip and the service restart; surface it only when it actually differs.
     running = health.get("version")
     lag = f", running {running}" if running and running != installed else ""
-    print(f"Service:      running (up {health.get('uptime_seconds', 0)}s{lag}).")
+    _emit(f"Service:      running (up {health.get('uptime_seconds', 0)}s{lag}).")
     if health.get("currently_serving"):
-        print(f"Serving:      {health.get('model_id') or 'yes'}")
+        _emit(f"Serving:      {health.get('model_id') or 'yes'}")
     transport = health.get("transport") or {}
     if transport:
         conn = "connected" if transport.get("connected") else "disconnected"
-        print(f"Transport:    {conn} ({transport.get('type')})")
+        _emit(f"Transport:    {conn} ({transport.get('type')})")
     if health.get("update_available"):
-        print(f"Update:       available -> {health.get('latest_version')} (run `locai update`).")
+        _emit(f"Update:       available -> {health.get('latest_version')} (run `locai update`).")
     else:
-        print("Update:       up to date.")
+        _emit("Update:       up to date.")
     return 0
 
 
@@ -279,14 +296,14 @@ def update(args: argparse.Namespace) -> int:
     try:
         health = _health_get("/healthz")
     except requests.exceptions.ConnectionError:
-        print("Service is not running; start it before updating.")
+        _emit("Service is not running; start it before updating.")
         return 1
     except Exception as e:  # noqa: BLE001
-        print(f"Could not reach the service ({type(e).__name__}).")
+        _emit(f"Could not reach the service ({type(e).__name__}).")
         return 1
 
     if not health.get("update_available") and not args.force:
-        print(f"Already at the latest version ({health.get('version', 'unknown')}).")
+        _emit(f"Already at the latest version ({health.get('version', 'unknown')}).")
         return 0
 
     latest = health.get("latest_version")
@@ -295,19 +312,19 @@ def update(args: argparse.Namespace) -> int:
     try:
         resp = requests.post(url, timeout=10)
     except Exception as e:  # noqa: BLE001
-        print(f"Update request failed ({type(e).__name__}).")
+        _emit(f"Update request failed ({type(e).__name__}).")
         return 1
 
     if resp.status_code == 202:
-        print(f"Update{target} accepted; the service is applying it and will restart.")
+        _emit(f"Update{target} accepted; the service is applying it and will restart.")
         return 0
     if resp.status_code == 409:
-        print("No installable update available yet.")
+        _emit("No installable update available yet.")
         return 0
     if resp.status_code == 503:
-        print("Service is still starting; try again shortly.")
+        _emit("Service is still starting; try again shortly.")
         return 1
-    print(f"Update request returned HTTP {resp.status_code}.")
+    _emit(f"Update request returned HTTP {resp.status_code}.")
     return 1
 
 

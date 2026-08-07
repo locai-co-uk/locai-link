@@ -144,7 +144,12 @@ pub fn service_restart(u: &ServiceUnit) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        run_ok("launchctl", &["kickstart", "-k", &format!("gui/{}/{}", current_uid(), u.label)])
+        // `stop` boots the job out entirely, so kickstart alone can't restart a
+        // stopped service. Re-bootstrap first (errors if already loaded, which
+        // is fine), then kickstart the loaded job.
+        let uid = current_uid();
+        let _ = run_ok("launchctl", &["bootstrap", &format!("gui/{uid}"), &plist_path(u)]);
+        run_ok("launchctl", &["kickstart", "-k", &format!("gui/{uid}/{}", u.label)])
     }
     #[cfg(target_os = "windows")]
     {
@@ -210,12 +215,26 @@ fn remove_cli_symlink(root: &Path) {
 
 /// Full uninstall: deregister from Control, remove the service, drop the CLI
 /// entry, and delete the install root.
+fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(target_os = "windows") { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from).and_then(|p| p.canonicalize().ok())
+}
+
 pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
     let binary = if cfg!(target_os = "windows") { "locai-link.exe" } else { "locai-link" };
-    // Positive check (has the binary) rather than a path blocklist, so a stray
-    // LOCAI_INSTALL_ROOT can't point this at an unrelated directory.
-    if !root.join(binary).exists() {
-        return Err(format!("not a Locai install (no {binary} at {})", root.display()));
+    // Positive layout check rather than a path blocklist: a genuine install
+    // root carries the binary AND the bundle layout, so a stray or hostile
+    // LOCAI_INSTALL_ROOT pointing at an unrelated directory is never deleted.
+    let root = root.canonicalize().map_err(|e| format!("cannot resolve {}: {e}", root.display()))?;
+    let root = root.as_path();
+    if !(root.join(binary).is_file() && root.join("boot.json").is_file() && root.join("versions").is_dir()) {
+        return Err(format!(
+            "not a Locai install root (need {binary} + boot.json + versions/ at {})",
+            root.display()
+        ));
+    }
+    if root == Path::new("/") || Some(root) == home_dir().as_deref() {
+        return Err(format!("refusing to delete {}", root.display()));
     }
     // Deregister first: it needs the session api key the wipe below removes.
     deregister(root);
@@ -257,9 +276,11 @@ fn windows_remove_files(root: &Path) -> Result<(), String> {
     );
     let _ = Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output();
 
-    let del = format!("ping 127.0.0.1 -n 3 >nul & rmdir /S /Q \"{root_str}\"");
-    Command::new("cmd")
-        .args(["/C", &del])
+    // PowerShell single-quoted literal (with '' escaping) + -LiteralPath: the
+    // path is never parsed as command syntax, unlike an interpolated `cmd /C`.
+    let del = format!("Start-Sleep -Seconds 2; Remove-Item -LiteralPath '{esc}' -Recurse -Force");
+    Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &del])
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|e| format!("spawn cleanup: {e}"))?;

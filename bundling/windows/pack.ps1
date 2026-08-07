@@ -74,7 +74,9 @@ try {
     python (Join-Path $RepoRoot "bundling\gen_boot_json.py") --manifest $Manifest --template $BootJson --output (Join-Path $root "boot.json")
     if ($LASTEXITCODE -ne 0) { throw "gen_boot_json.py failed" }
 
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Output) | Out-Null
+    # A bare filename (-Output foo.tar.gz) has no parent to create.
+    $outDir = Split-Path -Parent $Output
+    if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
     tar -czf $Output -C $stage $name
     if ($LASTEXITCODE -ne 0) { throw "tar failed" }
 } finally {

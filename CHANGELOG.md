@@ -19,6 +19,18 @@ sections below the summary. -->
 - Managing a device is the same everywhere: start, stop, restart, update, and
   uninstall work identically on desktop and headless, and uninstalling now
   removes the device from Control automatically.
+- Fixed: "Sign in with Locai" during first-run setup opens your browser again
+  (broken in 1.2.3 by an over-tightened URL-opening permission).
+- Fixed: `locai --help` and `locai --version` answer on the terminal instead of
+  opening the app window.
+- Fixed: the tray menu on Linux could freeze on stale state (a finished
+  download stuck at "Downloading", the serving count not tracking
+  serve/stop). Linux trays don't reliably render in-place item updates, so
+  the menu is now rebuilt on any change there; macOS keeps in-place updates
+  (its rebuilds wait for windows to close) and now re-reconciles rows every
+  poll so a slow or failed toggle can't leave a stray checkmark.
+- Changed: release downloads are verified against a single release-wide
+  `checksums.txt`; per-asset `.sha256` sidecar files are no longer published.
 
 ## [1.2.3]
 

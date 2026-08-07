@@ -292,8 +292,11 @@ def _extract(archive: Path, dest_dir: Path) -> None:
                     if not link.exists():
                         try:
                             link.symlink_to(Path(m.linkname).name)
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            # Extraction stays usable without the alias (the real
+                            # file is already in place); typical on filesystems
+                            # without symlink support.
+                            logger.debug(f"skipping symlink {link.name} -> {m.linkname}: {exc}")
     elif name.endswith(".zip"):
         with zipfile.ZipFile(archive, "r") as zf:
             for member in zf.namelist():
@@ -339,8 +342,11 @@ def _engine_lock(lock_path: Path):
             import fcntl
 
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass
+        except (ImportError, OSError) as exc:
+            # Expected where flock doesn't exist (Windows) or the fs refuses it;
+            # continue unlocked - the marker recheck under the lock still
+            # prevents double work.
+            logger.debug(f"engine lock unavailable ({exc}); continuing unlocked")
         yield
 
 

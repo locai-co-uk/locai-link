@@ -22,8 +22,13 @@ REPO_ROOT = SPEC_DIR.parent
 
 def _platform_tag() -> str:
     # Mirrors bundling/manifest.py::platform_tag (arch token x64/arm64). Kept
-    # standalone: a PyInstaller .spec shouldn't import project modules.
-    arch = "arm64" if _pf.machine().lower() in ("arm64", "aarch64") else "x64"
+    # standalone: a PyInstaller .spec shouldn't import project modules. Unknown
+    # architectures fail the build rather than silently selecting x64 natives.
+    machine = _pf.machine().lower()
+    arch_map = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}
+    arch = arch_map.get(machine)
+    if arch is None:
+        raise SystemExit(f"unsupported architecture for bundling: {machine!r}")
     os_slug = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[_pf.system()]
     return f"{os_slug}-{arch}"
 

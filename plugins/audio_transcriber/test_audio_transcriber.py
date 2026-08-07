@@ -7,6 +7,7 @@ Downloads ggml-tiny and a short WAV sample, starts whisper-server,
 verifies health + transcription, then shuts down cleanly.
 """
 
+import logging
 import shutil
 import time
 import urllib.error
@@ -17,6 +18,12 @@ import psutil
 import pytest
 import requests
 from link_audio_transcriber.adapter import AudioTranscriber  # type: ignore
+
+logger = logging.getLogger(__name__)
+
+# Real-engine tests: download a model + run whisper-server. Excluded from a
+# plain local `pytest` (addopts -m "not ci"); CI runs them with -m "".
+pytestmark = pytest.mark.ci
 
 # Constants
 TEMP_DIR = Path(__file__).parent / "temp_models"
@@ -43,11 +50,11 @@ def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
             if exc.code != 429:
                 raise
             if attempt == max_attempts:
-                print(f"\n{label} download failed after {max_attempts} attempts (HTTP 429).")
+                logger.info(f"{label} download failed after {max_attempts} attempts (HTTP 429).")
                 return False
             retry_after = int(exc.headers.get("Retry-After", 0))
             wait = max(retry_after, min(2**attempt, 60))
-            print(f"\nRate-limited downloading {label} (attempt {attempt}/{max_attempts}); retrying in {wait}s...")
+            logger.info(f"Rate-limited downloading {label} (attempt {attempt}/{max_attempts}); retrying in {wait}s...")
             time.sleep(wait)
     return False
 
@@ -61,7 +68,7 @@ def setup_teardown():
         (AUDIO_URL, AUDIO_PATH, "JFK sample"),
     ]:
         if not path.exists():
-            print(f"\nDownloading {label} to {path}...")
+            logger.info(f"Downloading {label} to {path}...")
             if not _download(url, path, label):
                 # Skip, don't fail — CDN rate-limiting (429) shouldn't block
                 # unrelated PR merges.
@@ -78,7 +85,7 @@ def setup_teardown():
 
 def test_whisper_serve_mode_lifecycle():
     """Starts whisper in serve mode, checks health, transcribes audio, shuts down."""
-    print(f"\n[Whisper] Starting Server on port {TEST_PORT}...")
+    logger.info(f"[Whisper] Starting Server on port {TEST_PORT}...")
 
     agent = AudioTranscriber(model_path=MODEL_PATH, mode="serve", port=TEST_PORT)
 
@@ -94,18 +101,18 @@ def test_whisper_serve_mode_lifecycle():
 
         # Health check
         health_url = f"http://127.0.0.1:{TEST_PORT}/health"
-        print(f"[Whisper] Checking Health: {health_url}")
+        logger.info(f"[Whisper] Checking Health: {health_url}")
         resp = requests.get(health_url, timeout=5)
         assert resp.status_code == 200
-        print("[Whisper] Health Check Passed")
+        logger.info("[Whisper] Health Check Passed")
 
         # Transcription via adapter method
-        print("[Whisper] Sending Transcription Request...")
+        logger.info("[Whisper] Sending Transcription Request...")
         result = agent.transcribe(AUDIO_PATH)
         assert result is not None
         text = result["model_output"]
         assert isinstance(text, str)
-        print(f"[Whisper] Transcription: {text}")
+        logger.info(f"[Whisper] Transcription: {text}")
         assert len(text) > 0
 
         # Verify telemetry structure
@@ -117,7 +124,7 @@ def test_whisper_serve_mode_lifecycle():
         assert metadata["source"] == "file"
 
     finally:
-        print("\n[Whisper] Stopping server...")
+        logger.info("[Whisper] Stopping server...")
         agent.stop()
         time.sleep(2)
 
@@ -129,7 +136,7 @@ def test_whisper_serve_mode_lifecycle():
 
 def test_whisper_transcribe_mode():
     """Starts whisper in transcribe mode with a specific audio file."""
-    print(f"\n[Whisper] Starting Transcribe mode on port {TEST_PORT}...")
+    logger.info(f"[Whisper] Starting Transcribe mode on port {TEST_PORT}...")
 
     agent = AudioTranscriber(
         model_path=MODEL_PATH,
@@ -155,7 +162,7 @@ def test_whisper_transcribe_mode():
 
         assert result is not None, "Transcription did not produce a result within timeout"
         text = result["model_output"]
-        print(f"[Whisper] Transcription: {text}")
+        logger.info(f"[Whisper] Transcription: {text}")
         assert len(text) > 0
 
     finally:

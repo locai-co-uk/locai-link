@@ -4,6 +4,15 @@ Local LLM inference via `llama-server` + `llama-swap` (from llama.cpp).
 
 **Type:** `language_model`
 
+## Pinned upstream releases
+
+| Binary | Release |
+|---|---|
+| llama.cpp (`llama-server`) | `b10289` |
+| llama-swap | `247` |
+
+The authoritative pins live in `install.py` (`LLAMA_CPP_RELEASE`, `LLAMA_SWAP_RELEASE`); keep this table in sync when bumping them.
+
 ## Args
 
 | Key | Mode | Notes |

@@ -91,7 +91,15 @@ resolve_paths() {
         UNITS_DIR="$SCRIPT_DIR/systemd"
         DESKTOPS_DIR="$SCRIPT_DIR/applications"
         ICONS_SRC="$repo_root/crates/link/src-tauri/icons"
-        BOOT_JSON="$repo_root/bundling/boot.json"
+        # Render boot.json from the built bundle's manifest (same as pack.sh
+        # does for tarballs): the raw template carries shape=desktop + an empty
+        # plugin_set, which would be wrong for other shapes/plugin sets.
+        BOOT_JSON="$(mktemp --tmpdir locai-boot-XXXXXX.json)"
+        python3 "$repo_root/bundling/gen_boot_json.py" \
+            --manifest "$BUNDLE_DIR/current/manifest.json" \
+            --template "$repo_root/bundling/boot.json" \
+            --output "$BOOT_JSON"
+        chmod 0644 "$BOOT_JSON"
         return
     fi
 

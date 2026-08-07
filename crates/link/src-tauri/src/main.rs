@@ -17,21 +17,25 @@ enum Launch {
     /// A lifecycle op handled natively (start/stop/restart/uninstall), shared
     /// with the desktop shape; carries the subcommand name.
     Lifecycle(&'static str),
-    /// A runtime subcommand (register/status/update/…) = one-shot passthrough.
+    /// A runtime subcommand (register/status/update/…) or CLI flag
+    /// (`--help`/`--version`) = one-shot passthrough.
     OneShot,
-    /// No-arg or flag-style launch (e.g. `-psn_…`) = the desktop app.
+    /// No-arg launch or the macOS Launch Services arg (`-psn_…`) = the desktop app.
     App,
 }
 
 fn classify_launch(first: Option<&str>) -> Launch {
     match first {
+        None => Launch::App,
+        Some(arg) if arg.starts_with("-psn_") => Launch::App,
         Some("run") => Launch::Service,
         Some("start") => Launch::Lifecycle("start"),
         Some("stop") => Launch::Lifecycle("stop"),
         Some("restart") => Launch::Lifecycle("restart"),
         Some("uninstall") => Launch::Lifecycle("uninstall"),
-        Some(arg) if !arg.starts_with('-') => Launch::OneShot,
-        _ => Launch::App,
+        // Everything else, flags included: `locai --help` must answer on the
+        // terminal, not open the GUI.
+        Some(_) => Launch::OneShot,
     }
 }
 
@@ -83,6 +87,13 @@ mod tests {
     }
 
     #[test]
+    fn cli_flags_are_one_shot() {
+        for flag in ["--help", "-h", "--version", "-V"] {
+            assert_eq!(classify_launch(Some(flag)), Launch::OneShot, "{flag}");
+        }
+    }
+
+    #[test]
     fn lifecycle_subcommands_are_native() {
         for cmd in ["start", "stop", "restart", "uninstall"] {
             assert_eq!(classify_launch(Some(cmd)), Launch::Lifecycle(cmd), "{cmd}");
@@ -90,9 +101,8 @@ mod tests {
     }
 
     #[test]
-    fn no_arg_or_flags_are_the_app() {
+    fn no_arg_or_psn_are_the_app() {
         assert_eq!(classify_launch(None), Launch::App);
         assert_eq!(classify_launch(Some("-psn_0_12345")), Launch::App);
-        assert_eq!(classify_launch(Some("--help")), Launch::App);
     }
 }
