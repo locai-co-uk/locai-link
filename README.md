@@ -19,13 +19,13 @@ The installer sets up the background service; you register out-of-band with the 
 **Linux / macOS:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.sh | sh
+curl -fsSL https://get.locai.co.uk/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.ps1 | iex
+irm https://get.locai.co.uk/install.ps1 | iex
 ```
 
 You will now have the `locai` service installed on your machine. To register, run `locai register --registration-key "YOUR_REG_KEY"`. For a fleet, register with `--fleet-key` instead. To register unattended in one step, set `LOCAI_REGISTRATION_KEY` (or `LOCAI_FLEET_KEY`) before running the install command. Check status any time with `locai status`; update with `locai update`.

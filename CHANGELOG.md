@@ -43,6 +43,8 @@ sections below the summary. -->
   Control and the dev artifact store into the binary, and the supervisor
   hands the baked store base and Control API base to the runtime's
   environment, so headless registration follows the baked environment too.
+- Updated minor dependencies: serde_json 1.0.151, tauri-plugin-dialog 2.7.2,
+  libc 0.2.189, postcss 8.5.26, and the uv_build backend range to `<0.13`.
 
 ## [1.2.3]
 

@@ -4,10 +4,10 @@
 #
 # Headless Locai Link installer (Linux + macOS), single line:
 #
-#     curl -fsSL https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.sh | sh
+#     curl -fsSL https://get.locai.co.uk/install.sh | sh
 #
-# The script (this file) is served from the repo via raw.githubusercontent; the
-# builds + checksums.txt it pulls live on GitHub Releases.
+# The script (this file) is served from get.locai.co.uk; the builds +
+# checksums.txt it pulls live on GitHub Releases.
 #
 # Installs the stripped headless build (supervisor only, no tray/setup, NO engines
 # bundled) per-user, wires it as a background service + the `locai` CLI, and leaves

@@ -283,7 +283,7 @@ def latest_release_for(
     assets: Iterable[dict[str, Any]] = payload.get("assets") or []
     asset_match, sha_match = _pick_assets(assets, asset_stem, version, ptag)
     if asset_match is None:
-        raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}-v{version}.(tar.gz|zip)' on release {tag}")
+        raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}.(tar.gz|zip)' on release {tag}")
     checksums = next((a for a in assets if (a.get("name") or "").lower() == "checksums.txt"), None)
     return ReleaseInfo(
         version=version,
@@ -298,8 +298,14 @@ def latest_release_for(
 def _pick_assets(
     assets: Iterable[dict[str, Any]], stem: str, version: str, platform_tag: str
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    bundle_re = re.compile(rf"^{re.escape(stem)}-{re.escape(platform_tag)}-v{re.escape(version)}\.(tar\.gz|zip)$")
-    sha_re = re.compile(rf"^{re.escape(stem)}-{re.escape(platform_tag)}-v{re.escape(version)}\.(tar\.gz|zip)\.sha256$")
+    # Releases publish stable asset names (the tag carries the version); the
+    # versioned form is accepted as a fallback for locally packed test releases.
+    bundle_re = re.compile(
+        rf"^{re.escape(stem)}-{re.escape(platform_tag)}(-v{re.escape(version)})?\.(tar\.gz|zip)$"
+    )
+    sha_re = re.compile(
+        rf"^{re.escape(stem)}-{re.escape(platform_tag)}(-v{re.escape(version)})?\.(tar\.gz|zip)\.sha256$"
+    )
     bundle_match: dict[str, Any] | None = None
     sha_match: dict[str, Any] | None = None
     for a in assets:
@@ -1049,9 +1055,13 @@ _REINSTALL_EXT = {"darwin": "pkg", "linux": "tar.gz", "win32": "zip"}
 
 
 def _reinstall_url() -> str:
-    """Permanent 'latest' download URL for this host's platform/arch."""
+    """Permanent 'latest' download URL for this host's platform/arch. Desktop
+    stem: the UI drift check that consumes this is desktop-only."""
     ext = _REINSTALL_EXT.get(sys.platform, "pkg")
-    return f"https://github.com/{DEFAULT_RELEASES_REPO}/releases/latest/download/locai-link-{_platform_tag()}.{ext}"
+    return (
+        f"https://github.com/{DEFAULT_RELEASES_REPO}/releases/latest/download/"
+        f"locai-link-desktop-{_platform_tag()}.{ext}"
+    )
 
 
 def _companion_installed_version(install_root: Path) -> str | None:

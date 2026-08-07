@@ -137,9 +137,8 @@ jobs:
           - os: ubuntu-latest
             platform_tag: linux-x64
             archive_ext: tar.gz
-          - os: windows-latest
-            platform_tag: windows-x64
-            archive_ext: zip
+          # No Windows desktop leg: desktop Windows isn't shipped yet; headless
+          # Windows comes from the bundle-headless job.
           - os: macos-latest
             # GitHub-hosted macos-latest is arm64; x64 needs a separate runner.
             platform_tag: macos-arm64
@@ -507,24 +506,20 @@ jobs:
           xcrun stapler staple "$SIGNED_PKG"
 
           # 8. Copy into release-assets/ with a name matching the
-          #    ${asset_base}-${platform}-${TAG}.${ext} pattern used by
-          #    the tar.gz / zip legs so all release assets look uniform.
+          #    ${asset_base}-${platform}.${ext} pattern used by the
+          #    tar.gz legs so all release assets look uniform.
           mkdir -p release-assets
-          FINAL_NAME="${ASSET_BASE}-macos-arm64-${TAG}.pkg"
-          cp "$SIGNED_PKG" "release-assets/$FINAL_NAME"
-
-          # Stable-named copy for the permanent "latest" download URL.
-          # Shape- + platform-scoped, version-agnostic so the URL never changes:
-          #   .../releases/latest/download/locai-link-desktop-macos-arm64.pkg
-          # One canonical bundle per shape per platform per release.
+          # Stable name is the canonical asset (the release TAG carries the
+          # version); shape- + platform-scoped so the permanent URL never
+          # changes: .../releases/latest/download/locai-link-desktop-macos-arm64.pkg
           STABLE_NAME="${ASSET_BASE}-macos-arm64.pkg"
           cp "$SIGNED_PKG" "release-assets/$STABLE_NAME"
 
           # 9. OTA tarball. swap_bundle downloads this, not the .pkg. Whole-app
           #    OTA: include the runtime version payload AND the notarised +
           #    stapled .app bundles, so swap_bundle can replace changed UI apps too, not
-          #    just the runtime. Named as the <stem>-macos-arm64-v<version>.tar.gz
-          #    asset the updater resolves; without it macOS OTA loops on ReleaseNotFound.
+          #    just the runtime. Stable-named like every asset (the tag carries the
+          #    version); without it macOS OTA loops on ReleaseNotFound.
           VERSION_DIR="$(python3 -c "import json; print(json.load(open('$STAGING/current/manifest.json'))['version'])")"
           if [ -z "$VERSION_DIR" ] || [ ! -d "$STAGING/versions/$VERSION_DIR" ]; then
             echo "::error::OTA payload versions/$VERSION_DIR not found under staging"
@@ -535,8 +530,14 @@ jobs:
           mkdir -p "$OTA_ROOT/versions"
           cp -R "$STAGING/versions/$VERSION_DIR" "$OTA_ROOT/versions/$VERSION_DIR"
           cp -R "$STAGING/Locai Link.app"        "$OTA_ROOT/Locai Link.app"
-          TAR_NAME="${ASSET_BASE}-macos-arm64-${TAG}.tar.gz"
+          TAR_NAME="${ASSET_BASE}-macos-arm64.tar.gz"
           tar -czf "release-assets/$TAR_NAME" -C "$OTA_ROOT" .
+
+          # Transition bridge for pre-merge devices: their updater resolves the
+          # old plugin-set stem (verified via checksums.txt), and the payload's
+          # own migration completes the merged transition after the swap.
+          # Drop once the fleet is past the transition.
+          cp "release-assets/$TAR_NAME" "release-assets/locai-link-llm-stt-macos-arm64-${TAG}.tar.gz"
           ls -lah release-assets/
 
       - name: Wipe ephemeral keychain + notary key
@@ -548,38 +549,17 @@ jobs:
       - name: Package bundle (Linux — via pack.sh)
         # Ships the full pack.sh layout: frozen runtime + Tauri binaries +
         # boot.json + systemd units + .desktop + icons + install/uninstall.
-        # The macOS leg publishes its .pkg + .pkg.sha256 upstream in the
-        # build+notarise step; Windows uses the "Package bundle (Windows)"
-        # step below to zip the frozen runtime.
+        # The macOS leg publishes its .pkg + OTA tarball upstream in the
+        # build+notarise step; there is no Windows desktop leg.
         if: runner.os == 'Linux'
         shell: bash
         env:
-          ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
+          # Stable name is the canonical asset (the release tag carries the version).
           STABLE: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          bash bundling/linux/pack.sh --release --output "release-assets/${ASSET}"
-
-          # Stable-named copy for the permanent "latest" download URL.
-          cp "release-assets/${ASSET}" "release-assets/${STABLE}"
-          ls -lah release-assets/
-
-      - name: Package bundle (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          ASSET: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}-${{ needs.release.outputs.tag }}.${{ matrix.archive_ext }}
-          STABLE: ${{ steps.manifest.outputs.asset_base }}-${{ matrix.platform_tag }}.${{ matrix.archive_ext }}
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          cd dist
-          7z a -tzip -mx=9 "../release-assets/${ASSET}" locai-link
-          cd ..
-
-          # Stable-named copy for the permanent "latest" download URL.
-          cp "release-assets/${ASSET}" "release-assets/${STABLE}"
+          bash bundling/linux/pack.sh --release --output "release-assets/${STABLE}"
           ls -lah release-assets/
 
       - name: Upload release assets
@@ -650,7 +630,7 @@ jobs:
           mkdir -p release-assets
           BUILT=$(ls dist/locai-link-headless-${{ matrix.platform_tag }}-*.tar.gz | head -1)
           [ -n "$BUILT" ] || { echo "::error::headless tarball not produced for ${{ matrix.platform_tag }}"; exit 1; }
-          cp "$BUILT" "release-assets/$(basename "$BUILT")"
+          # Stable name is the canonical asset (the release tag carries the version).
           cp "$BUILT" "release-assets/${STABLE}"
           ls -lah release-assets/
       - name: Upload headless assets

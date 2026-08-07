@@ -3,10 +3,10 @@
 #
 # Headless Locai Link installer for Windows, single line:
 #
-#     irm https://raw.githubusercontent.com/locai-co-uk/locai-link/main/scripts/install.ps1 | iex
+#     irm https://get.locai.co.uk/install.ps1 | iex
 #
-# The script (this file) is served from the repo via raw.githubusercontent; the
-# builds + checksums.txt it pulls live on GitHub Releases.
+# The script (this file) is served from get.locai.co.uk; the builds +
+# checksums.txt it pulls live on GitHub Releases.
 #
 # Installs the stripped headless build (supervisor only, no tray/setup, NO engines
 # bundled) per-user, registers it to run in the background, and leaves engines to

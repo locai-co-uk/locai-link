@@ -32,13 +32,15 @@ MODEL_PATH = TEMP_DIR / "ggml-tiny.bin"
 AUDIO_URL = "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav"
 AUDIO_PATH = TEMP_DIR / "jfk.wav"
 TEST_PORT = 8098
+# Socket-level timeout so a stalled CDN connection can't hang fixture setup.
+REQUEST_TIMEOUT = 30
 
 
 def _remote_size(url: str) -> int | None:
     """Content-Length of ``url`` via HEAD, or None when unavailable."""
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             size = resp.headers.get("Content-Length")
             return int(size) if size else None
     except Exception:  # noqa: BLE001 - validation is best-effort
@@ -57,7 +59,7 @@ def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
     for attempt in range(1, max_attempts + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp, open(path, "wb") as f:
                 expected = resp.headers.get("Content-Length")
                 shutil.copyfileobj(resp, f)  # type: ignore
             if expected and path.stat().st_size != int(expected):

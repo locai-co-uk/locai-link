@@ -64,6 +64,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# A release-named tarball must never carry dev endpoints.
+[[ $RELEASE -eq 1 && $DEV -eq 1 ]] && { echo "[pack] ERROR: --release and --dev cannot be combined" >&2; exit 2; }
+
 log() {
     echo "[pack] $*"
 }
@@ -108,8 +111,14 @@ if [[ $DEV -eq 1 ]]; then
     export LOCAI_ARTIFACT_BASE="https://storage.googleapis.com/locai-platform-artifacts-dev"
     log "DEV build — Control=$LOCAI_CONTROL_URL, artifacts=$LOCAI_ARTIFACT_BASE"
 else
+    # The bake reads these at compile time: drop inherited overrides so a
+    # prod pack can't silently pick up endpoints from the calling shell.
+    unset LOCAI_CONTROL_URL LOCAI_CONTROL_API_URL LOCAI_ARTIFACT_BASE
     log "PROD build (pass --dev to bake the dev endpoints)"
 fi
+# Clean, build, and copy must agree on one target dir: pin it so an inherited
+# CARGO_TARGET_DIR can't leave a stale binary at $TAURI_DIR.
+export CARGO_TARGET_DIR="$REPO_ROOT/crates/target"
 # Always clean the crate: the endpoint bake is option_env! (compile time) and
 # cargo does not recompile on env-only changes, so a cached binary would keep
 # the PREVIOUS pack's endpoints (e.g. a prod pack silently shipping dev URLs).

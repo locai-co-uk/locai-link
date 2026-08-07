@@ -15,6 +15,11 @@
 #                    the swap depends on, then reinstall-over-top preserves data.
 #   macos-uninstall— uninstall cleans everything AND refuses to run non-root.
 #   linux-roundtrip— install.sh → assert layout → uninstall.sh → assert clean.
+#   windows-headless-roundtrip — the real headless build through the real
+#                    installer: install.ps1 → Scheduled Task running → the
+#                    binary's own uninstall kills every process, deletes the
+#                    task, and removes every artifact. The only Windows
+#                    lifecycle coverage (no human tester).
 #   shellcheck     — static analysis of every shipped shell script.
 #
 # Can't run headless (track as manual pre-release checks): companion tray/WebKit
@@ -40,11 +45,12 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
-# Linux-first gating: the three macOS jobs (10x) `needs:` the cheap ubuntu jobs
-# (linux-roundtrip + shellcheck). If a shipped script fails shellcheck or the
-# Linux install/uninstall roundtrip breaks, no macOS minutes are spent. This is
-# the same "cheap OS gates the expensive OS" pattern as ci.yml; it stays within
-# this workflow because `needs:` can't cross workflow files.
+# Linux-first gating: the three macOS jobs (10x) and the Windows job (2x)
+# `needs:` the cheap ubuntu jobs (linux-roundtrip + shellcheck). If a shipped
+# script fails shellcheck or the Linux install/uninstall roundtrip breaks, no
+# macOS/Windows minutes are spent. This is the same "cheap OS gates the
+# expensive OS" pattern as ci.yml; it stays within this workflow because
+# `needs:` can't cross workflow files.
 jobs:
   # Path filter: docs / workflow / licence / image-only PRs skip the macOS
   # trio (a job skipped via `if:` reports "skipped" = success for branch
@@ -320,6 +326,157 @@ jobs:
           check_gone "$HOME/Library/Application Support/Locai"
           [[ $fail -eq 0 ]] || exit 1
           echo "root uninstall cleaned every path"
+
+  # The real headless build through the real installer and the real uninstall.
+  # Every Windows uninstall bug so far lived in the interplay (task
+  # resurrection, path-scoped kills, verbatim paths, the detached cleanup
+  # script), so nothing here is synthesised: real frozen runtime, real
+  # Scheduled Task, real `locai-link.exe uninstall`.
+  windows-headless-roundtrip:
+    name: Windows headless install + uninstall roundtrip
+    needs: [changes, linux-roundtrip, shellcheck]
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]'
+    runs-on: windows-latest
+    env:
+      # Absolute + already canonical: the assertions compare it against
+      # Get-Process .Path with -like, which never resolves `..`.
+      LOCAI_INSTALL_ROOT: ${{ runner.temp }}\locai-e2e
+      TASK_NAME: uk.co.locai.link.headless
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Install project
+        shell: bash
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+
+      - name: Build headless bundle
+        # No --prefetch: the shipped headless shape carries no engines, and the
+        # lifecycle under test doesn't depend on the plugin set — one plugin
+        # keeps the freeze fast.
+        shell: bash
+        run: uv run python bundling/build.py --shape headless --plugins language_model
+
+      - name: Pack the install tarball
+        shell: pwsh
+        run: ./bundling/windows/pack.ps1 -Release
+
+      - name: Stage a local release (stable name + checksums.txt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p serve
+          BUILT=$(ls dist/locai-link-headless-windows-*.tar.gz | head -1)
+          cp "$BUILT" serve/locai-link-headless-windows-x64.tar.gz
+          (cd serve && sha256sum locai-link-headless-windows-x64.tar.gz > checksums.txt)
+          cat serve/checksums.txt
+
+      - name: Install via the real installer
+        # install.ps1's fetch is Invoke-WebRequest (no file:// in pwsh), so the
+        # staged release is served over localhost — checksum verification and
+        # extraction run exactly as they do in the field.
+        shell: pwsh
+        run: |
+          $server = Start-Process python -ArgumentList "-m","http.server","8043","--directory","serve" -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 2
+          try {
+            $env:LOCAI_HEADLESS_URL  = "http://127.0.0.1:8043/locai-link-headless-windows-x64.tar.gz"
+            $env:LOCAI_CHECKSUMS_URL = "http://127.0.0.1:8043/checksums.txt"
+            ./scripts/install.ps1
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Assert install landed and the service is running
+        shell: pwsh
+        run: |
+          $root = $env:LOCAI_INSTALL_ROOT
+          $fail = $false
+          foreach ($p in @("locai-link.exe", "boot.json", "versions", "run-hidden.vbs", "locai.cmd", "logs")) {
+            if (-not (Test-Path (Join-Path $root $p))) { Write-Host "::error::install.ps1 did not create $p under $root"; $fail = $true }
+          }
+          if (-not (Get-ScheduledTask -TaskName $env:TASK_NAME -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::scheduled task $env:TASK_NAME not registered"; $fail = $true
+          }
+          if ($fail) { exit 1 }
+          # The task chain (wscript -> cmd -> exe) takes a moment; poll for the
+          # service process, path-scoped to this install root.
+          $proc = $null
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $deadline -and -not $proc) {
+            $proc = Get-Process -Name locai-link -ErrorAction SilentlyContinue |
+              Where-Object { $_.Path -like "$root*" }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $proc) {
+            $state = (Get-ScheduledTask -TaskName $env:TASK_NAME).State
+            Write-Host "::error::no locai-link.exe under $root after 90s (task state: $state)"
+            $log = Join-Path $root "logs\service.log"
+            if (Test-Path $log) { Get-Content $log -Tail 40 }
+            exit 1
+          }
+          Write-Host "service running: pid $(@($proc)[0].Id) at $(@($proc)[0].Path)"
+
+      - name: Uninstall via the real binary
+        shell: pwsh
+        run: |
+          & (Join-Path $env:LOCAI_INSTALL_ROOT "locai-link.exe") uninstall
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::uninstall exited $LASTEXITCODE"; exit 1 }
+
+      - name: Assert every process, task, and artifact is gone
+        shell: pwsh
+        run: |
+          $root = $env:LOCAI_INSTALL_ROOT
+          # File removal is handed to a detached cleanup script; wait it out.
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $deadline -and (Test-Path $root)) { Start-Sleep -Seconds 2 }
+          $fail = $false
+          if (Test-Path $root) {
+            Write-Host "::error::install root still present after 90s"
+            Get-ChildItem -Recurse $root -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            $fail = $true
+          }
+          if (Get-ScheduledTask -TaskName $env:TASK_NAME -ErrorAction SilentlyContinue) {
+            Write-Host "::error::scheduled task still registered after uninstall"; $fail = $true
+          }
+          $left = Get-Process -Name locai-link, locai-link-runtime -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -like "$root*" }
+          if ($left) {
+            Write-Host "::error::processes still running after uninstall: $(($left | ForEach-Object { $_.Id }) -join ', ')"; $fail = $true
+          }
+          $log = Join-Path $env:TEMP "locai-uninstall.log"
+          if (-not (Test-Path $log)) {
+            Write-Host "::error::cleanup log missing at $log — detached cleanup never ran"; $fail = $true
+          } else {
+            $content = (Get-Content $log -Raw).Trim()
+            Write-Host "cleanup log: $content"
+            if ($content -notmatch 'removed=True leftoverProcs=0') {
+              Write-Host "::error::cleanup script reported failure: $content"; $fail = $true
+            }
+          }
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($userPath -like "*$root*") {
+            Write-Host "::error::install root still on the user PATH"; $fail = $true
+          }
+          if ($fail) { exit 1 }
+          Write-Host "uninstall removed the task, every process, and every artifact"
 
   linux-roundtrip:
     name: Linux install + uninstall roundtrip

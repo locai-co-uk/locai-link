@@ -82,7 +82,7 @@ class WhisperServer:
         }
 
     def _get_server_binary(self):
-        """Locates the platform-specific binary."""
+        """Locates the platform-specific binary, pinned to the plugin's release."""
         system = platform.system()
         binary_name = "whisper-server.exe" if system == "Windows" else "whisper-server"
 
@@ -91,23 +91,32 @@ class WhisperServer:
         if candidate.exists():
             return candidate
 
-        # 2. Check PATH
-        path_bin = shutil.which(binary_name)
-        if path_bin:
-            return Path(path_bin)
+        # 2. Source runs accept a PATH binary as a dev convenience; frozen
+        #    bundles never execute from PATH (a modified service environment
+        #    could poison it).
+        if not getattr(sys, "frozen", False):
+            path_bin = shutil.which(binary_name)
+            if path_bin:
+                return Path(path_bin)
+            return None
 
-        # 3. On-demand fetch from the artifact store — only in a frozen bundle, so
-        #    a headless install (no bundled engines) fetches at first use while
-        #    dev/source runs keep the bin_dir/install.py path. Soft import: only the
-        #    bundled runtime exposes link.infra.engines.
-        if getattr(sys, "frozen", False):
+        # 3. On-demand checksum-verified fetch from the artifact store, pinned
+        #    to the plugin's release, so a headless install (no bundled engines)
+        #    fetches at first use. Soft import: only the bundled runtime exposes
+        #    link.infra.engines.
+        try:
+            from link.infra import engines
+
             try:
-                from link.infra import engines
+                from .install import WHISPER_CPP_RELEASE
+            except ImportError:
+                from install import WHISPER_CPP_RELEASE
 
-                return engines.binary_path("whisper-cpp", binary_name)
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"on-demand engine fetch unavailable: {e}")
-
+            return engines.binary_path("whisper-cpp", binary_name, version=WHISPER_CPP_RELEASE)
+        except Exception as e:  # noqa: BLE001
+            # Last resolution step: surface the reason (store 404, network, bad
+            # hash) so a failed serve is diagnosable.
+            logger.warning(f"on-demand whisper-cpp fetch failed: {e}")
         return None
 
     def start(self):

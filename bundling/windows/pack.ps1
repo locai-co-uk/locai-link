@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
+﻿# SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Windows counterpart of bundling/linux/pack.sh for the HEADLESS shape: assemble
@@ -26,6 +26,8 @@ param(
     [string]$Output
 )
 $ErrorActionPreference = "Stop"
+# A release-named archive must never carry dev endpoints.
+if ($Release -and $Dev) { throw "-Release and -Dev cannot be combined." }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
@@ -60,7 +62,15 @@ if ($Dev) {
     $env:LOCAI_CONTROL_API_URL = "https://dev.api.locai.co.uk/api/v1"
     $env:LOCAI_ARTIFACT_BASE   = "https://storage.googleapis.com/locai-platform-artifacts-dev"
     Write-Host "[pack] DEV build - Control=$env:LOCAI_CONTROL_URL, artifacts=$env:LOCAI_ARTIFACT_BASE"
+} else {
+    # The bake reads these at compile time: drop inherited overrides so a
+    # prod pack can't silently pick up endpoints from the calling shell.
+    Remove-Item Env:LOCAI_CONTROL_URL, Env:LOCAI_CONTROL_API_URL, Env:LOCAI_ARTIFACT_BASE -ErrorAction SilentlyContinue
+    Write-Host "[pack] PROD build (pass -Dev to bake the dev endpoints)"
 }
+# Clean, build, and copy must agree on one target dir: pin it so an inherited
+# CARGO_TARGET_DIR can't leave a stale binary at the copy path.
+$env:CARGO_TARGET_DIR = Join-Path $RepoRoot "crates\target"
 Write-Host "[pack] building locai-link.exe (headless)..."
 Push-Location (Join-Path $RepoRoot "crates")
 try {
@@ -68,6 +78,7 @@ try {
     # cargo won't recompile on env-only changes, so a cached binary would keep
     # the previous pack's endpoints.
     cargo clean -p locai-link
+    if ($LASTEXITCODE -ne 0) { throw "cargo clean failed" }
     cargo build -p locai-link --no-default-features --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 } finally { Pop-Location }

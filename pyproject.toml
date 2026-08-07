@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: CC0-1.0
 
 [build-system]
-requires = ["uv_build>=0.10.0,<0.12"]
+requires = ["uv_build>=0.10.0,<0.13"]
 build-backend = "uv_build"
 
 [project]
