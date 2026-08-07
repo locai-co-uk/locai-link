@@ -292,6 +292,13 @@ pub struct SignInState {
     inner: Mutex<Option<Session>>,
 }
 
+/// The verification URL is handed to the OS opener; accept web schemes only so
+/// a malformed response can't reach arbitrary protocol handlers.
+fn is_web_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
 /// Kick off RFC 8628 device authorization. Uses DEVICE_CODE_TIMEOUT plus one
 /// backed-off retry on transport errors so a cold (scaled-to-zero) backend
 /// doesn't surface as a sign-in failure. The retry waits first — an immediate
@@ -334,6 +341,9 @@ pub async fn sign_in_start(state: State<'_, SignInState>) -> Result<DeviceCodeSt
             .verification_uri_complete
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| body.verification_uri.clone());
+        if !is_web_url(&body.verification_uri) || !is_web_url(&verification_uri_complete) {
+            return Err("device code response carried a non-web verification URL".to_string());
+        }
 
         Ok((
             body.device_code,

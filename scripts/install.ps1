@@ -97,18 +97,36 @@ try {
     $sums = Join-Path $tmp "checksums.txt"
     try { Invoke-WebRequest -Uri $checksumsUrl -OutFile $sums }
     catch { Die "no checksums.txt at $checksumsUrl - refusing to install unverified" }
-    $line = Select-String -Path $sums -Pattern ([regex]::Escape($asset)) | Select-Object -First 1
-    if (-not $line) { Die "no checksum for $asset in checksums.txt" }
-    $want = ($line.Line -split '\s+')[0].Trim().ToLower()
+    # Exact filename match on field 2 (sha256sum format, with or without the
+    # binary-mode `*` prefix); a substring match could pick another asset's hash.
+    $want = $null
+    foreach ($line in Get-Content $sums) {
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -ge 2 -and ($fields[1] -eq $asset -or $fields[1] -eq "*$asset")) {
+            $want = $fields[0].ToLower()
+            break
+        }
+    }
+    if (-not $want) { Die "no checksum for $asset in checksums.txt" }
     $got  = (Get-FileHash -Algorithm SHA256 $tarball).Hash.ToLower()
     if ($want -ne $got) { Die "checksum mismatch for $asset (want $want, got $got)" }
     Log "checksum verified"
 
     New-Item -ItemType Directory -Force -Path $InstallRoot, (Join-Path $InstallRoot "logs"), (Join-Path $InstallRoot "engines") | Out-Null
     # A running instance locks locai-link.exe; stop the task first so a --force
-    # reinstall can overwrite it (no-op on a fresh install).
+    # reinstall can overwrite it (no-op on a fresh install). Stop-ScheduledTask
+    # is asynchronous, so poll until the task has actually stopped.
     Stop-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
+    $task = $null
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        $task = Get-ScheduledTask -TaskName $Label -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -notin @("Running", "Queued")) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($task -and $task.State -in @("Running", "Queued")) {
+        Die "scheduled task $Label did not stop; aborting before file replacement"
+    }
     # tar ships with Windows 10+. --strip-components=1 drops the <name>/ wrapper so
     # locai-link.exe + versions/ + boot.json land at the install-root top (matches install.sh).
     tar -xzf $tarball -C $InstallRoot --strip-components=1

@@ -31,6 +31,18 @@ sections below the summary. -->
   poll so a slow or failed toggle can't leave a stray checkmark.
 - Changed: release downloads are verified against a single release-wide
   `checksums.txt`; per-asset `.sha256` sidecar files are no longer published.
+- Fixed: serving no longer reports success when the inference engine is
+  missing. The serve fails with a clear error, and an on-demand engine fetch
+  failure now logs its reason instead of being swallowed.
+- llama-swap is now fetched on demand from the artifact store too, so
+  installs without bundled engines serve through the swap + proxy path
+  (multi-model, telemetry) instead of permanently falling back to
+  single-model direct serve.
+- Changed: on-demand engines resolve from the production artifact store by
+  default; dev builds (`pack.sh --dev`, the macOS harness `--dev`) bake dev
+  Control and the dev artifact store into the binary, and the supervisor
+  hands the baked store base and Control API base to the runtime's
+  environment, so headless registration follows the baked environment too.
 
 ## [1.2.3]
 

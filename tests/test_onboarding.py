@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import json
 import types
 
 import pytest
@@ -9,13 +10,17 @@ from link.app.onboarding import (
     _RETRY_AFTER_HONOR_CAP_SECONDS,
     _RETRY_BACKOFF_CAP_SECONDS,
     _RETRY_MAX_ATTEMPTS,
+    FLEET_MARKER_PATH,
+    _redeem_device_key,
     _retry_after_seconds,
     _retry_backoff_seconds,
+    enroll_device,
     register_with_key,
 )
 
 API_URL = "https://api.test.local/api/v1"
 REG_ENDPOINT = f"{API_URL}/devices/headless/register-with-reg-key"
+ENROLL_ENDPOINT = f"{API_URL}/devices/enroll"
 
 
 def _mock_reg_response(mocker, response_body):
@@ -67,6 +72,90 @@ def test_register_with_key_raises_on_missing_fields(mocker):
 
     with pytest.raises(RuntimeError, match="missing device_id or api_key"):
         register_with_key(reg_key="rk", api_url=API_URL)
+
+
+# --- enroll_device: endpoint, auth, and fleet marker ---
+
+
+def test_enroll_device_posts_to_enroll_endpoint_with_bearer(mocker, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # FLEET_MARKER_PATH is cwd-relative
+    mock_post = _mock_reg_response(mocker, {"device_id": "dev-9", "api_key": "key-9"})
+
+    config = enroll_device(fleet_key="fk-1", api_url=API_URL)
+
+    # The fleet key is the bearer credential; same machine-bound payload shape.
+    assert mock_post.call_args.args[0] == ENROLL_ENDPOINT
+    assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer fk-1"
+    assert mock_post.call_args.kwargs["json"]["machine_id_hash"] == "mach-hash-123"
+    assert config.identity.device_id == "dev-9"
+    assert config.identity.api_key == "key-9"
+
+    marker = json.loads(FLEET_MARKER_PATH.read_text(encoding="utf-8"))
+    assert marker["device_id"] == "dev-9"
+
+
+# --- _redeem_device_key: response validation + retry (shared by both flows) ---
+
+
+def _redeem():
+    return _redeem_device_key(endpoint=REG_ENDPOINT, bearer_key="rk", op_name="Test redeem")
+
+
+def test_redeem_raises_on_invalid_json(mocker):
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="m")
+    resp = mocker.MagicMock(status_code=200)
+    resp.json.side_effect = ValueError("no JSON")
+    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
+
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        _redeem()
+
+
+def test_redeem_raises_on_non_object_json(mocker):
+    _mock_reg_response(mocker, ["not", "an", "object"])
+
+    with pytest.raises(RuntimeError, match="not a JSON object"):
+        _redeem()
+
+
+def test_redeem_error_never_contains_credential_values(mocker):
+    """A missing-field error lists key names only; a live api_key must not leak."""
+    _mock_reg_response(mocker, {"api_key": "sk-live-secret"})  # no device_id
+
+    with pytest.raises(RuntimeError, match="missing device_id or api_key") as exc_info:
+        _redeem()
+
+    assert "sk-live-secret" not in str(exc_info.value)
+    assert "api_key" in str(exc_info.value)
+
+
+def test_redeem_retries_transient_5xx_then_succeeds(mocker):
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="m")
+    mocker.patch("link.app.onboarding.time.sleep")
+    fail = mocker.MagicMock(status_code=503, headers={})
+    ok = mocker.MagicMock(status_code=200)
+    ok.json.return_value = {"device_id": "d", "api_key": "k"}
+    mock_post = mocker.patch("link.app.onboarding.requests.post", side_effect=[fail, ok])
+
+    data, device_id, api_key = _redeem()
+
+    assert (device_id, api_key) == ("d", "k")
+    assert data == {"device_id": "d", "api_key": "k"}
+    assert mock_post.call_count == 2
+
+
+def test_redeem_permanent_4xx_fails_without_retry(mocker):
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="m")
+    sleep = mocker.patch("link.app.onboarding.time.sleep")
+    resp = mocker.MagicMock(status_code=403)
+    resp.json.return_value = {"detail": "bad key"}
+    mock_post = mocker.patch("link.app.onboarding.requests.post", return_value=resp)
+
+    with pytest.raises(RuntimeError, match=r"rejected \(HTTP 403\): bad key"):
+        _redeem()
+
+    assert mock_post.call_count == 1
+    sleep.assert_not_called()
 
 
 # --- Backend-provided config (resolved via _resolve_agent_config) ---

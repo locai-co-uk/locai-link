@@ -68,10 +68,18 @@ fi
 # job that re-launches it after it deletes itself. Left registered, it re-fires
 # whenever a later (re)install recreates this script and silently wipes that
 # install. Tear it down on ANY exit (including an early error) so it can never
-# re-fire. It was submitted as root, so it lives in the SYSTEM domain: `bootout
-# system/…` is the reliable teardown (legacy `remove` doesn't always reach it).
-# This script already runs as root; no-op for the direct `sudo uninstall.sh` path.
-trap 'launchctl bootout system/co.locai.link.uninstall 2>/dev/null; launchctl remove co.locai.link.uninstall 2>/dev/null || true' EXIT
+# re-fire. The legacy submit can land the job in the console user's GUI domain
+# (observed) OR the system domain depending on the invoking context, so boot
+# BOTH out; whichever bootout owns this very process kills the script, so each
+# domain teardown must already have removed the job by the time it fires.
+# No-op for the direct `sudo uninstall.sh` path.
+_teardown_uninstall_job() {
+    _uid=$(id -u "$(stat -f %Su /dev/console 2>/dev/null)" 2>/dev/null || echo "")
+    [[ -n "$_uid" ]] && launchctl bootout "gui/${_uid}/co.locai.link.uninstall" 2>/dev/null
+    launchctl bootout system/co.locai.link.uninstall 2>/dev/null
+    launchctl remove co.locai.link.uninstall 2>/dev/null || true
+}
+trap _teardown_uninstall_job EXIT
 
 # --- 1. Stop + unload LaunchAgents (user domain) ---------------------
 # Per-user; `launchctl bootout gui/$UID/...` targets the console user's aqua

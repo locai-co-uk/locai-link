@@ -143,6 +143,21 @@ enum Outcome {
     Exited(Option<i32>),
 }
 
+/// Hand build-time-baked endpoints to the runtime's environment. Explicit env
+/// wins: a value already present (service unit, shell) is never overridden.
+fn apply_baked_env(cmd: &mut Command) {
+    if let Some(base) = crate::shared::endpoints::ARTIFACT_BASE {
+        if env::var_os("LOCAI_ARTIFACT_BASE").is_none() {
+            cmd.env("LOCAI_ARTIFACT_BASE", base);
+        }
+    }
+    if let Some(api) = crate::shared::endpoints::CONTROL_API_BASE {
+        if env::var_os("LOCAI_API_URL").is_none() {
+            cmd.env("LOCAI_API_URL", api);
+        }
+    }
+}
+
 fn next_backoff(b: Duration) -> Duration {
     (b * 2).min(Duration::from_secs(30))
 }
@@ -256,11 +271,10 @@ pub fn supervise_forever(control: SupervisorControl) {
         // Always launch in `run` mode, from the install root: the runtime
         // resolves `configs/` relative to its cwd, and the supervisor otherwise
         // inherits the launcher's cwd ($HOME under systemd --user).
-        let mut child = match Command::new(&runtime)
-            .arg("run")
-            .current_dir(&install_root)
-            .spawn()
-        {
+        let mut command = Command::new(&runtime);
+        command.arg("run").current_dir(&install_root);
+        apply_baked_env(&mut command);
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[supervisor] spawn {}: {e}", runtime.display());
@@ -365,9 +379,10 @@ fn run() -> Result<u8, String> {
 
         // cwd = install root: the runtime resolves `configs/` relative to its
         // working directory, which otherwise inherits the launcher's ($HOME).
-        let status = Command::new(&runtime)
-            .args(&args)
-            .current_dir(&install_root)
+        let mut command = Command::new(&runtime);
+        command.args(&args).current_dir(&install_root);
+        apply_baked_env(&mut command);
+        let status = command
             .status()
             .map_err(|e| format!("failed to spawn {}: {e}", runtime.display()))?;
 

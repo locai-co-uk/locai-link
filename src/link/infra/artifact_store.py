@@ -44,6 +44,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 # Production CDN host, so device URLs never carry the bucket name. Overridable
 # via env for a local mock store (and for the -dev/staging siblings).
-DEFAULT_BASE = "https://artifacts.locai.co.uk"
+DEFAULT_BASE = "https://storage.googleapis.com/locai-platform-artifacts-prod"
 _BASE_ENV = "LOCAI_ARTIFACT_BASE"
 MANIFEST_PATH = "index/manifest.v1.json"
 
@@ -227,8 +228,13 @@ def _http_get(url: str, timeout: int, max_bytes: int | None = None) -> bytes:
 
 
 def fetch_manifest(base: str | None = None) -> Manifest:
-    """Download + parse the store manifest."""
-    url = f"{base or base_url()}/{MANIFEST_PATH}"
+    """Download + parse the store manifest.
+
+    The URL carries a cache-busting query param: the manifest is the store's
+    one mutable object, and an edge-cached stale copy would pin devices to
+    superseded artifacts (whose hashes then no longer match the store).
+    """
+    url = f"{base or base_url()}/{MANIFEST_PATH}?cb={int(time.time())}"
     try:
         raw = _http_get(url, _MANIFEST_TIMEOUT, max_bytes=_MAX_MANIFEST_BYTES)
         return Manifest(json.loads(raw))
@@ -331,23 +337,54 @@ def fetch_variant(variant: Variant, cache_dir: Path, *, base: str | None = None)
     return archive
 
 
+_LOCK_TIMEOUT_SECONDS = 120.0
+
+
 @contextlib.contextmanager
-def _engine_lock(lock_path: Path):
-    """Best-effort cross-process exclusive lock so two first-use fetches of the same
-    engine don't clobber each other. No-ops where flock is unavailable (Windows /
-    unusual fs); the marker recheck under the lock still prevents double work."""
+def _engine_lock(lock_path: Path) -> Iterator[None]:
+    """Cross-process exclusive lock so two first-use fetches of the same engine
+    don't clobber each other: flock on POSIX, msvcrt byte locking on Windows
+    (polled with a timeout, since it has no blocking mode). Downgrades to
+    unlocked only where neither works (unusual fs); the marker recheck under
+    the lock still prevents double work."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as fh:
+        locked = False
         try:
-            import fcntl
+            if os.name == "nt":
+                import msvcrt
 
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        locked = True
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            logger.warning(f"engine lock timeout on {lock_path.name}; continuing unlocked")
+                            break
+                        time.sleep(0.25)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                locked = True
         except (ImportError, OSError) as exc:
-            # Expected where flock doesn't exist (Windows) or the fs refuses it;
-            # continue unlocked - the marker recheck under the lock still
-            # prevents double work.
             logger.debug(f"engine lock unavailable ({exc}); continuing unlocked")
-        yield
+        try:
+            yield
+        finally:
+            if locked and os.name == "nt":
+                import msvcrt
+
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            # POSIX flock releases on close.
 
 
 def _atomic_swap(staging: Path, dest: Path) -> None:

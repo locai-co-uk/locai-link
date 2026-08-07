@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 # --- Repository ------------------------------------------------------------
 # GitHub repo the frozen OTA downloads release assets from (updater DEFAULT_RELEASES_REPO).
 REPO_SLUG = "locai-co-uk/locai-link"
@@ -22,8 +24,9 @@ HEALTH_HOST = "127.0.0.1"
 HEALTH_PORT = 20505
 
 # --- Control API -------------------------------------------------------------
-# Default Control API base for onboarding and the update check.
-DEFAULT_API_URL = "https://api.locai.co.uk/api/v1"
+# Default Control API base for onboarding and the update check. LOCAI_API_URL
+# overrides it (the supervisor injects a build-time-baked value on dev builds).
+DEFAULT_API_URL = os.environ.get("LOCAI_API_URL", "https://api.locai.co.uk/api/v1")
 
 # --- macOS install layout ----------------------------------------------------
 # Packaged install root; also hardcoded in crates/link/src-tauri/src/shared/endpoints.rs, the

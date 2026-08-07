@@ -233,7 +233,8 @@ pub fn uninstall(root: &Path, u: &ServiceUnit) -> Result<(), String> {
             root.display()
         ));
     }
-    if root == Path::new("/") || Some(root) == home_dir().as_deref() {
+    // parent() is None only at a filesystem root (covers Windows volume roots too).
+    if root.parent().is_none() || Some(root) == home_dir().as_deref() {
         return Err(format!("refusing to delete {}", root.display()));
     }
     // Deregister first: it needs the session api key the wipe below removes.

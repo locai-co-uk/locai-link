@@ -179,6 +179,8 @@ def _from_dir(store_dir: Path, source: Path) -> None:
             if stem.endswith(ext):
                 stem = stem[: -len(ext)]
                 break
+        else:
+            raise SystemExit(f"unrecognised artifact type {archive.name!r}: expected .tar.gz, .tgz, or .zip")
         parts = stem.split("-")
         # name may contain hyphens (llama-cpp) and the platform tuple may carry a
         # variant suffix (linux-x64-vulkan), so anchor on the platform token:

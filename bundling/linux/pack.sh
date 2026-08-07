@@ -36,6 +36,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUTPUT=""
 RELEASE=0
+DEV=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,6 +48,13 @@ while [[ $# -gt 0 ]]; do
             # Drop the "-DEV" suffix from the asset name (used by CI so
             # release-labelled artefacts don't carry the DEV tag).
             RELEASE=1
+            shift
+            ;;
+        --dev)
+            # Bake the dev endpoints into the Rust binary: Control (sign-in +
+            # device auth) and the artifact store (on-demand engines). The
+            # supervisor forwards the artifact base to the runtime's env.
+            DEV=1
             shift
             ;;
         *)
@@ -94,6 +102,16 @@ esac
 # Build the Rust binary with the feature matching the shape — desktop = the Tauri
 # app (tray + setup); headless = supervisor only (--no-default-features). Both
 # land at $TAURI_DIR/locai-link, so staging can't pick the wrong feature.
+if [[ $DEV -eq 1 ]]; then
+    export LOCAI_CONTROL_URL="https://dev.control.locai.co.uk"
+    export LOCAI_CONTROL_API_URL="https://dev.api.locai.co.uk/api/v1"
+    export LOCAI_ARTIFACT_BASE="https://storage.googleapis.com/locai-platform-artifacts-dev"
+    log "DEV build — Control=$LOCAI_CONTROL_URL, artifacts=$LOCAI_ARTIFACT_BASE"
+fi
+# Always clean the crate: the endpoint bake is option_env! (compile time) and
+# cargo does not recompile on env-only changes, so a cached binary would keep
+# the PREVIOUS pack's endpoints (e.g. a prod pack silently shipping dev URLs).
+( cd "$REPO_ROOT/crates" && cargo clean -p locai-link 2>/dev/null || true )
 log "building locai-link ($SHAPE)…"
 if [[ "$SHAPE" == "headless" ]]; then
     ( cd "$REPO_ROOT/crates" && cargo build -p locai-link --no-default-features --release )

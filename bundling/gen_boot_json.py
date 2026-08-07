@@ -44,11 +44,14 @@ def main() -> None:
 
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     boot = json.loads(Path(args.template).read_text(encoding="utf-8"))
-    # Legacy manifests without a shape default to desktop; anything else must be
-    # a known shape, else boot.json would request an asset no release publishes.
-    shape = manifest.get("shape", "desktop")
+    # The shape must be explicit and known: silently defaulting a shapeless
+    # (pre-shape) manifest would make boot.json request an asset name the
+    # release never published, breaking first-launch provisioning.
+    shape = manifest.get("shape")
     if shape not in ("desktop", "headless"):
-        raise SystemExit(f"Unsupported bundle shape in manifest: {shape!r}")
+        raise SystemExit(
+            f"Unsupported or missing bundle shape in manifest: {shape!r} (rebuild with a current build.py)"
+        )
     boot["shape"] = shape
     boot["plugin_set"] = plugin_set_from_manifest(manifest)
 
