@@ -85,7 +85,7 @@ fn execs_runtime_via_symlink_with_argv_passthrough() {
     make_current_symlink(tmp.path(), "1.0.15");
 
     let out = run_launcher(Command::new(&launcher).args([
-        "--device-name",
+        "--registration-key",
         "test-rig",
         "--api-url",
         "https://x/",
@@ -94,7 +94,7 @@ fn execs_runtime_via_symlink_with_argv_passthrough() {
     assert!(out.status.success(), "launcher exited non-zero: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("ARGS=--device-name test-rig --api-url https://x/"),
+        stdout.contains("ARGS=--registration-key test-rig --api-url https://x/"),
         "argv not passed through. stdout={stdout}"
     );
 }

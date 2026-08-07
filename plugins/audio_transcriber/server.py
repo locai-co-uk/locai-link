@@ -7,6 +7,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,23 @@ from pathlib import Path
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _gpu_available() -> bool:
+    """Conservative GPU probe. The whisper prebuilt initialises its GPU backend
+    by default and aborts on machines without one, so serving defaults to
+    --no-gpu unless a control tool is on PATH AND reports a device (the tool
+    can be installed on GPU-less hosts)."""
+    for probe in (("nvidia-smi", "-L"), ("rocm-smi",)):
+        if shutil.which(probe[0]) is None:
+            continue
+        try:
+            result = subprocess.run(probe, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return True
+    return False
 
 
 class WhisperServer:
@@ -36,6 +54,8 @@ class WhisperServer:
         self.language = kwargs.get("language")
         self.n_threads = kwargs.get("n_threads")
         self.beam_size = kwargs.get("beam_size")
+        # None = auto-detect at start(); an explicit config value wins.
+        self.use_gpu = kwargs.get("use_gpu")
 
         # Defer to install.py for binary directory — it already handles FROZEN
         # (PyInstaller bundles), venv, and standalone layouts.
@@ -71,7 +91,7 @@ class WhisperServer:
         }
 
     def _get_server_binary(self):
-        """Locates the platform-specific binary."""
+        """Locates the platform-specific binary, pinned to the plugin's release."""
         system = platform.system()
         binary_name = "whisper-server.exe" if system == "Windows" else "whisper-server"
 
@@ -80,11 +100,32 @@ class WhisperServer:
         if candidate.exists():
             return candidate
 
-        # 2. Check PATH
-        path_bin = shutil.which(binary_name)
-        if path_bin:
-            return Path(path_bin)
+        # 2. Source runs accept a PATH binary as a dev convenience; frozen
+        #    bundles never execute from PATH (a modified service environment
+        #    could poison it).
+        if not getattr(sys, "frozen", False):
+            path_bin = shutil.which(binary_name)
+            if path_bin:
+                return Path(path_bin)
+            return None
 
+        # 3. On-demand checksum-verified fetch from the artifact store, pinned
+        #    to the plugin's release, so a headless install (no bundled engines)
+        #    fetches at first use. Soft import: only the bundled runtime exposes
+        #    link.infra.engines.
+        try:
+            from link.infra import engines
+
+            try:
+                from .install import WHISPER_CPP_RELEASE
+            except ImportError:
+                from install import WHISPER_CPP_RELEASE
+
+            return engines.binary_path("whisper-cpp", binary_name, version=WHISPER_CPP_RELEASE)
+        except Exception as e:  # noqa: BLE001
+            # Last resolution step: surface the reason (store 404, network, bad
+            # hash) so a failed serve is diagnosable.
+            logger.warning(f"on-demand whisper-cpp fetch failed: {e}")
         return None
 
     def start(self):
@@ -135,6 +176,12 @@ class WhisperServer:
             "--port",
             str(self.port),
         ]
+        use_gpu = self.use_gpu if self.use_gpu is not None else _gpu_available()
+        if not use_gpu:
+            # Flash attention defaults on in current whisper prebuilts; its CPU
+            # path is unproven across older cores, so keep CPU-only runs on the
+            # plain kernels.
+            cmd.extend(["--no-gpu", "--no-flash-attn"])
 
         # Optional parameters
         param_map = {
@@ -183,10 +230,16 @@ class WhisperServer:
             logger.info("Whisper server is ready.")
         elif not self._stop_event.is_set():
             # Genuine health failure — not a stop()-triggered cancellation.
-            # Surface the server's own log so operators can see WHY it didn't
-            # come up (missing DLL, model-load error, etc.).
-            logger.error("Whisper server failed to respond to health check.", extra={"category": "health"})
-            self._log_tail()
+            # Surface the server's own log and exit status so operators can see
+            # WHY it didn't come up. A negative exit code is the killing signal
+            # (-4 SIGILL, -6 SIGABRT, -11 SIGSEGV), which a silent crash never
+            # writes into the log itself.
+            rc = self.process.poll() if self.process else None
+            logger.error(
+                f"Whisper server failed to respond to health check (process exit: {rc}).",
+                extra={"category": "health"},
+            )
+            self._log_tail(lines=40)
             self.stop()
 
     def _log_tail(self, lines: int = 20):

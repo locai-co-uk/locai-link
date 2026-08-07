@@ -54,7 +54,7 @@ cp crates/target/release/locai-link                 "$STAGING/locai-link"
 # launcher's first-launch fetch targets the asset this build actually is.
 python3 bundling/gen_boot_json.py \
     --manifest "$STAGING/current/manifest.json" \
-    --template bundling/pkg/boot.json \
+    --template bundling/boot.json \
     --output   "$STAGING/boot.json"
 cp -R "crates/target/release/bundle/macos/Locai Link.app" \
                                                     "$STAGING/Locai Link.app"

@@ -111,7 +111,12 @@ class ZenohClient:
         deadline = time.monotonic() + self._ROUTER_WAIT_SECONDS
         while time.monotonic() < deadline:
             try:
-                if list(session.info().routers_zid()):
+                # info is a method on some zenoh versions, a property on others;
+                # probe whichever shape this version exposes.
+                info = session.info
+                if callable(info):
+                    info = info()
+                if list(info.routers_zid()):
                     return
             except (AttributeError, TypeError) as e:
                 # The probe API is absent/incompatible: never resolvable, so

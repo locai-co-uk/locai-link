@@ -165,6 +165,7 @@ class AsyncHandler(logging.Handler):
     def emit(self, record):
         if self._stop_event.is_set():
             return
+        route_key = "logs"
         try:
             route_key = getattr(record, "route_key", "logs")
             context = getattr(record, "context", {})
@@ -354,6 +355,17 @@ def setup_logging(
     logging_config: Any = None, reporting_config: Any = None, zenoh_session: Any = None
 ) -> logging.Logger:
     """Configure the root logger and the ``link.reporter`` logger."""
+    # Windows stdio defaults to the ANSI codepage when redirected to a file;
+    # the console formatter's markers would then raise UnicodeEncodeError on
+    # every line and bury the message under logging tracebacks.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                # Best-effort: logging must still come up on streams that
+                # can't be reconfigured (closed, detached, or exotic stdio).
+                pass
     _configure_logger(None, logging_config, zenoh_session)
     _configure_logger("link.reporter", reporting_config, zenoh_session)
     return logging.getLogger()

@@ -7,12 +7,36 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Schema of `boot.json`. `host_app`/`channel` are schema-only (written by
-/// installers for later telemetry/rollout routing); the supervisor's
-/// `asset_basename` (supervisor/boot.rs) reads `plugin_set`/`asset_repo`/`asset_url`.
+/// Build shape — drives the bootstrap asset name. A closed enum so an edited
+/// or corrupted `boot.json` with an unknown shape fails parsing instead of
+/// requesting a nonexistent release asset (gen_boot_json.py rejects unknown
+/// shapes at build time; this is the runtime backstop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Shape {
+    #[default]
+    Desktop,
+    Headless,
+}
+
+impl std::fmt::Display for Shape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Shape::Desktop => "desktop",
+            Shape::Headless => "headless",
+        })
+    }
+}
+
+/// Schema of `boot.json`. `host_app`/`channel`/`plugin_set` are schema-only
+/// (written by installers for telemetry/rollout); the supervisor's
+/// `asset_basename` (supervisor/boot.rs) derives the fetch name from
+/// `shape` + `asset_repo`/`asset_url`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     pub host_app: String,
+    #[serde(default)]
+    pub shape: Shape,
     #[serde(default)]
     pub plugin_set: Vec<String>,
     #[serde(default = "default_channel")]
@@ -122,6 +146,18 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // --- Shape -----------------------------------------------------------
+
+    #[test]
+    fn shape_display_matches_serde_representation() {
+        // The supervisor derives asset names from the serde form and logs the
+        // Display form; a divergence would request a nonexistent asset.
+        for shape in [Shape::Desktop, Shape::Headless] {
+            let serialised = serde_json::to_value(shape).unwrap();
+            assert_eq!(serialised.as_str().unwrap(), shape.to_string());
+        }
+    }
+
     // --- read_boot_json --------------------------------------------------
 
     #[test]
@@ -162,7 +198,33 @@ mod tests {
         let cfg = read_boot_json(&path).unwrap();
         assert!(cfg.plugin_set.is_empty(), "plugin_set defaults to []");
         assert_eq!(cfg.channel, "stable", "channel defaults to stable");
+        assert_eq!(cfg.shape, Shape::Desktop, "shape defaults to desktop");
         assert!(cfg.asset_url.is_none());
+    }
+
+    #[test]
+    fn read_boot_json_parses_headless_shape() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("boot.json");
+        fs::write(
+            &path,
+            r#"{"host_app": "locai-link", "shape": "headless", "asset_repo": "locai-co-uk/locai-link"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_boot_json(&path).unwrap().shape, Shape::Headless);
+    }
+
+    #[test]
+    fn read_boot_json_rejects_unknown_shape() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("boot.json");
+        fs::write(
+            &path,
+            r#"{"host_app": "locai-link", "shape": "mobile", "asset_repo": "locai-co-uk/locai-link"}"#,
+        )
+        .unwrap();
+        let err = read_boot_json(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

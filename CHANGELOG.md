@@ -6,6 +6,52 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [1.3.0]
+
+- Added: a headless install for Linux, macOS, and Windows servers. One pasted
+  command installs Locai Link with no desktop UI, registers the device with just
+  a key (no email, password, or browser on the box), and runs it as a background
+  service. The device names itself and appears in your dashboard; re-running the
+  command is safe.
+- Headless devices fetch their inference engines on demand at first use instead
+  of bundling them, so the install is a fraction of the size and pulls only what
+  a deployed model needs.
+- Managing a device is the same everywhere: start, stop, restart, update, and
+  uninstall work identically on desktop and headless, and uninstalling now
+  removes the device from Control automatically.
+- Fixed: "Sign in with Locai" during first-run setup opens your browser again
+  (broken in 1.2.3 by an over-tightened URL-opening permission).
+- Fixed: `locai --help` and `locai --version` answer on the terminal instead of
+  opening the app window.
+- Fixed: the tray menu on Linux could freeze on stale state (a finished
+  download stuck at "Downloading", the serving count not tracking
+  serve/stop). Linux trays don't reliably render in-place item updates, so
+  the menu is now rebuilt on any change there; macOS keeps in-place updates
+  (its rebuilds wait for windows to close) and now re-reconciles rows every
+  poll so a slow or failed toggle can't leave a stray checkmark.
+- Changed: release downloads are verified against a single release-wide
+  `checksums.txt`; per-asset `.sha256` sidecar files are no longer published.
+- Fixed: serving no longer reports success when the inference engine is
+  missing. The serve fails with a clear error, and an on-demand engine fetch
+  failure now logs its reason instead of being swallowed.
+- llama-swap is now fetched on demand from the artifact store too, so
+  installs without bundled engines serve through the swap + proxy path
+  (multi-model, telemetry) instead of permanently falling back to
+  single-model direct serve.
+- Changed: on-demand engines resolve from the production artifact store by
+  default; dev builds (`pack.sh --dev`, the macOS harness `--dev`) bake dev
+  Control and the dev artifact store into the binary, and the supervisor
+  hands the baked store base and Control API base to the runtime's
+  environment, so headless registration follows the baked environment too.
+- Updated minor dependencies: serde_json 1.0.151, tauri-plugin-dialog 2.7.2,
+  libc 0.2.189, postcss 8.5.26, and the uv_build backend range to `<0.13`.
+- Hardened (pre-release review): the Linux/macOS installer stops a running
+  service before overwriting its files; the Windows installer verifies the
+  service actually started and writes its launcher with the correct encoding;
+  engine downloads are size-checked against the manifest before hashing;
+  uninstall resolves CLI symlinks before deciding they belong to the install;
+  and registration examples pass keys via the environment instead of argv.
+
 ## [1.2.3]
 
 - Setup and Preferences are now one desktop app. First-run onboarding opens in a

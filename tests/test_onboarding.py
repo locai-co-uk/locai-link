@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Loc.ai Ltd.
 # SPDX-License-Identifier: BUSL-1.1
 
+import json
 import types
 
 import pytest
@@ -9,153 +10,22 @@ from link.app.onboarding import (
     _RETRY_AFTER_HONOR_CAP_SECONDS,
     _RETRY_BACKOFF_CAP_SECONDS,
     _RETRY_MAX_ATTEMPTS,
-    DEVICE_GRANT_TYPE,
-    UseDeviceFlowError,
-    _device_flow,
-    _resolve_token,
+    FLEET_MARKER_PATH,
+    _redeem_device_key,
     _retry_after_seconds,
     _retry_backoff_seconds,
-    login_and_get_token,
-    register_device,
+    enroll_device,
+    register_with_key,
 )
 
 API_URL = "https://api.test.local/api/v1"
+REG_ENDPOINT = f"{API_URL}/devices/headless/register-with-reg-key"
+ENROLL_ENDPOINT = f"{API_URL}/devices/enroll"
 
 
-def _device_code_response(mocker):
-    """Build a successful POST /auth/device/code response."""
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {
-        "device_code": "secret-device-code",
-        "user_code": "BCDF-GHJK",
-        "verification_uri": "https://app.locai.example/link",
-        "verification_uri_complete": "https://app.locai.example/link?user_code=BCDF-GHJK",
-        "expires_in": 600,
-        "interval": 5,
-    }
-    resp.raise_for_status.return_value = None
-    return resp
-
-
-def _poll_response(mocker, status_code, body):
-    """Build a POST /auth/device/token poll response."""
-    resp = mocker.MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = body
-    resp.text = str(body)
-    return resp
-
-
-# --- login_and_get_token ---
-
-
-def test_login_success(mocker):
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"access_token": "jwt-123"}
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    token = login_and_get_token("user@test.com", "pass", API_URL)
-    assert token == "jwt-123"
-
-
-def test_login_bad_credentials(mocker):
-    resp = mocker.MagicMock()
-    resp.status_code = 401
-    resp.json.return_value = {"detail": "Invalid credentials"}
-    resp.text = "Unauthorized"
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    with pytest.raises(RuntimeError, match="Authentication failed"):
-        login_and_get_token("user@test.com", "wrong", API_URL)
-
-
-def test_login_no_token_in_response(mocker):
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {}
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    with pytest.raises(RuntimeError, match="no access token"):
-        login_and_get_token("user@test.com", "pass", API_URL)
-
-
-# --- _resolve_token ---
-
-
-def test_resolve_token_prefers_explicit_token():
-    assert _resolve_token("ignored@test.com", "ignored", "tok-abc", API_URL) == "tok-abc"
-
-
-def test_resolve_token_from_email(mocker):
-    mocker.patch("link.app.onboarding.login_and_get_token", return_value="jwt-from-email")
-    mocker.patch("link.app.onboarding.getpass.getpass", return_value="prompted-pass")
-
-    token = _resolve_token("user@test.com", None, None, API_URL)
-    assert token == "jwt-from-email"
-
-
-def test_resolve_token_uses_provided_password(mocker):
-    mock_login = mocker.patch("link.app.onboarding.login_and_get_token", return_value="jwt")
-
-    _resolve_token("user@test.com", "explicit-pass", None, API_URL)
-    mock_login.assert_called_once_with("user@test.com", "explicit-pass", API_URL)
-
-
-def test_resolve_token_no_credentials():
-    with pytest.raises(ValueError, match="--token or --email"):
-        _resolve_token(None, None, None, API_URL)
-
-
-# --- register_device ---
-
-
-def test_register_device_sends_auth_header(mocker):
-    mocker.patch("link.app.onboarding._resolve_token", return_value="jwt-xyz")
-
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"device_id": "dev-1", "api_key": "key-1"}
-    resp.raise_for_status.return_value = None
-    mock_post = mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    config = register_device(name="edge-01", reg_key="rk-1", api_url=API_URL, token="jwt-xyz")
-
-    # Verify auth header was sent
-    call_kwargs = mock_post.call_args
-    assert call_kwargs.kwargs["headers"]["Authorization"] == "Bearer jwt-xyz"
-
-    # Verify config was built correctly
-    assert config.identity.device_id == "dev-1"
-    assert config.identity.api_key == "key-1"
-    assert config.identity.device_name == "edge-01"
-
-
-def test_register_device_payload_no_username(mocker):
-    """Verify the registration payload does NOT include username (migrated to token auth)."""
-    mocker.patch("link.app.onboarding._resolve_token", return_value="jwt")
-
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"device_id": "d", "api_key": "k"}
-    resp.raise_for_status.return_value = None
-    mock_post = mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    register_device(name="dev", reg_key="rk", api_url=API_URL, token="jwt")
-
-    payload = mock_post.call_args.kwargs["json"]
-    assert "username" not in payload
-    assert payload["registration_key"] == "rk"
-    assert payload["name"] == "dev"
-
-
-# --- Backend-provided config ---
-
-
-def _mock_register_response(mocker, response_body):
-    """Helper: patch requests.post for register_device to return response_body."""
-    mocker.patch("link.app.onboarding._resolve_token", return_value="jwt")
+def _mock_reg_response(mocker, response_body):
+    """Patch the machine-id hash + requests.post for register_with_key."""
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="mach-hash-123")
     resp = mocker.MagicMock()
     resp.status_code = 200
     resp.json.return_value = response_body
@@ -163,14 +33,139 @@ def _mock_register_response(mocker, response_body):
     return mocker.patch("link.app.onboarding.requests.post", return_value=resp)
 
 
-def test_register_device_applies_backend_config(mocker):
+# --- register_with_key: endpoint, auth, and machine-bound payload ---
+
+
+def test_register_with_key_posts_to_headless_endpoint_with_bearer(mocker):
+    mock_post = _mock_reg_response(mocker, {"device_id": "dev-1", "api_key": "key-1"})
+
+    config = register_with_key(reg_key="rk-1", api_url=API_URL)
+
+    # The registration key is the bearer credential (no user JWT).
+    assert mock_post.call_args.args[0] == REG_ENDPOINT
+    assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer rk-1"
+
+    # Machine-bound flat payload; the key is NOT echoed in the body.
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["machine_id_hash"] == "mach-hash-123"
+    assert payload["device_type"] == "other"
+    assert payload["device_name"]  # <os-user>@<hostname>, non-empty
+    for field in ("os", "arch", "hostname"):
+        assert field in payload
+    assert "registration_key" not in payload
+
+    assert config.identity.device_id == "dev-1"
+    assert config.identity.api_key == "key-1"
+
+
+def test_register_with_key_persists_server_final_device_name(mocker):
+    """The server name is authoritative (it may suffix on collision)."""
+    _mock_reg_response(mocker, {"device_id": "d", "api_key": "k", "device_name": "pi@garage-pi-2"})
+
+    config = register_with_key(reg_key="rk", api_url=API_URL)
+
+    assert config.identity.device_name == "pi@garage-pi-2"
+
+
+def test_register_with_key_raises_on_missing_fields(mocker):
+    _mock_reg_response(mocker, {"device_id": "d"})  # no api_key
+
+    with pytest.raises(RuntimeError, match="missing device_id or api_key"):
+        register_with_key(reg_key="rk", api_url=API_URL)
+
+
+# --- enroll_device: endpoint, auth, and fleet marker ---
+
+
+def test_enroll_device_posts_to_enroll_endpoint_with_bearer(mocker, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # FLEET_MARKER_PATH is cwd-relative
+    mock_post = _mock_reg_response(mocker, {"device_id": "dev-9", "api_key": "key-9"})
+
+    config = enroll_device(fleet_key="fk-1", api_url=API_URL)
+
+    # The fleet key is the bearer credential; same machine-bound payload shape.
+    assert mock_post.call_args.args[0] == ENROLL_ENDPOINT
+    assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer fk-1"
+    assert mock_post.call_args.kwargs["json"]["machine_id_hash"] == "mach-hash-123"
+    assert config.identity.device_id == "dev-9"
+    assert config.identity.api_key == "key-9"
+
+    marker = json.loads(FLEET_MARKER_PATH.read_text(encoding="utf-8"))
+    assert marker["device_id"] == "dev-9"
+
+
+# --- _redeem_device_key: response validation + retry (shared by both flows) ---
+
+
+def _redeem():
+    return _redeem_device_key(endpoint=REG_ENDPOINT, bearer_key="rk", op_name="Test redeem")
+
+
+def test_redeem_raises_on_invalid_json(mocker):
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="m")
+    resp = mocker.MagicMock(status_code=200)
+    resp.json.side_effect = ValueError("no JSON")
+    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
+
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        _redeem()
+
+
+def test_redeem_raises_on_non_object_json(mocker):
+    _mock_reg_response(mocker, ["not", "an", "object"])
+
+    with pytest.raises(RuntimeError, match="not a JSON object"):
+        _redeem()
+
+
+def test_redeem_error_never_contains_credential_values(mocker):
+    """A missing-field error lists key names only; a live api_key must not leak."""
+    _mock_reg_response(mocker, {"api_key": "sk-live-secret"})  # no device_id
+
+    with pytest.raises(RuntimeError, match="missing device_id or api_key") as exc_info:
+        _redeem()
+
+    assert "sk-live-secret" not in str(exc_info.value)
+    assert "api_key" in str(exc_info.value)
+
+
+def test_redeem_retries_transient_5xx_then_succeeds(mocker):
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="m")
+    mocker.patch("link.app.onboarding.time.sleep")
+    fail = mocker.MagicMock(status_code=503, headers={})
+    ok = mocker.MagicMock(status_code=200)
+    ok.json.return_value = {"device_id": "d", "api_key": "k"}
+    mock_post = mocker.patch("link.app.onboarding.requests.post", side_effect=[fail, ok])
+
+    data, device_id, api_key = _redeem()
+
+    assert (device_id, api_key) == ("d", "k")
+    assert data == {"device_id": "d", "api_key": "k"}
+    assert mock_post.call_count == 2
+
+
+def test_redeem_permanent_4xx_fails_without_retry(mocker):
+    mocker.patch("link.infra.utils.get_machine_id_hash", return_value="m")
+    sleep = mocker.patch("link.app.onboarding.time.sleep")
+    resp = mocker.MagicMock(status_code=403)
+    resp.json.return_value = {"detail": "bad key"}
+    mock_post = mocker.patch("link.app.onboarding.requests.post", return_value=resp)
+
+    with pytest.raises(RuntimeError, match=r"rejected \(HTTP 403\): bad key"):
+        _redeem()
+
+    assert mock_post.call_count == 1
+    sleep.assert_not_called()
+
+
+# --- Backend-provided config (resolved via _resolve_agent_config) ---
+
+
+def test_register_applies_backend_config(mocker):
     """When the backend returns a config, the client uses it and resolves templates."""
     server_config = {
         "version": 2.1,
-        "identity": {
-            "device_id": "will-be-overridden",
-            "device_name": "placeholder",
-        },
+        "identity": {"device_id": "will-be-overridden", "device_name": "placeholder"},
         "transport": {"type": "http"},
         "logging": {
             "level": "DEBUG",  # non-default, to prove we used the server config
@@ -194,45 +189,42 @@ def test_register_device_applies_backend_config(mocker):
             }
         ],
     }
-    _mock_register_response(mocker, {"device_id": "dev-1", "api_key": "key-1", "config": server_config})
+    _mock_reg_response(mocker, {"device_id": "dev-1", "api_key": "key-1", "config": server_config})
 
-    config = register_device(name="edge-01", reg_key="rk", api_url=API_URL, token="jwt")
+    config = register_with_key(reg_key="rk", api_url=API_URL)
 
-    # Identity is injected from the registration response, not whatever the template said.
+    # Identity is injected from the registration response, not the template.
     assert config.identity.device_id == "dev-1"
     assert config.identity.api_key == "key-1"
-    assert config.identity.device_name == "edge-01"
     assert config.identity.api_url == API_URL
 
-    # Server-specified fields survived
+    # Server-specified fields survived.
     assert config.logging.level == "DEBUG"
     assert config.reporting.interval == 60
     assert len(config.pipelines) == 1
     assert config.pipelines[0].id == "custom_pipeline"
-    assert config.pipelines[0].active is True
 
-    # Identity templates were resolved in handler args
+    # Identity templates were resolved in handler args.
     log_handler = config.logging.handlers[0]
     assert log_handler.args["url"] == f"{API_URL}/agent/dev-1/logs"
     assert log_handler.args["api_key"] == "key-1"
 
 
-def test_register_device_falls_back_when_no_config(mocker):
+def test_register_falls_back_when_no_config(mocker):
     """Omitting `config` from the response triggers the built-in defaults."""
-    _mock_register_response(mocker, {"device_id": "dev-1", "api_key": "key-1"})
+    _mock_reg_response(mocker, {"device_id": "dev-1", "api_key": "key-1"})
 
-    config = register_device(name="edge-01", reg_key="rk", api_url=API_URL, token="jwt")
+    config = register_with_key(reg_key="rk", api_url=API_URL)
 
-    # Default: 2 pipelines (command_center, system_metrics)
     pipeline_ids = {p.id for p in config.pipelines}
     assert pipeline_ids == {"command_center", "system_metrics"}
 
 
-def test_register_device_falls_back_on_wrong_version(mocker, caplog):
+def test_register_falls_back_on_wrong_version(mocker, caplog):
     """Unknown schema version triggers a loud error and fallback."""
     import logging as stdlib_logging
 
-    _mock_register_response(
+    _mock_reg_response(
         mocker,
         {
             "device_id": "dev-1",
@@ -242,26 +234,22 @@ def test_register_device_falls_back_on_wrong_version(mocker, caplog):
     )
 
     with caplog.at_level(stdlib_logging.CRITICAL):
-        config = register_device(name="edge-01", reg_key="rk", api_url=API_URL, token="jwt")
+        config = register_with_key(reg_key="rk", api_url=API_URL)
 
-    # Loud error logged
     assert any("Unsupported config schema version" in r.message for r in caplog.records)
-
-    # But registration succeeded with defaults
-    pipeline_ids = {p.id for p in config.pipelines}
-    assert pipeline_ids == {"command_center", "system_metrics"}
+    assert {p.id for p in config.pipelines} == {"command_center", "system_metrics"}
 
 
-def test_register_device_falls_back_on_invalid_config(mocker, caplog):
+def test_register_falls_back_on_invalid_config(mocker, caplog):
     """Malformed config (pydantic validation error) triggers fallback, not crash."""
     import logging as stdlib_logging
 
-    _mock_register_response(
+    _mock_reg_response(
         mocker,
         {
             "device_id": "dev-1",
             "api_key": "key-1",
-            # Missing required `source` field on the pipeline
+            # Missing required `source` field on the pipeline.
             "config": {
                 "version": 2.1,
                 "identity": {"device_id": "x"},
@@ -271,16 +259,15 @@ def test_register_device_falls_back_on_invalid_config(mocker, caplog):
     )
 
     with caplog.at_level(stdlib_logging.CRITICAL):
-        config = register_device(name="edge-01", reg_key="rk", api_url=API_URL, token="jwt")
+        config = register_with_key(reg_key="rk", api_url=API_URL)
 
     assert any("Backend config rejected" in r.message for r in caplog.records)
-    # Fallback defaults kicked in
     assert {p.id for p in config.pipelines} == {"command_center", "system_metrics"}
 
 
-def test_register_device_identity_always_overridden(mocker):
-    """Even if the backend sends wrong identity values, the client's real identity wins."""
-    _mock_register_response(
+def test_register_identity_always_overridden(mocker):
+    """Even if the backend sends wrong identity values, the real identity wins."""
+    _mock_reg_response(
         mocker,
         {
             "device_id": "real-id",
@@ -297,230 +284,10 @@ def test_register_device_identity_always_overridden(mocker):
         },
     )
 
-    config = register_device(name="real-name", reg_key="rk", api_url=API_URL, token="jwt")
+    config = register_with_key(reg_key="rk", api_url=API_URL)
 
     assert config.identity.device_id == "real-id"
     assert config.identity.api_key == "real-key"
-    assert config.identity.device_name == "real-name"
-
-
-def test_activate_device_applies_backend_config(mocker):
-    """Activation path also honours a server-provided config."""
-    from link.app.onboarding import activate_device
-
-    server_config = {
-        "version": 2.1,
-        "identity": {"device_id": "x"},
-        "pipelines": [{"id": "activated", "active": True, "source": {"type": "clock_tick"}}],
-    }
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"api_key": "new-key", "config": server_config}
-    resp.raise_for_status.return_value = None
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    config = activate_device(device_id="existing-dev", reg_key="rk", api_url=API_URL)
-
-    assert config.identity.device_id == "existing-dev"
-    assert config.identity.api_key == "new-key"
-    assert len(config.pipelines) == 1
-    assert config.pipelines[0].id == "activated"
-
-
-# --- Device authorization flow (RFC 8628) ---
-
-
-def test_login_raises_use_device_flow_on_409(mocker):
-    """Backend signals SSO-only account via HTTP 409 + use_device_flow code."""
-    resp = mocker.MagicMock()
-    resp.status_code = 409
-    resp.json.return_value = {"detail": {"error": "use_device_flow", "message": "No password set."}}
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    with pytest.raises(UseDeviceFlowError, match="No password set"):
-        login_and_get_token("sso@test.com", "anything", API_URL)
-
-
-def test_login_409_without_use_device_flow_falls_through_to_runtime_error(mocker):
-    """A 409 with a different payload must NOT be treated as the SSO signal —
-    otherwise unrelated backend changes could silently switch flows."""
-    resp = mocker.MagicMock()
-    resp.status_code = 409
-    resp.json.return_value = {"detail": "Something unrelated"}
-    resp.text = "conflict"
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    with pytest.raises(RuntimeError, match="Authentication failed"):
-        login_and_get_token("user@test.com", "pw", API_URL)
-
-
-def test_resolve_token_skips_login_on_empty_password(mocker):
-    """Empty password from getpass → skip /auth/login entirely and go straight
-    to device flow. The backend's form parser rejects empty passwords with 422
-    before the SSO check runs, so probing via login would just yield a
-    confusing validation error."""
-    mocker.patch("link.app.onboarding.getpass.getpass", return_value="")
-    login_mock = mocker.patch("link.app.onboarding.login_and_get_token")
-    device_mock = mocker.patch("link.app.onboarding._device_flow", return_value="jwt-via-device")
-
-    token = _resolve_token("sso@test.com", None, None, API_URL, client_metadata={"device_name": "x"})
-
-    assert token == "jwt-via-device"
-    login_mock.assert_not_called()
-    device_mock.assert_called_once()
-
-
-def test_resolve_token_falls_through_to_device_flow_on_sso_user(mocker):
-    """Password attempt raising UseDeviceFlowError → caller runs _device_flow."""
-    mocker.patch(
-        "link.app.onboarding.login_and_get_token",
-        side_effect=UseDeviceFlowError("SSO-only"),
-    )
-    mocker.patch("link.app.onboarding.getpass.getpass", return_value="ignored")
-    device_mock = mocker.patch("link.app.onboarding._device_flow", return_value="jwt-via-device")
-
-    token = _resolve_token(
-        "sso@test.com",
-        None,
-        None,
-        API_URL,
-        client_metadata={"device_name": "edge-01", "os": "Linux", "hostname": "edge"},
-    )
-
-    assert token == "jwt-via-device"
-    device_mock.assert_called_once()
-    # Metadata was threaded through so the approval page can show it.
-    _, kwargs = device_mock.call_args
-    assert kwargs == {} or "client_metadata" not in kwargs  # passed positionally
-    args = device_mock.call_args.args
-    assert args[0] == API_URL
-    assert args[1] == {"device_name": "edge-01", "os": "Linux", "hostname": "edge"}
-
-
-def test_device_flow_happy_path(mocker):
-    """Code endpoint → one pending poll → approved poll returns token."""
-    mocker.patch("link.app.onboarding.time.sleep")  # don't actually wait
-
-    code_resp = _device_code_response(mocker)
-    pending = _poll_response(mocker, 400, {"detail": {"error": "authorization_pending"}})
-    approved = _poll_response(mocker, 200, {"access_token": "jwt-via-device"})
-
-    mock_post = mocker.patch(
-        "link.app.onboarding.requests.post",
-        side_effect=[code_resp, pending, approved],
-    )
-
-    token = _device_flow(API_URL, client_metadata={"device_name": "edge-01"})
-
-    assert token == "jwt-via-device"
-    # First call: POST /auth/device/code with metadata
-    code_call = mock_post.call_args_list[0]
-    assert code_call.args[0] == f"{API_URL}/auth/device/code"
-    assert code_call.kwargs["json"] == {"client_metadata": {"device_name": "edge-01"}}
-    # Subsequent calls: POST /auth/device/token with grant_type
-    for poll_call in mock_post.call_args_list[1:]:
-        assert poll_call.args[0] == f"{API_URL}/auth/device/token"
-        assert poll_call.kwargs["json"]["grant_type"] == DEVICE_GRANT_TYPE
-        assert poll_call.kwargs["json"]["device_code"] == "secret-device-code"
-
-
-def test_device_flow_honours_slow_down(mocker):
-    """RFC §3.5: slow_down bumps the interval by 5s; loop continues."""
-    sleep_mock = mocker.patch("link.app.onboarding.time.sleep")
-
-    code_resp = _device_code_response(mocker)
-    slow = _poll_response(mocker, 400, {"detail": {"error": "slow_down"}})
-    approved = _poll_response(mocker, 200, {"access_token": "jwt"})
-
-    mocker.patch("link.app.onboarding.requests.post", side_effect=[code_resp, slow, approved])
-
-    _device_flow(API_URL)
-
-    # First sleep at the default 5s interval; second sleep after slow_down → 10s.
-    sleep_intervals = [call.args[0] for call in sleep_mock.call_args_list]
-    assert sleep_intervals == [5, 10]
-
-
-def test_device_flow_access_denied_raises(mocker):
-    """User clicked Deny on the approval page → raise, don't keep polling."""
-    mocker.patch("link.app.onboarding.time.sleep")
-
-    code_resp = _device_code_response(mocker)
-    denied = _poll_response(mocker, 400, {"detail": {"error": "access_denied"}})
-
-    mocker.patch("link.app.onboarding.requests.post", side_effect=[code_resp, denied])
-
-    with pytest.raises(RuntimeError, match="denied"):
-        _device_flow(API_URL)
-
-
-def test_device_flow_expired_token_raises(mocker):
-    """user_code expired before approval → raise, don't keep polling."""
-    mocker.patch("link.app.onboarding.time.sleep")
-
-    code_resp = _device_code_response(mocker)
-    expired = _poll_response(mocker, 400, {"detail": {"error": "expired_token"}})
-
-    mocker.patch("link.app.onboarding.requests.post", side_effect=[code_resp, expired])
-
-    with pytest.raises(RuntimeError, match="expired"):
-        _device_flow(API_URL)
-
-
-def test_device_flow_tolerates_transient_network_error(mocker):
-    """A blip on a single poll keeps the loop alive — the user has 10 minutes."""
-    import requests as _requests
-
-    mocker.patch("link.app.onboarding.time.sleep")
-
-    code_resp = _device_code_response(mocker)
-    approved = _poll_response(mocker, 200, {"access_token": "jwt"})
-
-    mocker.patch(
-        "link.app.onboarding.requests.post",
-        side_effect=[code_resp, _requests.ConnectionError("blip"), approved],
-    )
-
-    token = _device_flow(API_URL)
-    assert token == "jwt"
-
-
-def test_device_flow_omits_client_metadata_when_none(mocker):
-    """When called without metadata, the request body must not contain a
-    `client_metadata: null` key — the backend's Pydantic model treats absent
-    and null differently."""
-    mocker.patch("link.app.onboarding.time.sleep")
-
-    code_resp = _device_code_response(mocker)
-    approved = _poll_response(mocker, 200, {"access_token": "jwt"})
-
-    mock_post = mocker.patch(
-        "link.app.onboarding.requests.post",
-        side_effect=[code_resp, approved],
-    )
-
-    _device_flow(API_URL)
-
-    assert mock_post.call_args_list[0].kwargs["json"] == {}
-
-
-def test_register_device_threads_client_metadata_into_resolve_token(mocker):
-    """register_device must pass device_name/os/hostname through so the /link
-    approval page can show the user *which* device is asking."""
-    resolve_mock = mocker.patch("link.app.onboarding._resolve_token", return_value="jwt")
-
-    resp = mocker.MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"device_id": "d", "api_key": "k"}
-    resp.raise_for_status.return_value = None
-    mocker.patch("link.app.onboarding.requests.post", return_value=resp)
-
-    register_device(name="edge-42", reg_key="rk", api_url=API_URL, email="u@t.com")
-
-    metadata = resolve_mock.call_args.kwargs["client_metadata"]
-    assert metadata["device_name"] == "edge-42"
-    assert "os" in metadata
-    assert "hostname" in metadata
 
 
 # --- Retry-policy helpers (pure logic; no transport, no HTTP status codes) ---
@@ -572,68 +339,3 @@ def test_retry_after_seconds(value, expected):
 
 def test_retry_after_none_headers_returns_none():
     assert _retry_after_seconds(types.SimpleNamespace(headers=None)) is None
-
-
-# --- Browser-handoff helpers ---
-
-
-def test_open_in_browser_uses_open_on_macos(mocker):
-    from link.app.onboarding import _open_in_browser
-
-    mocker.patch("platform.system", return_value="Darwin")
-    mock_run = mocker.patch("link.app.onboarding.subprocess.run")
-    assert _open_in_browser("https://example.com") is True
-    mock_run.assert_called_once_with(["open", "https://example.com"], check=False, capture_output=True, timeout=5)
-
-
-def test_open_in_browser_uses_xdg_open_on_linux(mocker):
-    from link.app.onboarding import _open_in_browser
-
-    mocker.patch("platform.system", return_value="Linux")
-    mock_run = mocker.patch("link.app.onboarding.subprocess.run")
-    assert _open_in_browser("https://example.com") is True
-    mock_run.assert_called_once_with(["xdg-open", "https://example.com"], check=False, capture_output=True, timeout=5)
-
-
-def test_open_in_browser_returns_false_on_unknown_platform(mocker):
-    from link.app.onboarding import _open_in_browser
-
-    mocker.patch("platform.system", return_value="Plan9")
-    assert _open_in_browser("https://example.com") is False
-
-
-def test_open_in_browser_swallows_missing_opener(mocker):
-    """A missing ``xdg-open`` binary must not raise."""
-    from link.app.onboarding import _open_in_browser
-
-    mocker.patch("platform.system", return_value="Linux")
-    mocker.patch("link.app.onboarding.subprocess.run", side_effect=FileNotFoundError())
-    assert _open_in_browser("https://example.com") is False
-
-
-def test_running_detached_true_when_stdin_not_tty(mocker):
-    from link.app.onboarding import _running_detached
-
-    fake_stdin = mocker.MagicMock()
-    fake_stdin.isatty.return_value = False
-    mocker.patch("link.app.onboarding.sys.stdin", fake_stdin)
-    assert _running_detached() is True
-
-
-def test_running_detached_false_in_interactive_terminal(mocker):
-    from link.app.onboarding import _running_detached
-
-    fake_stdin = mocker.MagicMock()
-    fake_stdin.isatty.return_value = True
-    mocker.patch("link.app.onboarding.sys.stdin", fake_stdin)
-    assert _running_detached() is False
-
-
-def test_running_detached_treats_oserror_as_detached(mocker):
-    """isatty() can raise on weird stdin objects (frozen bundles)."""
-    from link.app.onboarding import _running_detached
-
-    fake_stdin = mocker.MagicMock()
-    fake_stdin.isatty.side_effect = OSError("bad fd")
-    mocker.patch("link.app.onboarding.sys.stdin", fake_stdin)
-    assert _running_detached() is True

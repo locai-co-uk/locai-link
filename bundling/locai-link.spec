@@ -21,7 +21,14 @@ REPO_ROOT = SPEC_DIR.parent
 
 
 def _platform_tag() -> str:
-    arch = "arm64" if _pf.machine().lower() in ("arm64", "aarch64") else "x86_64"
+    # Mirrors bundling/manifest.py::platform_tag (arch token x64/arm64). Kept
+    # standalone: a PyInstaller .spec shouldn't import project modules. Unknown
+    # architectures fail the build rather than silently selecting x64 natives.
+    machine = _pf.machine().lower()
+    arch_map = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}
+    arch = arch_map.get(machine)
+    if arch is None:
+        raise SystemExit(f"unsupported architecture for bundling: {machine!r}")
     os_slug = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[_pf.system()]
     return f"{os_slug}-{arch}"
 
@@ -64,17 +71,17 @@ PLUGIN_SPEC = {
 }
 
 
+# Empty is valid: a naked build (no --plugins) bundles just the runtime.
 raw_selection = os.environ.get("LOCAI_BUNDLE_PLUGINS", "").strip()
-if not raw_selection:
-    raise SystemExit(
-        "LOCAI_BUNDLE_PLUGINS is empty. This spec is meant to be invoked by "
-        "bundling/build.py, which sets the variable from --plugins."
-    )
 selected = [p.strip() for p in raw_selection.split(",") if p.strip()]
 unknown = [p for p in selected if p not in PLUGIN_SPEC]
 if unknown:
     raise SystemExit(f"Unknown plugins in LOCAI_BUNDLE_PLUGINS: {', '.join(unknown)}")
 
+# Engine binaries are baked in only for a --prefetch build; otherwise they are
+# fetched from the artifact store on first use, so a selected plugin ships its
+# Python code with no native binaries present.
+prefetch = os.environ.get("LOCAI_BUNDLE_PREFETCH") == "1"
 ARTIFACTS_DIR = SPEC_DIR / "_artifacts" / _platform_tag()
 
 datas = []
@@ -96,8 +103,8 @@ for name in selected:
     datas += collect_data_files(pkg, include_py_files=False)
     # Hidden imports — entry-point targets are loaded by string.
     hidden_imports += info["imports"]
-    # Native binaries — copied flat into the bundle root subdir.
-    if info["native_dir"]:
+    # Native binaries — baked in only for a --prefetch build (else fetched on demand).
+    if info["native_dir"] and prefetch:
         native_root = ARTIFACTS_DIR / info["native_dir"]
         if not native_root.is_dir():
             raise SystemExit(

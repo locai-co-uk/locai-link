@@ -8,25 +8,101 @@
     windows_subsystem = "windows"
 )]
 
-// Desktop: the Tauri app, which also drives the supervisor thread.
-// The `locai` CLI symlink points at this binary, so a subcommand invocation
-// (`locai run`) supervises the runtime in the foreground rather than popping
-// the GUI. A no-arg launch and flag-style args (`-psn_…`) fall through to the
-// desktop app.
-#[cfg(feature = "ui")]
-fn main() -> std::process::ExitCode {
-    let is_cli = std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| !a.to_string_lossy().starts_with('-'));
-    if is_cli {
-        return link_lib::supervisor::run_supervisor();
-    }
-    link_lib::run();
-    std::process::ExitCode::SUCCESS
+/// How the process was launched, decided from the first CLI arg. `locai` (the
+/// CLI symlink) and the service unit share this one binary.
+#[derive(Debug, PartialEq, Eq)]
+enum Launch {
+    /// `run` = the long-lived supervised service (idles until registered).
+    Service,
+    /// A lifecycle op handled natively (start/stop/restart/uninstall), shared
+    /// with the desktop shape; carries the subcommand name.
+    Lifecycle(&'static str),
+    /// A runtime subcommand (register/status/update/…) or CLI flag
+    /// (`--help`/`--version`) = one-shot passthrough.
+    OneShot,
+    /// No-arg launch or the macOS Launch Services arg (`-psn_…`) = the desktop app.
+    App,
 }
 
-// Headless: just the supervisor loop.
+fn classify_launch(first: Option<&str>) -> Launch {
+    match first {
+        None => Launch::App,
+        Some(arg) if arg.starts_with("-psn_") => Launch::App,
+        Some("run") => Launch::Service,
+        Some("start") => Launch::Lifecycle("start"),
+        Some("stop") => Launch::Lifecycle("stop"),
+        Some("restart") => Launch::Lifecycle("restart"),
+        Some("uninstall") => Launch::Lifecycle("uninstall"),
+        // Everything else, flags included: `locai --help` must answer on the
+        // terminal, not open the GUI.
+        Some(_) => Launch::OneShot,
+    }
+}
+
+// Desktop: the Tauri app, which also drives the supervisor thread. The `locai`
+// CLI symlink points at this binary, so `locai run` supervises the runtime and
+// other subcommands run one-shot, rather than popping the GUI.
+#[cfg(feature = "ui")]
+fn main() -> std::process::ExitCode {
+    let first = std::env::args_os().nth(1);
+    let first = first.as_ref().map(|a| a.to_string_lossy());
+    match classify_launch(first.as_deref()) {
+        Launch::Service => link_lib::supervisor::run_service(),
+        Launch::Lifecycle(cmd) => link_lib::lifecycle::run(cmd),
+        Launch::OneShot => link_lib::supervisor::run_supervisor(),
+        Launch::App => {
+            link_lib::run();
+            std::process::ExitCode::SUCCESS
+        }
+    }
+}
+
+// Headless: `run` is the supervised service; everything else (there is no desktop
+// app) is a one-shot passthrough.
 #[cfg(not(feature = "ui"))]
 fn main() -> std::process::ExitCode {
-    link_lib::supervisor::run_supervisor()
+    let first = std::env::args_os().nth(1);
+    let first = first.as_ref().map(|a| a.to_string_lossy());
+    match classify_launch(first.as_deref()) {
+        Launch::Service => link_lib::supervisor::run_service(),
+        Launch::Lifecycle(cmd) => link_lib::lifecycle::run(cmd),
+        _ => link_lib::supervisor::run_supervisor(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_launch, Launch};
+
+    #[test]
+    fn run_is_the_service() {
+        assert_eq!(classify_launch(Some("run")), Launch::Service);
+    }
+
+    #[test]
+    fn runtime_subcommands_are_one_shot() {
+        for cmd in ["register", "status", "update", "install-plugin", "self-check", "reset"] {
+            assert_eq!(classify_launch(Some(cmd)), Launch::OneShot, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn cli_flags_are_one_shot() {
+        for flag in ["--help", "-h", "--version", "-V"] {
+            assert_eq!(classify_launch(Some(flag)), Launch::OneShot, "{flag}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_subcommands_are_native() {
+        for cmd in ["start", "stop", "restart", "uninstall"] {
+            assert_eq!(classify_launch(Some(cmd)), Launch::Lifecycle(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn no_arg_or_psn_are_the_app() {
+        assert_eq!(classify_launch(None), Launch::App);
+        assert_eq!(classify_launch(Some("-psn_0_12345")), Launch::App);
+    }
 }

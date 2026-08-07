@@ -982,10 +982,6 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                 TrayState::Up => TRAY_ICON_UP,
                 TrayState::Down => TRAY_ICON_DOWN,
             });
-        // Full set_menu only on a structural change (rows added/removed) and
-        // only while no window is open (replacing the menu miniaturizes a
-        // foreground macOS window). Value changes (serving, labels, progress,
-        // header) update the existing rows in place, so they apply either way.
         let sig = structure_sig(
             &new_models,
             &new_deployments,
@@ -993,8 +989,19 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
             registered,
         );
         let structure_changed = sig != current_sig;
-        let rebuild_menu = structure_changed && !WINDOW_VISIBLE.load(Ordering::Relaxed);
         let values_changed = new_digest != current_digest || text_changed;
+        // macOS: value changes (serving, labels, progress, header) update the
+        // existing rows in place, and full set_menu happens only on a structural
+        // change while no window is open (it miniaturizes a foreground window
+        // there; the deferred rebuild runs once the window hides). Elsewhere the
+        // menu is rebuilt on ANY change: dbusmenu/StatusNotifier trays don't
+        // reliably render in-place item mutations, and set_menu has no
+        // window side effects off-macOS.
+        let rebuild_menu = if cfg!(target_os = "macos") {
+            structure_changed && !WINDOW_VISIBLE.load(Ordering::Relaxed)
+        } else {
+            structure_changed || values_changed
+        };
         let tray_main = tray.clone();
         let app_main = app.clone();
         let handles_main = handles.clone();
@@ -1039,8 +1046,12 @@ fn poll_forever(app: AppHandle, tray: TrayIcon, handles: Arc<Mutex<MenuHandles>>
                     }
                     Err(e) => eprintln!("[link] build_tray_menu failed: {e}"),
                 }
-            } else if values_changed {
+            } else {
                 // Update rows in place — no set_menu, so no window miniaturize.
+                // Runs every poll, not only on a digest change: muda checkboxes
+                // flip their visual state on click by themselves, so a toggle
+                // whose backend state didn't change (slow or failed stop) leaves
+                // a divergent checkmark that only an unconditional reconcile repairs.
                 if let Ok(mut h) = handles_main.lock() {
                     if let Some(sm) = &h.models_submenu {
                         let _ = sm.set_text(models_serving_label(&menu_models));

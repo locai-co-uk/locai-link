@@ -7,6 +7,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,38 @@ from pathlib import Path
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_engine_binary(engine: str, filename: str, bin_dir: Path, version: str | None = None) -> Path | None:
+    """Resolve an engine binary. Frozen bundles use only trusted sources: the
+    bundled bin dir, else an on-demand checksum-verified artifact-store fetch
+    pinned to ``version`` (never PATH, which a modified service environment
+    could poison). Source runs additionally accept a PATH binary as a dev
+    convenience. Prefetch builds resolve at step 1, so the store cache is never
+    duplicated beside a bundled copy."""
+    candidate = bin_dir / filename
+    if candidate.exists():
+        return candidate
+
+    frozen = getattr(sys, "frozen", False)
+    if not frozen:
+        path_bin = shutil.which(filename)
+        if path_bin:
+            return Path(path_bin)
+        # Soft import below: only the bundled runtime exposes link.infra.engines;
+        # source runs keep the bin_dir/install.py path.
+        return None
+
+    try:
+        from link.infra import engines
+
+        return engines.binary_path(engine, filename, version=version)
+    except Exception as e:  # noqa: BLE001
+        # Surface the reason (store 404, network, bad hash): this is the
+        # last resolution step, so a silent fall-through reads as
+        # "binary just missing" with no diagnosable cause.
+        logger.warning(f"on-demand {engine} fetch failed: {e}")
+    return None
 
 
 class ModelServer:
@@ -65,21 +98,13 @@ class ModelServer:
         }
 
     def _get_server_binary(self):
-        """Locates the platform-specific binary."""
-        system = platform.system()
-        binary_name = "llama-server.exe" if system == "Windows" else "llama-server"
-
-        # 1. Check bin-llama
-        candidate = self.bin_dir / binary_name
-        if candidate.exists():
-            return candidate
-
-        # 2. Check PATH
-        path_bin = shutil.which(binary_name)
-        if path_bin:
-            return Path(path_bin)
-
-        return None
+        """Locates the platform-specific binary, pinned to the plugin's release."""
+        try:
+            from .install import LLAMA_CPP_RELEASE
+        except ImportError:
+            from install import LLAMA_CPP_RELEASE
+        binary_name = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+        return resolve_engine_binary("llama-cpp", binary_name, self.bin_dir, version=LLAMA_CPP_RELEASE)
 
     def start(self):
         if self.running:
@@ -91,8 +116,12 @@ class ModelServer:
 
         server_bin = self._get_server_binary()
         if not server_bin or not server_bin.exists():
-            logger.error(f"Inference binary not found in {self.bin_dir}. Run install.py")
-            return
+            # Raise, don't return: a silent return here let the pipeline report
+            # "Serving started" with no engine on disk and nothing listening.
+            raise RuntimeError(
+                f"inference engine (llama-server) not found in {self.bin_dir}, "
+                "on PATH, or via the artifact store - cannot serve"
+            )
 
         # Wildcard binds aren't clickable; show localhost in the log line.
         display_host = "localhost" if self.host in ("0.0.0.0", "::", "") else self.host

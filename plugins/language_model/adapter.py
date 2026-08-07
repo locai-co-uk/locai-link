@@ -22,16 +22,33 @@ import requests
 from colorama import Fore, Style
 
 try:
-    from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
-    from .server import ModelServer
+    from .install import BIN_LLAMA_DIR, LLAMA_CPP_RELEASE, LLAMA_SWAP_RELEASE, _is_swap_installed
+    from .server import ModelServer, resolve_engine_binary
     from .swap_manager import SwapManager, get_swap_manager
 except ImportError:  # flat layout fallback
-    from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
-    from server import ModelServer
+    from install import BIN_LLAMA_DIR, LLAMA_CPP_RELEASE, LLAMA_SWAP_RELEASE, _is_swap_installed
+    from server import ModelServer, resolve_engine_binary
     from swap_manager import SwapManager, get_swap_manager
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_swap_binary() -> Path | None:
+    """llama-swap for serve mode: the bundled copy (tag-checked on source runs
+    via _is_swap_installed), else an on-demand store fetch in frozen bundles,
+    pinned to the plugin's release so the store default can't drift it."""
+    filename = "llama-swap.exe" if platform.system() == "Windows" else "llama-swap"
+    if _is_swap_installed(LLAMA_SWAP_RELEASE):
+        return BIN_LLAMA_DIR / filename
+    if getattr(sys, "frozen", False):
+        try:
+            from link.infra import engines
+
+            return engines.binary_path("llama-swap", filename, version=LLAMA_SWAP_RELEASE)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"on-demand llama-swap fetch failed: {e}")
+    return None
 
 
 class LanguageModel:
@@ -70,20 +87,36 @@ class LanguageModel:
         self._swap_manager: SwapManager | None = None
 
         if self.mode == "serve":
-            if _is_swap_installed(LLAMA_SWAP_RELEASE):
+            # Resolve both engines up front (bundled copy, else the on-demand
+            # store cache); swap mode needs the pair, and the two can live in
+            # different engine caches on an on-demand install.
+            swap_bin = _resolve_swap_binary()
+            server_filename = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+            server_bin = (
+                resolve_engine_binary("llama-cpp", server_filename, BIN_LLAMA_DIR, version=LLAMA_CPP_RELEASE)
+                if swap_bin
+                else None
+            )
+            if swap_bin is not None and server_bin is not None:
                 self._swap_manager = get_swap_manager(
                     self.port,
                     self.host,
                     BIN_LLAMA_DIR,
                     allowed_origins=self._cors_allowed_origins,
                     on_telemetry=self._on_proxy_telemetry,
+                    swap_bin=swap_bin,
+                    server_bin=server_bin,
                 )
                 extra_args = ["--n-gpu-layers", str(self.n_gpu_layers), "--ctx-size", str(self.n_ctx)]
                 self._swap_manager.add_model(
-                    self.model_id, str(self.model_path), extra_args, self._build_serve_env(), ttl=self.ttl
+                    self.model_id,
+                    str(self.model_path),
+                    extra_args,
+                    self._build_serve_env(server_bin.parent),
+                    ttl=self.ttl,
                 )
             else:
-                logger.warning("llama-swap not installed — falling back to single-model direct serve")
+                logger.warning("llama-swap unavailable — falling back to single-model direct serve")
                 self.server = ModelServer(
                     model_path=self.model_path,
                     host=self.host,
@@ -350,11 +383,12 @@ class LanguageModel:
         if not self.queue.full():
             self.queue.put(telemetry_payload)
 
-    def _build_serve_env(self) -> dict[str, str]:
-        """Linux only: LD_LIBRARY_PATH so llama-server finds bundled CUDA/Vulkan .so files."""
+    def _build_serve_env(self, engine_dir: Path) -> dict[str, str]:
+        """Linux only: LD_LIBRARY_PATH so llama-server finds its CUDA/Vulkan .so
+        files, rooted at the resolved engine dir (bundled or store cache)."""
         if platform.system() != "Linux":
             return {}
-        bin_dir = BIN_LLAMA_DIR
+        bin_dir = engine_dir
         lib_paths: set[str] = {str(bin_dir)}
         for root, _, files in os.walk(bin_dir):
             for f in files:

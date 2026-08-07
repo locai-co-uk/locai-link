@@ -7,6 +7,7 @@
     "core:default",
     "core:window:allow-close",
     "core:window:allow-hide",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

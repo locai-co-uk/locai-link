@@ -8,7 +8,7 @@ Local audio transcription using [whisper.cpp](https://github.com/ggml-org/whispe
 uv run install.py
 ```
 
-This downloads (or builds from source) the `whisper-server` binary, pinned to a vetted release.
+This downloads (or builds from source) the `whisper-server` binary, pinned to a vetted release: the `WHISPER_CPP_RELEASE` constant in `install.py` is the single source of truth for the tag.
 
 ## Usage
 

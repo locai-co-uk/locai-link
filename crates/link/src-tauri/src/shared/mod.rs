@@ -25,7 +25,7 @@ pub use health::{
     DEFAULT_MODEL_ACTION_BASE, DEFAULT_PENDING_URL, DEFAULT_UPDATE_URL,
 };
 pub use install::{
-    installed_version, read_boot_json, supported_model_types, BootConfig, InstalledVersion,
+    installed_version, read_boot_json, supported_model_types, BootConfig, InstalledVersion, Shape,
 };
 
 #[cfg(test)]

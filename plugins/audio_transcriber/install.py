@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).parent
 
 # Pinned whisper.cpp release — update manually after vetting a new release.
 # Find release tags at: https://github.com/ggml-org/whisper.cpp/releases
-WHISPER_CPP_RELEASE = "v1.9.1"
+WHISPER_CPP_RELEASE = "v1.9.2"
 
 # Detect Virtual Environment Root and define Install Directory.
 # FROZEN: running from a PyInstaller bundle.
@@ -147,11 +147,12 @@ def _install_prebuilt(url, bin_dir, tag):
     binary_filename = "whisper-server.exe" if system == "Windows" else "whisper-server"
     binary_dest = bin_dir / binary_filename
 
-    # Tag-based caching
+    # Tag-based caching. The tag file records provenance (prebuilt:<tag> /
+    # source:<tag>); bare legacy tags count as prebuilt.
     safe_name = "whisper_cpp"
     cache_dir = BUILD_CACHE_DIR / safe_name
     tag_file = cache_dir / "tag"
-    if binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag:
+    if binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() in (f"prebuilt:{tag}", tag):
         logger.info(f"whisper.cpp already installed ({tag}) — skipping download.")
         return True
 
@@ -222,7 +223,7 @@ def _install_prebuilt(url, bin_dir, tag):
     finally:
         archive_path.unlink(missing_ok=True)
 
-    tag_file.write_text(tag)
+    tag_file.write_text(f"prebuilt:{tag}")
     logger.info(f"whisper.cpp installed to {bin_dir}")
     return True
 
@@ -297,17 +298,22 @@ def _cmake_build(tag, cmake_flags, bin_dir):
     build_dir = cache_dir / "build"
     tag_file = cache_dir / "tag"
 
-    # Early-exit: already installed at this exact tag
+    # Early-exit: already SOURCE-built at this exact tag. A cached prebuilt
+    # never satisfies this path, so forcing a source build actually rebuilds.
     cached_tag = tag_file.read_text().strip() if tag_file.exists() else None
     binary_dest = bin_dir / binary_filename
-    if binary_dest.exists() and cached_tag == tag:
-        logger.info(f"whisper.cpp already installed ({tag}) — skipping build.")
+    if binary_dest.exists() and cached_tag == f"source:{tag}":
+        logger.info(f"whisper.cpp already built from source ({tag}) — skipping build.")
         return
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # The src tree only depends on the bare tag, whatever provenance the
+    # installed binary has.
+    bare_cached = cached_tag.split(":", 1)[-1] if cached_tag else None
+
     try:
-        if cached_tag != tag and src_dir.exists():
+        if bare_cached != tag and src_dir.exists():
             logger.info(f"Tag changed ({cached_tag} -> {tag}) — re-cloning...")
             shutil.rmtree(src_dir)
             if build_dir.exists():
@@ -361,7 +367,7 @@ def _cmake_build(tag, cmake_flags, bin_dir):
         if system != "Windows":
             binary_dest.chmod(0o755)
 
-        tag_file.write_text(tag)
+        tag_file.write_text(f"source:{tag}")
         logger.info(f"whisper.cpp built and installed to {bin_dir}")
 
     except subprocess.CalledProcessError as e:
@@ -372,19 +378,25 @@ def _cmake_build(tag, cmake_flags, bin_dir):
         sys.exit(1)
 
 
-def _is_already_installed(tag: str) -> bool:
+def _is_already_installed(tag: str, force_source: bool = False) -> bool:
     """True when whisper-server binary is present and the cached tag matches.
 
-    Same check both prebuilt and cmake paths use — kept here so callers can
-    early-return before any log line fires.  In a frozen bundle the binary is
-    shipped without a tag file, so presence alone counts as installed.
+    The tag file records provenance (prebuilt:<tag> / source:<tag>; bare
+    legacy tags count as prebuilt). Under force_source only a source-built
+    binary counts, so a cached prebuilt gets rebuilt instead of silently
+    kept. In a frozen bundle the binary is shipped without a tag file, so
+    presence alone counts as installed.
     """
     binary_filename = "whisper-server.exe" if platform.system() == "Windows" else "whisper-server"
     binary_dest = BIN_WHISPER_DIR / binary_filename
     if FROZEN:
         return binary_dest.exists()
     tag_file = BUILD_CACHE_DIR / "whisper_cpp" / "tag"
-    return binary_dest.exists() and tag_file.exists() and tag_file.read_text().strip() == tag
+    if not (binary_dest.exists() and tag_file.exists()):
+        return False
+    recorded = tag_file.read_text().strip()
+    accepted = {f"source:{tag}"} if force_source else {f"source:{tag}", f"prebuilt:{tag}", tag}
+    return recorded in accepted
 
 
 def install_inference_engine():
@@ -394,11 +406,19 @@ def install_inference_engine():
     BIN_WHISPER_DIR.mkdir(parents=True, exist_ok=True)
     tag = WHISPER_CPP_RELEASE
 
-    if _is_already_installed(tag):
+    # LOCAI_WHISPER_FORCE_SOURCE=1 skips the prebuilt: a native source build
+    # sidesteps the prebuilt's CPU-variant loader, which can SIGILL on CPUs
+    # without the newest instruction sets (observed on CI runners).
+    force_source = os.environ.get("LOCAI_WHISPER_FORCE_SOURCE") == "1"
+    if force_source and platform.system() == "Windows":
+        logger.warning("LOCAI_WHISPER_FORCE_SOURCE ignored on Windows (prebuilt only).")
+        force_source = False
+
+    if _is_already_installed(tag, force_source=force_source):
         return  # silent no-op — caller decides whether to announce anything
 
     logger.info("Installing Audio Transcription Engine (whisper.cpp)")
-    url = _prebuilt_url(tag)
+    url = None if force_source else _prebuilt_url(tag)
     if url:
         if _install_prebuilt(url, BIN_WHISPER_DIR, tag):
             return
@@ -430,8 +450,8 @@ def install_inference_engine():
 
 def main():
     """Main installation script."""
-    if _is_already_installed(WHISPER_CPP_RELEASE):
-        return  # nothing to do, stay silent
+    # No early installed-check here: install_inference_engine() does the
+    # mode-aware one (a cached prebuilt must not satisfy a force-source run).
     logger.info("Starting Installation for Audio Transcriber...")
     install_inference_engine()
     logger.info("Audio Transcriber component installation complete.")

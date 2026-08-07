@@ -3,22 +3,20 @@
 
 """End-to-end Link bundle build.
 
-A bundle is identified by the plugin set compiled into it. The artifact
-name is derived from that plugin set (see ``bundling/manifest.py`` for
-the codes and ordering). There is no separate "profile" concept; the
-plugin list IS the recipe.
-
-Bare (zero-plugin) bundles aren't a release shape; for that, use the
-source install path (``curl … | bash`` from the README).
+A bundle's shape (``desktop`` | ``headless``) drives the Rust feature + asset
+name (see ``bundling/manifest.py``). Plugins (``--plugins``, omit for naked) and
+engine delivery (``--prefetch`` = bundle engines in at build; without it they are
+fetched on demand — same meaning for both shapes) are orthogonal choices.
 
 Examples::
 
-    uv run python bundling/build.py --plugins language_model
-    uv run python bundling/build.py --plugins language_model audio_transcriber
+    uv run python bundling/build.py                                                 # naked headless, fetch-on-demand
+    uv run python bundling/build.py --shape desktop --prefetch --plugins language_model audio_transcriber
+    uv run python bundling/build.py --shape headless --plugins language_model --prefetch   # air-gapped headless
 
 Steps:
-    1. Validate plugin selection against the known + codable set.
-    2. Pre-fetch native binaries needed by the selected plugins.
+    1. Resolve shape + plugin selection + engine policy.
+    2. Pre-fetch native engines into the bundle when --prefetch is passed.
     3. Editable-install each plugin so its dist-info is visible to PyInstaller.
     4. Run PyInstaller (with LOCAI_BUNDLE_PLUGINS in the env).
     5. Write manifest.json into the bundle root.
@@ -36,18 +34,19 @@ from pathlib import Path
 
 from manifest import (
     PLUGIN_CODES,
-    derive_asset_name,
+    SHAPES,
+    asset_stem,
+    platform_tag,
     write_manifest,
 )
-from prefetch import PREFETCHERS, _platform_tag
+from prefetch import PREFETCHERS
 
 SPEC_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPEC_DIR.parent
 SPEC_FILE = SPEC_DIR / "locai-link.spec"
 
-# Bundleable plugins: the keys of PLUGIN_CODES, in canonical order. Anything
-# outside this set is a config error at parse time (a plugin without a code
-# would produce an un-nameable artifact).
+# Bundleable plugins: the keys of PLUGIN_CODES, in canonical order. A plugin
+# outside this set is a config error (no code for the manifest plugin_set).
 KNOWN_PLUGINS: list[str] = list(PLUGIN_CODES.keys())
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -59,17 +58,12 @@ def _have(cmd: str) -> bool:
 
 
 def _resolve_plugins(args: argparse.Namespace) -> tuple[str, ...]:
-    if not args.plugins:
-        raise SystemExit(
-            "No plugins selected. Pass --plugins <name> [<name> ...].\n"
-            f"Bundleable plugins: {', '.join(KNOWN_PLUGINS)}\n"
-            "Bare bundles aren't a release shape; use the curl source install instead."
-        )
-    unknown = [p for p in args.plugins if p not in KNOWN_PLUGINS]
+    plugins = args.plugins or []
+    unknown = [p for p in plugins if p not in KNOWN_PLUGINS]
     if unknown:
         raise SystemExit(f"Unknown plugins: {', '.join(unknown)}\nBundleable plugins: {', '.join(KNOWN_PLUGINS)}")
-    # De-dupe + canonicalise via PLUGIN_CODES order
-    seen = set(args.plugins)
+    # De-dupe + canonicalise via PLUGIN_CODES order. Empty = naked build.
+    seen = set(plugins)
     return tuple(p for p in KNOWN_PLUGINS if p in seen)
 
 
@@ -97,12 +91,19 @@ def ensure_plugins_installed(plugins: tuple[str, ...]) -> None:
         )
 
 
-def run_pyinstaller(plugins: tuple[str, ...]) -> Path:
+def run_pyinstaller(plugins: tuple[str, ...], prefetch: bool) -> Path:
     if not _have("pyinstaller"):
         raise SystemExit("pyinstaller not found. Run `uv sync --extra dev` first.")
     dist_dir = REPO_ROOT / "dist"
     build_dir = REPO_ROOT / "build"
-    env = {**os.environ, "LOCAI_BUNDLE_PLUGINS": ",".join(plugins)}
+    # LOCAI_BUNDLE_PREFETCH tells the spec whether to bake engine binaries into
+    # the bundle. Without it, engines are fetched on demand, so a plugin can be
+    # selected (its Python code ships) with no prefetched binaries present.
+    env = {
+        **os.environ,
+        "LOCAI_BUNDLE_PLUGINS": ",".join(plugins),
+        "LOCAI_BUNDLE_PREFETCH": "1" if prefetch else "0",
+    }
     cmd = [
         "pyinstaller",
         "--noconfirm",
@@ -160,7 +161,7 @@ def _ship_migration_finisher(versioned_dir: Path) -> None:
     """Ship the macOS migration finisher alongside the runtime so it is version-
     matched and present at ``<install_root>/current/finish-migration.sh`` after an
     OTA. The runtime runs it (via an admin prompt) to finish a pre-merge -> merged
-    transition. Small + harmless on platforms that never invoke it."""
+    transition. Only staged for the macOS desktop build (see the call site)."""
     src = SPEC_DIR / "finish-migration.sh"
     if not src.is_file():
         logger.warning(f"migration finisher not found at {src}; skipping")
@@ -204,41 +205,67 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--plugins",
-        nargs="+",
-        required=True,
+        nargs="*",
+        default=[],
         metavar="NAME",
-        help=f"Plugins to compile into the bundle. Bundleable: {', '.join(KNOWN_PLUGINS)}.",
+        help=f"Plugins to compile in (optional; omit for a naked build). Bundleable: {', '.join(KNOWN_PLUGINS)}.",
+    )
+    parser.add_argument(
+        "--shape",
+        choices=list(SHAPES),
+        default="headless",
+        help="Build shape: 'headless' (default; supervisor-only, no tray) or 'desktop' "
+        "(tray/setup app). Drives the Rust feature + asset name. Engine delivery is a "
+        "separate choice (see --prefetch).",
+    )
+    parser.add_argument(
+        "--prefetch",
+        action="store_true",
+        help="Bundle the plugins' native engines into the build. Without it, engines are "
+        "fetched from the artifact store on demand at first use. Same meaning for both "
+        "shapes (releases: desktop --prefetch, headless without).",
     )
     args = parser.parse_args()
 
     plugins = _resolve_plugins(args)
-    tag = _platform_tag(_pf.system(), _pf.machine())
-    asset_name = derive_asset_name(plugins)
+    shape = args.shape
+    prefetch = args.prefetch
+    tag = platform_tag(_pf.system(), _pf.machine())
+    asset_name = asset_stem(shape)
 
+    logger.info(f"== Shape: {shape} ==")
     logger.info(f"== Bundle target: {tag} ==")
-    logger.info(f"== Plugins: {', '.join(plugins)} ==")
+    logger.info(f"== Plugins: {', '.join(plugins) or '(none — naked)'} ==")
+    logger.info(f"== Engines: {'bundled (prefetch)' if prefetch else 'fetched on demand'} ==")
     logger.info(f"== Asset name: {asset_name} ==")
 
-    # build.py now produces only the runtime bundle (versions/ + current +
-    # manifest). The single `locai-link` binary is the Tauri app build (the
-    # supervisor + tray), staged into the install root by bundling (pack.sh /
-    # the pkg staging), so there is no separate launcher to compile here.
-    run_prefetch(plugins, tag)
+    # build.py produces the runtime bundle (versions/ + current + manifest). The
+    # single `locai-link` binary is the Rust build (feature per shape: ui for
+    # desktop, --no-default-features for headless), staged into the install root
+    # by pack.sh / the pkg staging.
+    if prefetch:
+        run_prefetch(plugins, tag)
+    else:
+        logger.info("== Engines fetched on demand from the artifact store (not bundled) ==")
     ensure_plugins_installed(plugins)
-    bundle_dir = run_pyinstaller(plugins)
+    bundle_dir = run_pyinstaller(plugins, prefetch)
 
     version = _read_root_version()
     logger.info(f"== Version: {version} ==")
     versioned_dir = restructure_to_versioned_layout(bundle_dir, version)
-    _ship_migration_finisher(versioned_dir)
-    manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT)
+    # The migration finisher is macOS-desktop-only (pre-merge -> merged transition).
+    # It has nothing to act on in a headless bundle or on Linux, so don't ship it there.
+    if _pf.system() == "Darwin" and shape == "desktop":
+        _ship_migration_finisher(versioned_dir)
+    manifest_path = write_manifest(versioned_dir, list(plugins), REPO_ROOT, shape)
 
     install_root = bundle_dir
     logger.info(f"Manifest written: {manifest_path}")
     logger.info(f"Runtime bundle root: {install_root}")
     logger.info(f"  Versioned bundle: {versioned_dir}")
+    rust_hint = "cargo tauri build" if shape == "desktop" else "cargo build --no-default-features"
     logger.info(
-        "Stage the `locai-link` app binary (cargo tauri build) into this root, "
+        f"Stage the `locai-link` {shape} binary ({rust_hint}) into this root, "
         f"then package as {asset_name}-{tag}-v{version}.tar.gz (.zip on Windows)."
     )
 

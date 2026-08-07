@@ -7,6 +7,9 @@
 
 pub mod supervisor;
 
+// Shape-agnostic device lifecycle (deregister / start / stop / restart / uninstall).
+pub mod lifecycle;
+
 // Folded-in platform/Control helpers.
 mod shared;
 

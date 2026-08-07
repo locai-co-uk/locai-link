@@ -48,15 +48,20 @@ def get_swap_manager(
     bin_dir: Path,
     allowed_origins: list[str] | None = None,
     on_telemetry: Callable[[dict[str, Any]], None] | None = None,
+    swap_bin: Path | None = None,
+    server_bin: Path | None = None,
 ) -> "SwapManager":
-    """Return the SwapManager for (host, port). ``allowed_origins`` is first-call only;
-    ``on_telemetry`` accumulates so multi-model servings each get their callback registered.
+    """Return the SwapManager for (host, port). ``allowed_origins``, ``swap_bin``
+    and ``server_bin`` are first-call only; ``on_telemetry`` accumulates so
+    multi-model servings each get their callback registered.
     """
     key = (host, port)
     with _global_lock:
         sm = _instances.get(key)
         if sm is None:
-            sm = SwapManager(port, host, bin_dir, allowed_origins=allowed_origins)
+            sm = SwapManager(
+                port, host, bin_dir, allowed_origins=allowed_origins, swap_bin=swap_bin, server_bin=server_bin
+            )
             _instances[key] = sm
         if on_telemetry is not None:
             sm.add_telemetry_callback(on_telemetry)
@@ -78,6 +83,8 @@ class SwapManager:
         host: str,
         bin_dir: Path,
         allowed_origins: list[str] | None = None,
+        swap_bin: Path | None = None,
+        server_bin: Path | None = None,
     ) -> None:
         self.port = port
         self._allowed_origins: list[str] = [o for o in (allowed_origins or []) if o]
@@ -86,8 +93,10 @@ class SwapManager:
         self._listen_port = port + self._PROXY_OFFSET
         self.host = host
         is_win = platform.system() == "Windows"
-        self._swap_bin = bin_dir / ("llama-swap.exe" if is_win else "llama-swap")
-        self._server_bin = bin_dir / ("llama-server.exe" if is_win else "llama-server")
+        # Explicit paths win (the two binaries may live in different engine
+        # caches when fetched on demand); bin_dir keeps the bundled layout.
+        self._swap_bin = swap_bin or bin_dir / ("llama-swap.exe" if is_win else "llama-swap")
+        self._server_bin = server_bin or bin_dir / ("llama-server.exe" if is_win else "llama-server")
         self._config_path = Path("configs") / f"swap_config_{port}.json"
         self._log_path = Path("logs") / f"llama-swap_{port}.log"
         self._pid_path = Path("state") / f"swap_{port}.pid"
@@ -158,7 +167,8 @@ class SwapManager:
         0 disables unloading; -1 keeps the model resident. Values below -1, and
         non-integers (including bools and floats), are rejected.
         """
-        if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < -1):
+        # Defensive runtime validation: callers may pass a non-int despite the type.
+        if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < -1):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ValueError(f"ttl must be None, -1, 0, or a positive integer; got {ttl!r}")
         with self._lock:
             self._models[model_id] = {

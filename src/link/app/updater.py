@@ -223,11 +223,11 @@ def read_manifest(root: Path) -> Manifest:
 
 def _platform_tag() -> str:
     """The ``<os>-<arch>`` segment the release workflow inserts into asset
-    names (e.g. ``linux-x86_64``). Must match the ``platform_tag`` matrix in
-    .github/workflows/release.yml."""
+    names (e.g. ``linux-x64``). Must match ``bundling/manifest.py::platform_tag``
+    and the ``platform_tag`` matrix in .github/workflows/release.yml."""
     os_tag = {"linux": "linux", "darwin": "macos", "win32": "windows"}.get(sys.platform, sys.platform)
     machine = platform.machine().lower()
-    arch_tag = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64", "aarch64": "arm64"}.get(machine, machine)
+    arch_tag = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(machine, machine)
     return f"{os_tag}-{arch_tag}"
 
 
@@ -255,9 +255,9 @@ def latest_release_for(
     its own platform's asset.
 
     ``repo`` / ``api_base`` fall back to ``LOCAI_RELEASES_REPO`` /
-    ``LOCAI_RELEASES_API_BASE`` for local testing (see bundling/serve_local_release.py),
-    but a frozen production bundle ignores those unless ``LOCAI_ALLOW_OTA_OVERRIDES``
-    is set, so the env can't redirect a real device's OTA.
+    ``LOCAI_RELEASES_API_BASE`` for local testing (point them at a local release
+    server), but a frozen production bundle ignores those unless
+    ``LOCAI_ALLOW_OTA_OVERRIDES`` is set, so the env can't redirect a real device's OTA.
     """
     allow_env = _ota_overrides_allowed()
     repo = repo or (os.environ.get("LOCAI_RELEASES_REPO") if allow_env else None) or DEFAULT_RELEASES_REPO
@@ -283,7 +283,7 @@ def latest_release_for(
     assets: Iterable[dict[str, Any]] = payload.get("assets") or []
     asset_match, sha_match = _pick_assets(assets, asset_stem, version, ptag)
     if asset_match is None:
-        raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}-v{version}.(tar.gz|zip)' on release {tag}")
+        raise ReleaseNotFound(f"No asset matching '{asset_stem}-{ptag}.(tar.gz|zip)' on release {tag}")
     checksums = next((a for a in assets if (a.get("name") or "").lower() == "checksums.txt"), None)
     return ReleaseInfo(
         version=version,
@@ -298,8 +298,14 @@ def latest_release_for(
 def _pick_assets(
     assets: Iterable[dict[str, Any]], stem: str, version: str, platform_tag: str
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    bundle_re = re.compile(rf"^{re.escape(stem)}-{re.escape(platform_tag)}-v{re.escape(version)}\.(tar\.gz|zip)$")
-    sha_re = re.compile(rf"^{re.escape(stem)}-{re.escape(platform_tag)}-v{re.escape(version)}\.(tar\.gz|zip)\.sha256$")
+    # Releases publish stable asset names (the tag carries the version); the
+    # versioned form is accepted as a fallback for locally packed test releases.
+    bundle_re = re.compile(
+        rf"^{re.escape(stem)}-{re.escape(platform_tag)}(-v{re.escape(version)})?\.(tar\.gz|zip)$"
+    )
+    sha_re = re.compile(
+        rf"^{re.escape(stem)}-{re.escape(platform_tag)}(-v{re.escape(version)})?\.(tar\.gz|zip)\.sha256$"
+    )
     bundle_match: dict[str, Any] | None = None
     sha_match: dict[str, Any] | None = None
     for a in assets:
@@ -1049,9 +1055,13 @@ _REINSTALL_EXT = {"darwin": "pkg", "linux": "tar.gz", "win32": "zip"}
 
 
 def _reinstall_url() -> str:
-    """Permanent 'latest' download URL for this host's platform/arch."""
+    """Permanent 'latest' download URL for this host's platform/arch. Desktop
+    stem: the UI drift check that consumes this is desktop-only."""
     ext = _REINSTALL_EXT.get(sys.platform, "pkg")
-    return f"https://github.com/{DEFAULT_RELEASES_REPO}/releases/latest/download/locai-link-{_platform_tag()}.{ext}"
+    return (
+        f"https://github.com/{DEFAULT_RELEASES_REPO}/releases/latest/download/"
+        f"locai-link-desktop-{_platform_tag()}.{ext}"
+    )
 
 
 def _companion_installed_version(install_root: Path) -> str | None:

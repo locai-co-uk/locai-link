@@ -58,6 +58,14 @@ pub fn run_supervisor() -> ExitCode {
     }
 }
 
+/// Headless service entry (`locai run`): supervise the runtime forever, idling
+/// until the device is registered (a session appears under `configs/`) and
+/// auto-starting it then.
+pub fn run_service() -> ExitCode {
+    supervise_forever(SupervisorControl::running());
+    ExitCode::from(2)
+}
+
 /// In-process control of the runtime child for the desktop (`ui`) build. The
 /// tray/preferences send Start/Stop/Restart and read status; `supervise_forever`
 /// honours them. Cloneable (Arc) so it can live in Tauri managed state.
@@ -135,6 +143,21 @@ enum Outcome {
     Exited(Option<i32>),
 }
 
+/// Hand build-time-baked endpoints to the runtime's environment. Explicit env
+/// wins: a value already present (service unit, shell) is never overridden.
+fn apply_baked_env(cmd: &mut Command) {
+    if let Some(base) = crate::shared::endpoints::ARTIFACT_BASE {
+        if env::var_os("LOCAI_ARTIFACT_BASE").is_none() {
+            cmd.env("LOCAI_ARTIFACT_BASE", base);
+        }
+    }
+    if let Some(api) = crate::shared::endpoints::CONTROL_API_BASE {
+        if env::var_os("LOCAI_API_URL").is_none() {
+            cmd.env("LOCAI_API_URL", api);
+        }
+    }
+}
+
 fn next_backoff(b: Duration) -> Duration {
     (b * 2).min(Duration::from_secs(30))
 }
@@ -183,6 +206,9 @@ pub fn supervise_forever(control: SupervisorControl) {
     };
     let poll = Duration::from_millis(200);
     let mut backoff = Duration::from_secs(1);
+    // Log the "waiting for registration" state once per idle stretch, so a
+    // foreground run (and the journal) shows it's idling, not stuck.
+    let mut awaiting_reg_logged = false;
 
     loop {
         if !control.want_running() {
@@ -196,10 +222,15 @@ pub fn supervise_forever(control: SupervisorControl) {
         // config-less runtime would exit 0 and latch the supervisor stopped.
         // Idle until `finish_setup` registers and re-arms.
         if crate::shared::read_identity(&install_root).is_none() {
+            if !awaiting_reg_logged {
+                eprintln!("[supervisor] not registered yet; idling until `locai register` runs");
+                awaiting_reg_logged = true;
+            }
             control.set_running(false);
             std::thread::sleep(poll);
             continue;
         }
+        awaiting_reg_logged = false;
 
         let version = match resolve_current_version(&install_root) {
             Some(v) => v,
@@ -240,11 +271,10 @@ pub fn supervise_forever(control: SupervisorControl) {
         // Always launch in `run` mode, from the install root: the runtime
         // resolves `configs/` relative to its cwd, and the supervisor otherwise
         // inherits the launcher's cwd ($HOME under systemd --user).
-        let mut child = match Command::new(&runtime)
-            .arg("run")
-            .current_dir(&install_root)
-            .spawn()
-        {
+        let mut command = Command::new(&runtime);
+        command.arg("run").current_dir(&install_root);
+        apply_baked_env(&mut command);
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[supervisor] spawn {}: {e}", runtime.display());
@@ -349,9 +379,10 @@ fn run() -> Result<u8, String> {
 
         // cwd = install root: the runtime resolves `configs/` relative to its
         // working directory, which otherwise inherits the launcher's ($HOME).
-        let status = Command::new(&runtime)
-            .args(&args)
-            .current_dir(&install_root)
+        let mut command = Command::new(&runtime);
+        command.args(&args).current_dir(&install_root);
+        apply_baked_env(&mut command);
+        let status = command
             .status()
             .map_err(|e| format!("failed to spawn {}: {e}", runtime.display()))?;
 
