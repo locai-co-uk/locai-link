@@ -15,11 +15,11 @@
 #                    the swap depends on, then reinstall-over-top preserves data.
 #   macos-uninstall— uninstall cleans everything AND refuses to run non-root.
 #   linux-roundtrip— install.sh → assert layout → uninstall.sh → assert clean.
-#   windows-headless-roundtrip — the real headless build through the real
-#                    installer: install.ps1 → Scheduled Task running → the
-#                    binary's own uninstall kills every process, deletes the
-#                    task, and removes every artifact. The only Windows
-#                    lifecycle coverage (no human tester).
+#   windows-headless-roundtrip — TEMPORARY: validates the uninstall fixes
+#                    (install.ps1 → Scheduled Task running → the binary's own
+#                    uninstall kills every process, deletes the task, removes
+#                    every artifact). Remove once the Windows uninstall path
+#                    is confirmed good in the field.
 #   shellcheck     — static analysis of every shipped shell script.
 #
 # Can't run headless (track as manual pre-release checks): companion tray/WebKit
@@ -327,11 +327,12 @@ jobs:
           [[ $fail -eq 0 ]] || exit 1
           echo "root uninstall cleaned every path"
 
-  # The real headless build through the real installer and the real uninstall.
-  # Every Windows uninstall bug so far lived in the interplay (task
-  # resurrection, path-scoped kills, verbatim paths, the detached cleanup
-  # script), so nothing here is synthesised: real frozen runtime, real
-  # Scheduled Task, real `locai-link.exe uninstall`.
+  # TEMPORARY (remove once the Windows uninstall path is confirmed good in
+  # the field): the real headless build through the real installer and the
+  # real uninstall. Every Windows uninstall bug so far lived in the interplay
+  # (task resurrection, path-scoped kills, verbatim paths, the detached
+  # cleanup script), so nothing here is synthesised: real frozen runtime,
+  # real Scheduled Task, real `locai-link.exe uninstall`.
   windows-headless-roundtrip:
     name: Windows headless install + uninstall roundtrip
     needs: [changes, linux-roundtrip, shellcheck]
@@ -455,7 +456,14 @@ jobs:
           $fail = $false
           if (Test-Path $root) {
             Write-Host "::error::install root still present after 90s"
-            Get-ChildItem -Recurse $root -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            Get-ChildItem $root -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            # Distinguish "cleanup never spawned" from "spawned but died":
+            # the CLI writes the script before spawning it.
+            $script = Join-Path $env:TEMP "locai-uninstall.ps1"
+            Write-Host "cleanup script present: $(Test-Path $script)"
+            $ps = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+              Where-Object { $_.CommandLine -like "*locai-uninstall*" }
+            Write-Host "cleanup powershell alive: $([bool]$ps)"
             $fail = $true
           }
           if (Get-ScheduledTask -TaskName $env:TASK_NAME -ErrorAction SilentlyContinue) {

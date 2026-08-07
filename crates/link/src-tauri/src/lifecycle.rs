@@ -370,9 +370,15 @@ $left = @(Get-Process -Name 'locai-link','locai-link-runtime' -ErrorAction Silen
     );
     let script_path = std::env::temp_dir().join("locai-uninstall.ps1");
     std::fs::write(&script_path, script).map_err(|e| format!("write cleanup script: {e}"))?;
+    // Null the stdio: the cleanup must outlive the invoking console/pipes, and
+    // inherited handles go dead when they close, killing PowerShell on its
+    // first host write.
     Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
         .arg(&script_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|e| format!("spawn cleanup: {e}"))?;

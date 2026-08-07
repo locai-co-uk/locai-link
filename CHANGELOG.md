@@ -45,6 +45,12 @@ sections below the summary. -->
   environment, so headless registration follows the baked environment too.
 - Updated minor dependencies: serde_json 1.0.151, tauri-plugin-dialog 2.7.2,
   libc 0.2.189, postcss 8.5.26, and the uv_build backend range to `<0.13`.
+- Hardened (pre-release review): the Linux/macOS installer stops a running
+  service before overwriting its files; the Windows installer verifies the
+  service actually started and writes its launcher with the correct encoding;
+  engine downloads are size-checked against the manifest before hashing;
+  uninstall resolves CLI symlinks before deciding they belong to the install;
+  and registration examples pass keys via the environment instead of argv.
 
 ## [1.2.3]
 
