@@ -69,15 +69,27 @@ fi
 # whenever a later (re)install recreates this script and silently wipes that
 # install. Tear it down on ANY exit (including an early error) so it can never
 # re-fire. The legacy submit can land the job in the console user's GUI domain
-# (observed) OR the system domain depending on the invoking context, so boot
-# BOTH out; whichever bootout owns this very process kills the script, so each
-# domain teardown must already have removed the job by the time it fires.
+# (observed) OR the system domain depending on the invoking context, so both
+# get booted out. Booting out the domain that owns THIS process kills the
+# script mid-function, so the owning domain (detected by its job pid matching
+# ours) must go LAST, after the other domain is already clean.
 # No-op for the direct `sudo uninstall.sh` path.
 _teardown_uninstall_job() {
+    _label="co.locai.link.uninstall"
     _uid=$(id -u "$(stat -f %Su /dev/console 2>/dev/null)" 2>/dev/null || echo "")
-    [[ -n "$_uid" ]] && launchctl bootout "gui/${_uid}/co.locai.link.uninstall" 2>/dev/null
-    launchctl bootout system/co.locai.link.uninstall 2>/dev/null
-    launchctl remove co.locai.link.uninstall 2>/dev/null || true
+    _gui_owns=0
+    if [[ -n "$_uid" ]] && launchctl print "gui/${_uid}/${_label}" 2>/dev/null | grep -qE "pid = $$\$"; then
+        _gui_owns=1
+    fi
+    if [[ "$_gui_owns" == "1" ]]; then
+        launchctl bootout "system/${_label}" 2>/dev/null
+        launchctl remove "${_label}" 2>/dev/null
+        launchctl bootout "gui/${_uid}/${_label}" 2>/dev/null || true
+    else
+        [[ -n "$_uid" ]] && launchctl bootout "gui/${_uid}/${_label}" 2>/dev/null
+        launchctl remove "${_label}" 2>/dev/null
+        launchctl bootout "system/${_label}" 2>/dev/null || true
+    fi
 }
 trap _teardown_uninstall_job EXIT
 

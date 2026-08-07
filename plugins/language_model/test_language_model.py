@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import io
+import logging
 import shutil
 import sys
 import time
@@ -14,8 +15,14 @@ import pytest
 import requests
 from link_language_model.adapter import LanguageModel  # type: ignore
 
+logger = logging.getLogger(__name__)
+
+# Real-engine test: downloads a model + runs llama-server. Excluded from a
+# plain local `pytest` (addopts -m "not ci"); CI runs it with -m "".
+pytestmark = pytest.mark.ci
+
 # Windows stdout defaults to cp1252 and can't encode Unicode/emoji in model
-# output — print() would then crash with UnicodeEncodeError. Force UTF-8.
+# output — logger.info() would then crash with UnicodeEncodeError. Force UTF-8.
 if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 if isinstance(sys.stderr, io.TextIOWrapper):
@@ -42,10 +49,10 @@ def _download_smollm2_with_retry(max_attempts: int = 4) -> bool:
             return True
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
             if attempt == max_attempts - 1:
-                print(f"SmolLM2 download failed after {max_attempts} attempts: {exc}")
+                logger.info(f"SmolLM2 download failed after {max_attempts} attempts: {exc}")
                 return False
             backoff = 2**attempt  # 1s, 2s, 4s, 8s
-            print(f"SmolLM2 download attempt {attempt + 1} failed ({exc}); retrying in {backoff}s")
+            logger.info(f"SmolLM2 download attempt {attempt + 1} failed ({exc}); retrying in {backoff}s")
             time.sleep(backoff)
     return False
 
@@ -54,7 +61,7 @@ def _download_smollm2_with_retry(max_attempts: int = 4) -> bool:
 def setup_teardown():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     if not MODEL_PATH.exists():
-        print(f"Downloading SmolLM2 to {MODEL_PATH}...")
+        logger.info(f"Downloading SmolLM2 to {MODEL_PATH}...")
         if not _download_smollm2_with_retry():
             # Skip, don't fail — external CDN we don't control; a transient
             # 429/outage shouldn't block unrelated PR merges.
@@ -69,7 +76,7 @@ def setup_teardown():
 
 def test_llm_server_mode_lifecycle():
     """Starts the LLM in 'serve' mode, checks HTTP health, runs a completion, and shuts down."""
-    print(f"\n[LLM] Starting Server on port {TEST_PORT}...")
+    logger.info(f"[LLM] Starting Server on port {TEST_PORT}...")
 
     agent = LanguageModel(model_path=MODEL_PATH, mode="serve", port=TEST_PORT, n_gpu_layers=0, alias="test-model")
     swap_mode = agent._swap_manager is not None
@@ -88,25 +95,25 @@ def test_llm_server_mode_lifecycle():
             assert psutil.pid_exists(pid), "Server process should exist"
 
         health_url = f"http://127.0.0.1:{TEST_PORT}/health"
-        print(f"[LLM] Checking Health: {health_url}")
+        logger.info(f"[LLM] Checking Health: {health_url}")
         resp = requests.get(health_url, timeout=5)
         assert resp.status_code == 200
-        print("[LLM] Health Check Passed")
+        logger.info("[LLM] Health Check Passed")
 
         chat_url = f"http://127.0.0.1:{TEST_PORT}/v1/chat/completions"
         # model field required by llama-swap for routing; ignored by direct llama-server
         payload = {"model": "test-model", "messages": [{"role": "user", "content": "Say 'hello'."}], "max_tokens": 10}
-        print("[LLM] Sending Inference Request...")
+        logger.info("[LLM] Sending Inference Request...")
         # Longer timeout for swap mode: first request triggers llama-server start + model load
         resp = requests.post(chat_url, json=payload, timeout=120)
         assert resp.status_code == 200
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-        print(f"[LLM] Response: {content}")
+        logger.info(f"[LLM] Response: {content}")
         assert len(content) > 0
 
     finally:
-        print("\n[LLM] Stopping server...")
+        logger.info("[LLM] Stopping server...")
         agent.stop()
         time.sleep(2)  # Give OS time to reap process
 

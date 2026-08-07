@@ -17,32 +17,35 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-def resolve_engine_binary(engine: str, filename: str, bin_dir: Path) -> Path | None:
-    """Resolve an engine binary: bundled bin dir, then PATH, then (frozen
-    bundles only) an on-demand artifact-store fetch into the engine cache.
-    Prefetch builds resolve at step 1, so the store cache is never duplicated
-    beside a bundled copy."""
+def resolve_engine_binary(engine: str, filename: str, bin_dir: Path, version: str | None = None) -> Path | None:
+    """Resolve an engine binary. Frozen bundles use only trusted sources: the
+    bundled bin dir, else an on-demand checksum-verified artifact-store fetch
+    pinned to ``version`` (never PATH, which a modified service environment
+    could poison). Source runs additionally accept a PATH binary as a dev
+    convenience. Prefetch builds resolve at step 1, so the store cache is never
+    duplicated beside a bundled copy."""
     candidate = bin_dir / filename
     if candidate.exists():
         return candidate
 
-    path_bin = shutil.which(filename)
-    if path_bin:
-        return Path(path_bin)
+    frozen = getattr(sys, "frozen", False)
+    if not frozen:
+        path_bin = shutil.which(filename)
+        if path_bin:
+            return Path(path_bin)
+        # Soft import below: only the bundled runtime exposes link.infra.engines;
+        # source runs keep the bin_dir/install.py path.
+        return None
 
-    # Soft import: only the bundled runtime exposes link.infra.engines; source
-    # runs keep the bin_dir/install.py path.
-    if getattr(sys, "frozen", False):
-        try:
-            from link.infra import engines
+    try:
+        from link.infra import engines
 
-            return engines.binary_path(engine, filename)
-        except Exception as e:  # noqa: BLE001
-            # Surface the reason (store 404, network, bad hash): this is the
-            # last resolution step, so a silent fall-through reads as
-            # "binary just missing" with no diagnosable cause.
-            logger.warning(f"on-demand {engine} fetch failed: {e}")
-
+        return engines.binary_path(engine, filename, version=version)
+    except Exception as e:  # noqa: BLE001
+        # Surface the reason (store 404, network, bad hash): this is the
+        # last resolution step, so a silent fall-through reads as
+        # "binary just missing" with no diagnosable cause.
+        logger.warning(f"on-demand {engine} fetch failed: {e}")
     return None
 
 
@@ -95,9 +98,13 @@ class ModelServer:
         }
 
     def _get_server_binary(self):
-        """Locates the platform-specific binary."""
+        """Locates the platform-specific binary, pinned to the plugin's release."""
+        try:
+            from .install import LLAMA_CPP_RELEASE
+        except ImportError:
+            from install import LLAMA_CPP_RELEASE
         binary_name = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
-        return resolve_engine_binary("llama-cpp", binary_name, self.bin_dir)
+        return resolve_engine_binary("llama-cpp", binary_name, self.bin_dir, version=LLAMA_CPP_RELEASE)
 
     def start(self):
         if self.running:

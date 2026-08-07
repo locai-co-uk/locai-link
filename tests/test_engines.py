@@ -15,7 +15,8 @@ from link.infra import engines
 
 
 def _fake_ensure(binary_name="llama-server"):
-    def _inner(name, dest_dir: Path, base=None, **_kw):
+    def _inner(name, version=None, dest_dir: Path | None = None, base=None, **_kw):
+        assert dest_dir is not None
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / binary_name).write_text("fake", encoding="utf-8")
         return dest_dir
@@ -26,14 +27,16 @@ def _fake_ensure(binary_name="llama-server"):
 def test_provision_uses_per_engine_dir(tmp_path, monkeypatch):
     seen = {}
 
-    def _capture(name, dest_dir: Path, base=None, **_kw):
-        seen.update(name=name, dest=dest_dir)
+    def _capture(name, version=None, dest_dir: Path | None = None, base=None, **_kw):
+        seen.update(name=name, version=version, dest=dest_dir)
+        assert dest_dir is not None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(engines.artifact_store, "ensure_engine", _capture)
-    d = engines.provision("llama-cpp", install_root=tmp_path)
+    d = engines.provision("llama-cpp", version="b10289", install_root=tmp_path)
     assert d == tmp_path / "engines" / "llama-cpp"  # own dir (no clobber with llama-swap)
     assert seen["name"] == "llama-cpp" and seen["dest"] == d
+    assert seen["version"] == "b10289"  # the plugin pin reaches the store fetch
 
 
 def test_binary_path_resolves_server(tmp_path, monkeypatch):

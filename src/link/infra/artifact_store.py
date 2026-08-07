@@ -382,8 +382,9 @@ def _engine_lock(lock_path: Path) -> Iterator[None]:
                 try:
                     fh.seek(0)
                     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # Non-fatal: the byte lock dies with the handle anyway.
+                    logger.debug(f"engine unlock failed ({exc})", exc_info=True)
             # POSIX flock releases on close.
 
 

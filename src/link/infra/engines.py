@@ -42,22 +42,37 @@ def engine_cache_root(install_root: Path | None = None) -> Path:
     return _install_root(install_root) / "engines"
 
 
-def provision(name: str, *, install_root: Path | None = None, base: str | None = None) -> Path:
+def provision(
+    name: str,
+    *,
+    version: str | None = None,
+    install_root: Path | None = None,
+    base: str | None = None,
+) -> Path:
     """Ensure engine ``name`` is present + verified on this device, fetching it
     from the artifact store on demand, and return the directory its binary is in.
-    Version is the store manifest's per-engine default. Idempotent."""
+    ``version`` pins the fetch (plugins pass their vetted release constant so the
+    store's default can never drift a device off the pin); None takes the store
+    manifest's per-engine default. Idempotent."""
     dest = engine_cache_root(install_root) / name
-    artifact_store.ensure_engine(name, dest_dir=dest, base=base)
+    artifact_store.ensure_engine(name, version, dest_dir=dest, base=base)
     return dest
 
 
-def binary_path(name: str, binary: str, *, install_root: Path | None = None, base: str | None = None) -> Path:
+def binary_path(
+    name: str,
+    binary: str,
+    *,
+    version: str | None = None,
+    install_root: Path | None = None,
+    base: str | None = None,
+) -> Path:
     """Provision engine ``name`` and return the full path to its server binary.
 
     ``binary`` is the server filename the calling plugin declares (already
     platform-resolved, e.g. ``llama-server`` / ``llama-server.exe``), so core
     holds no per-engine knowledge. Raises if it is not in the fetched archive."""
-    bin_dir = provision(name, install_root=install_root, base=base)
+    bin_dir = provision(name, version=version, install_root=install_root, base=base)
     p = bin_dir / binary
     if p.exists():
         return p

@@ -22,11 +22,11 @@ import requests
 from colorama import Fore, Style
 
 try:
-    from .install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
+    from .install import BIN_LLAMA_DIR, LLAMA_CPP_RELEASE, LLAMA_SWAP_RELEASE, _is_swap_installed
     from .server import ModelServer, resolve_engine_binary
     from .swap_manager import SwapManager, get_swap_manager
 except ImportError:  # flat layout fallback
-    from install import BIN_LLAMA_DIR, LLAMA_SWAP_RELEASE, _is_swap_installed
+    from install import BIN_LLAMA_DIR, LLAMA_CPP_RELEASE, LLAMA_SWAP_RELEASE, _is_swap_installed
     from server import ModelServer, resolve_engine_binary
     from swap_manager import SwapManager, get_swap_manager
 
@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 def _resolve_swap_binary() -> Path | None:
     """llama-swap for serve mode: the bundled copy (tag-checked on source runs
-    via _is_swap_installed), else an on-demand store fetch in frozen bundles."""
+    via _is_swap_installed), else an on-demand store fetch in frozen bundles,
+    pinned to the plugin's release so the store default can't drift it."""
     filename = "llama-swap.exe" if platform.system() == "Windows" else "llama-swap"
     if _is_swap_installed(LLAMA_SWAP_RELEASE):
         return BIN_LLAMA_DIR / filename
@@ -44,7 +45,7 @@ def _resolve_swap_binary() -> Path | None:
         try:
             from link.infra import engines
 
-            return engines.binary_path("llama-swap", filename)
+            return engines.binary_path("llama-swap", filename, version=LLAMA_SWAP_RELEASE)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"on-demand llama-swap fetch failed: {e}")
     return None
@@ -91,7 +92,11 @@ class LanguageModel:
             # different engine caches on an on-demand install.
             swap_bin = _resolve_swap_binary()
             server_filename = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
-            server_bin = resolve_engine_binary("llama-cpp", server_filename, BIN_LLAMA_DIR) if swap_bin else None
+            server_bin = (
+                resolve_engine_binary("llama-cpp", server_filename, BIN_LLAMA_DIR, version=LLAMA_CPP_RELEASE)
+                if swap_bin
+                else None
+            )
             if swap_bin is not None and server_bin is not None:
                 self._swap_manager = get_swap_manager(
                     self.port,
