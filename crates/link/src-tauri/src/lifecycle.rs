@@ -216,8 +216,24 @@ fn remove_service(u: &ServiceUnit) {
     }
     #[cfg(target_os = "windows")]
     {
+        // /End is asynchronous; deleting while an instance still runs can fail
+        // silently, and a surviving definition resurrects the service via
+        // restart-on-failure, re-locking the install root mid-uninstall. Kill
+        // the tree first, then delete, then verify the definition is gone.
         let _ = run_ok("schtasks", &["/End", "/TN", u.label]);
-        let _ = run_ok("schtasks", &["/Delete", "/TN", u.label, "/F"]);
+        kill_install_processes(&install_root());
+        let mut deleted = false;
+        for _ in 0..10 {
+            let _ = run_ok("schtasks", &["/Delete", "/TN", u.label, "/F"]);
+            if run_ok("schtasks", &["/Query", "/TN", u.label]).is_err() {
+                deleted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if !deleted {
+            eprintln!("warning: scheduled task {} still registered; remove it manually", u.label);
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
