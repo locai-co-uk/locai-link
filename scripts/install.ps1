@@ -167,6 +167,12 @@ try {
     if ($task -and $task.State -in @("Running", "Queued")) {
         Die "scheduled task $Label did not stop; aborting before file replacement"
     }
+    # Stopping the task only terminates the scheduler-launched launcher; the
+    # service exe can survive it and would hold the file lock. Path-scoped so
+    # other checkouts' binaries are untouched.
+    Get-Process -Name locai-link, locai-link-runtime -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like "$InstallRoot*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
     # tar ships with Windows 10+. --strip-components=1 drops the <name>/ wrapper so
     # locai-link.exe + versions/ + boot.json land at the install-root top (matches install.sh).
     tar -xzf $tarball -C $InstallRoot --strip-components=1
