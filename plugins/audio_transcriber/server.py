@@ -160,7 +160,10 @@ class WhisperServer:
         ]
         use_gpu = self.use_gpu if self.use_gpu is not None else _gpu_available()
         if not use_gpu:
-            cmd.append("--no-gpu")
+            # Flash attention defaults on in current whisper prebuilts; its CPU
+            # path is unproven across older cores, so keep CPU-only runs on the
+            # plain kernels.
+            cmd.extend(["--no-gpu", "--no-flash-attn"])
 
         # Optional parameters
         param_map = {
@@ -209,10 +212,16 @@ class WhisperServer:
             logger.info("Whisper server is ready.")
         elif not self._stop_event.is_set():
             # Genuine health failure — not a stop()-triggered cancellation.
-            # Surface the server's own log so operators can see WHY it didn't
-            # come up (missing DLL, model-load error, etc.).
-            logger.error("Whisper server failed to respond to health check.", extra={"category": "health"})
-            self._log_tail()
+            # Surface the server's own log and exit status so operators can see
+            # WHY it didn't come up. A negative exit code is the killing signal
+            # (-4 SIGILL, -6 SIGABRT, -11 SIGSEGV), which a silent crash never
+            # writes into the log itself.
+            rc = self.process.poll() if self.process else None
+            logger.error(
+                f"Whisper server failed to respond to health check (process exit: {rc}).",
+                extra={"category": "health"},
+            )
+            self._log_tail(lines=40)
             self.stop()
 
     def _log_tail(self, lines: int = 20):

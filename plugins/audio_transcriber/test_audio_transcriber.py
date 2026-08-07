@@ -34,17 +34,39 @@ AUDIO_PATH = TEMP_DIR / "jfk.wav"
 TEST_PORT = 8098
 
 
-def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
-    """Download url to path, retrying on 429 with jittered backoff.
+def _remote_size(url: str) -> int | None:
+    """Content-Length of ``url`` via HEAD, or None when unavailable."""
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            size = resp.headers.get("Content-Length")
+            return int(size) if size else None
+    except Exception:  # noqa: BLE001 - validation is best-effort
+        return None
 
-    Returns False when 429 retries are exhausted (CDN rate-limiting — caller
-    should skip). Non-429 HTTP errors raise so genuine bugs surface.
+
+def _download(url: str, path: Path, label: str, max_attempts: int = 5) -> bool:
+    """Download url to path, retrying on 429 and on truncated transfers.
+
+    The byte count is checked against Content-Length before the file is
+    accepted: a truncated model gets cached between runs and then crashes the
+    engine at load with no useful log. Returns False when retries are
+    exhausted (CDN rate-limiting — caller should skip). Non-429 HTTP errors
+    raise so genuine bugs surface.
     """
     for attempt in range(1, max_attempts + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req) as resp, open(path, "wb") as f:
+                expected = resp.headers.get("Content-Length")
                 shutil.copyfileobj(resp, f)  # type: ignore
+            if expected and path.stat().st_size != int(expected):
+                logger.info(f"{label} download truncated ({path.stat().st_size}/{expected} bytes).")
+                path.unlink(missing_ok=True)
+                if attempt == max_attempts:
+                    return False
+                time.sleep(min(2**attempt, 60))
+                continue
             return True
         except urllib.error.HTTPError as exc:
             if exc.code != 429:
@@ -67,6 +89,13 @@ def setup_teardown():
         (MODEL_URL, MODEL_PATH, "ggml-tiny"),
         (AUDIO_URL, AUDIO_PATH, "JFK sample"),
     ]:
+        # A truncated cached file (interrupted earlier run) poisons every run
+        # that follows; validate the cache against the remote size.
+        if path.exists():
+            expected = _remote_size(url)
+            if expected is not None and path.stat().st_size != expected:
+                logger.info(f"cached {label} is {path.stat().st_size} bytes, expected {expected}; re-downloading.")
+                path.unlink()
         if not path.exists():
             logger.info(f"Downloading {label} to {path}...")
             if not _download(url, path, label):
