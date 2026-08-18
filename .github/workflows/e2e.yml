@@ -440,15 +440,14 @@ jobs:
           }
           Write-Host "service running: pid $(@($proc)[0].Id) at $(@($proc)[0].Path)"
 
-      - name: Uninstall via the real binary
+      - name: Uninstall via the real binary, assert everything is gone
+        # One step on purpose: the runner reaps a step's leftover descendant
+        # processes when the step ends, which kills the detached cleanup
+        # before it runs. Waiting in the same step observes the real behavior.
         shell: pwsh
         run: |
           & (Join-Path $env:LOCAI_INSTALL_ROOT "locai-link.exe") uninstall
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::uninstall exited $LASTEXITCODE"; exit 1 }
-
-      - name: Assert every process, task, and artifact is gone
-        shell: pwsh
-        run: |
           $root = $env:LOCAI_INSTALL_ROOT
           # File removal is handed to a detached cleanup script; wait it out.
           $deadline = (Get-Date).AddSeconds(90)

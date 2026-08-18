@@ -37,6 +37,7 @@ import os
 import platform
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -207,13 +208,29 @@ class Manifest:
         raise VariantNotFound(f"{capability}/{name}/{version}: none of {candidates} in manifest")
 
 
+def _build_ssl_context() -> ssl.SSLContext:
+    """TLS context for store fetches. Uses the default trust store, which honours
+    SSL_CERT_FILE / SSL_CERT_DIR (the escape hatch a managed machine behind a
+    corporate TLS proxy needs), and falls back to certifi only when that store is
+    empty, as in a frozen build with no OS trust store."""
+    ctx = ssl.create_default_context()
+    if ctx.cert_store_stats()["x509_ca"] == 0:
+        import certifi
+
+        ctx.load_verify_locations(cafile=certifi.where())
+    return ctx
+
+
+_SSL_CTX = _build_ssl_context()
+
+
 def _http_get(url: str, timeout: int, max_bytes: int | None = None) -> bytes:
     """GET ``url`` into memory, retrying transient failures. Cross-host CDNs drop
     connections; 4xx fails fast, 5xx/network retries. Optional size cap."""
     attempts = 3
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - fixed https/file base
+            with urllib.request.urlopen(url, timeout=timeout, context=_SSL_CTX) as resp:  # noqa: S310 - fixed https/file base
                 data = resp.read(max_bytes + 1) if max_bytes else resp.read()
             if max_bytes and len(data) > max_bytes:
                 raise ArtifactStoreError(f"response from {url} exceeds {max_bytes} bytes")
@@ -252,7 +269,10 @@ def _download_to(url: str, dest: Path) -> None:
     attempts = 3
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as resp, open(partial, "wb") as fh:  # noqa: S310
+            with (
+                urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT, context=_SSL_CTX) as resp,
+                open(partial, "wb") as fh,
+            ):  # noqa: S310
                 shutil.copyfileobj(resp, fh)
             os.replace(partial, dest)
             return
