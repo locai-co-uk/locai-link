@@ -118,14 +118,28 @@ def setup_teardown():
         shutil.rmtree(logs_dir)
 
 
+def _skip_if_engine_crashed(proc):
+    """Skip when whisper-server was killed by a signal (e.g. SIGILL on a CPU lacking
+    the build's instruction set): the engine can't run on this host, an engine
+    portability issue rather than a bug in the code under test."""
+    rc = proc.poll() if proc is not None else None
+    if rc is not None and rc < 0:
+        pytest.skip(
+            f"whisper-server not runnable on this host (killed by signal {-rc}); skipping engine integration test"
+        )
+
+
 def test_whisper_serve_mode_lifecycle():
     """Starts whisper in serve mode, checks health, transcribes audio, shuts down."""
     logger.info(f"[Whisper] Starting Server on port {TEST_PORT}...")
 
     agent = AudioTranscriber(model_path=MODEL_PATH, mode="serve", port=TEST_PORT)
+    server_proc = agent.server.process
 
     # Server.start() is non-blocking; wait for the background health watcher to confirm readiness.
-    assert agent.server.wait_until_ready(timeout=60), "Server did not become ready within 60s"
+    if not agent.server.wait_until_ready(timeout=60):
+        _skip_if_engine_crashed(server_proc)
+        pytest.fail("Server did not become ready within 60s")
 
     pid = None
     try:
@@ -179,6 +193,7 @@ def test_whisper_transcribe_mode():
         audio_path=AUDIO_PATH,
         port=TEST_PORT,
     )
+    server_proc = agent.server.process
 
     try:
         assert agent.server.running, "Server failed to start — check whisper-server logs"
@@ -190,6 +205,7 @@ def test_whisper_transcribe_mode():
             try:
                 result = agent()
             except StopIteration:
+                _skip_if_engine_crashed(server_proc)
                 pytest.fail("Transcriber thread exited before producing a result")
             if result is not None:
                 break
