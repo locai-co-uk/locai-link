@@ -447,7 +447,10 @@ jobs:
         shell: pwsh
         run: |
           $log = Join-Path $env:TEMP "locai-uninstall.log"
-          Remove-Item $log -Force -ErrorAction SilentlyContinue
+          # Only delete an existing log, and let a real removal failure fail the
+          # step (pwsh runs with ErrorActionPreference=stop) rather than silently
+          # leave a stale log that the wait/validation below would accept.
+          if (Test-Path $log) { Remove-Item $log -Force }
           & (Join-Path $env:LOCAI_INSTALL_ROOT "locai-link.exe") uninstall
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::uninstall exited $LASTEXITCODE"; exit 1 }
           $root = $env:LOCAI_INSTALL_ROOT
