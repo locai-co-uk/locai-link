@@ -446,12 +446,17 @@ jobs:
         # before it runs. Waiting in the same step observes the real behavior.
         shell: pwsh
         run: |
+          $log = Join-Path $env:TEMP "locai-uninstall.log"
+          Remove-Item $log -Force -ErrorAction SilentlyContinue
           & (Join-Path $env:LOCAI_INSTALL_ROOT "locai-link.exe") uninstall
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::uninstall exited $LASTEXITCODE"; exit 1 }
           $root = $env:LOCAI_INSTALL_ROOT
-          # File removal is handed to a detached cleanup script; wait it out.
+          # File removal is handed to a detached cleanup script that deletes the
+          # root before writing its log, so wait for both to settle.
           $deadline = (Get-Date).AddSeconds(90)
-          while ((Get-Date) -lt $deadline -and (Test-Path $root)) { Start-Sleep -Seconds 2 }
+          while ((Get-Date) -lt $deadline -and ((Test-Path $root) -or -not (Test-Path $log))) {
+            Start-Sleep -Seconds 2
+          }
           $fail = $false
           if (Test-Path $root) {
             Write-Host "::error::install root still present after 90s"
@@ -473,7 +478,6 @@ jobs:
           if ($left) {
             Write-Host "::error::processes still running after uninstall: $(($left | ForEach-Object { $_.Id }) -join ', ')"; $fail = $true
           }
-          $log = Join-Path $env:TEMP "locai-uninstall.log"
           if (-not (Test-Path $log)) {
             Write-Host "::error::cleanup log missing at $log — detached cleanup never ran"; $fail = $true
           } else {

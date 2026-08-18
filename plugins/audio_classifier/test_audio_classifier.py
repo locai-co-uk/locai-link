@@ -51,8 +51,9 @@ def setup_teardown():
             # 429/outage shouldn't block unrelated PR merges.
             pytest.skip("YAMNet CDN unavailable; skipping audio_classifier integration test.")
     yield
-    if TEMP_DIR.exists():
-        shutil.rmtree(TEMP_DIR)
+    # TFLite mmaps the model and Windows refuses to unlink an open file, so this
+    # cleanup is best-effort; the temp dir is disposable (and caches the model).
+    shutil.rmtree(TEMP_DIR, ignore_errors=True)
 
 
 def test_audio_callback_architecture(mocker, caplog):
