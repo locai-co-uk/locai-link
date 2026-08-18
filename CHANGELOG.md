@@ -6,6 +6,13 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
+## [Unreleased]
+
+- Fixed: a freshly installed headless device could fail to download its inference
+  engines and so never start a deployed model. The engine download now trusts a
+  certificate store the packaged build can always find, so it works out of the box
+  on Linux, macOS, and Windows (and still honours a corporate certificate override).
+
 ## [1.3.0]
 
 - Added: a headless install for Linux, macOS, and Windows servers. One pasted

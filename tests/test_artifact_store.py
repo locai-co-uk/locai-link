@@ -183,3 +183,25 @@ def test_variant_candidates_cpu_only_without_gpu(monkeypatch):
     monkeypatch.setattr(store.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(store, "_has_gpu", lambda: False)
     assert store.variant_candidates() == ["linux-x64"]
+
+
+def test_build_ssl_context_empty_store_loads_certifi(mocker):
+    # Frozen build with no OS trust store: fall back to certifi.
+    ctx = mocker.MagicMock()
+    ctx.cert_store_stats.return_value = {"x509_ca": 0}
+    mocker.patch("link.infra.artifact_store.ssl.create_default_context", return_value=ctx)
+    where = mocker.patch("certifi.where", return_value="/fake/cacert.pem")
+    assert store._build_ssl_context() is ctx
+    where.assert_called_once()
+    ctx.load_verify_locations.assert_called_once_with(cafile="/fake/cacert.pem")
+
+
+def test_build_ssl_context_populated_store_skips_certifi(mocker):
+    # A populated default store (system CAs or SSL_CERT_FILE): no certifi fallback.
+    ctx = mocker.MagicMock()
+    ctx.cert_store_stats.return_value = {"x509_ca": 7}
+    mocker.patch("link.infra.artifact_store.ssl.create_default_context", return_value=ctx)
+    where = mocker.patch("certifi.where")
+    assert store._build_ssl_context() is ctx
+    where.assert_not_called()
+    ctx.load_verify_locations.assert_not_called()
