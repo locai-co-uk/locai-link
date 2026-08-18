@@ -9,6 +9,7 @@ verifies health + transcription, then shuts down cleanly.
 
 import logging
 import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -118,7 +119,7 @@ def setup_teardown():
         shutil.rmtree(logs_dir)
 
 
-def _skip_if_engine_crashed(proc):
+def _skip_if_engine_crashed(proc: subprocess.Popen | None) -> None:
     """Skip when whisper-server was killed by a signal (e.g. SIGILL on a CPU lacking
     the build's instruction set): the engine can't run on this host, an engine
     portability issue rather than a bug in the code under test."""
@@ -136,13 +137,14 @@ def test_whisper_serve_mode_lifecycle():
     agent = AudioTranscriber(model_path=MODEL_PATH, mode="serve", port=TEST_PORT)
     server_proc = agent.server.process
 
-    # Server.start() is non-blocking; wait for the background health watcher to confirm readiness.
-    if not agent.server.wait_until_ready(timeout=60):
-        _skip_if_engine_crashed(server_proc)
-        pytest.fail("Server did not become ready within 60s")
-
     pid = None
     try:
+        # Server.start() is non-blocking; wait for the health watcher to confirm readiness.
+        # Inside the try so a signal-skip still hits the finally that stops the agent.
+        if not agent.server.wait_until_ready(timeout=60):
+            _skip_if_engine_crashed(server_proc)
+            pytest.fail("Server did not become ready within 60s")
+
         assert agent.server.running, "Server failed to start — check whisper-server logs"
         assert agent.server.process is not None
         pid = agent.server.process.pid
@@ -196,7 +198,9 @@ def test_whisper_transcribe_mode():
     server_proc = agent.server.process
 
     try:
-        assert agent.server.running, "Server failed to start — check whisper-server logs"
+        if not agent.server.running:
+            _skip_if_engine_crashed(server_proc)
+            pytest.fail("Server failed to start — check whisper-server logs")
 
         # Wait for the transcription to complete
         result = None
