@@ -32,6 +32,7 @@ INSTALL_ROOT="${LOCAI_INSTALL_ROOT:-$HOME/.local/share/locai}"
 LABEL="uk.co.locai.link.headless"      # macOS launchd label (reverse-DNS)
 UNIT="locai-link-headless.service"     # Linux systemd unit (kebab, parity with desktop)
 BIN="$INSTALL_ROOT/locai-link"
+LOCAI_CMD="locai"                      # CLI name for hints; link_cli() may switch to a full path when off-PATH
 
 log() { printf '%s\n' "$*"; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -49,7 +50,6 @@ if [ -n "${LOCAI_FLEET_KEY:-}" ];        then REG_KIND="--fleet-key";        REG
 export LOCAI_REGISTRATION_KEY LOCAI_FLEET_KEY
 
 has_session() { for f in "$INSTALL_ROOT"/configs/session_*.json; do [ -f "$f" ] && return 0; done; return 1; }
-on_path()     { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
 
 detect_platform() {
     os="$(uname -s)"; machine="$(uname -m)"
@@ -96,7 +96,15 @@ link_cli() {
     if [ "$(uname -s)" = "Darwin" ] && [ -w /usr/local/bin ]; then CLI_DIR="/usr/local/bin"; else CLI_DIR="$HOME/.local/bin"; fi
     mkdir -p "$CLI_DIR"
     ln -sf "$BIN" "$CLI_DIR/locai"
-    on_path "$CLI_DIR" || log "note: $CLI_DIR is not on PATH; add it, or run $CLI_DIR/locai directly."
+    # Use the bare `locai` in hints only when the shell resolves it to the binary
+    # we just linked; another `locai` earlier on PATH (or a CLI_DIR not on PATH)
+    # would otherwise make the hints target the wrong install. Else full path + flag
+    # so the closing output shows the PATH fix.
+    if [ "$(command -v locai 2>/dev/null)" = "$CLI_DIR/locai" ]; then
+        CLI_OFF_PATH=0; LOCAI_CMD="locai"
+    else
+        CLI_OFF_PATH=1; LOCAI_CMD="$CLI_DIR/locai"
+    fi
 }
 
 # Install + (re)start the per-user service (idempotent). The unit is keyless
@@ -161,19 +169,35 @@ installed_note() {
 register_hint() {
     log ""
     log "This device isn't connected yet. Register it with a key from Control:"
-    log "  locai register --registration-key <KEY>     # single device"
-    log "  locai register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+    log "  $LOCAI_CMD register --registration-key <KEY>     # single device"
+    log "  $LOCAI_CMD register --fleet-key <KEY|file:PATH>  # fleet enrollment"
+}
+
+# Loud PATH fix when `locai` landed off-PATH (macOS ~/.local/bin fallback). The
+# hints already use the full path; this is how to make the short `locai` work.
+cli_path_warning() {
+    [ "${CLI_OFF_PATH:-0}" = 1 ] || return 0
+    log ""
+    log "IMPORTANT: 'locai' was installed to $CLI_DIR, which is not on your PATH."
+    case "${SHELL##*/}" in
+        zsh)  log "Add it, then open a new terminal so 'locai' works everywhere:"
+              log "  echo 'export PATH=\"$CLI_DIR:\$PATH\"' >> ~/.zshrc" ;;
+        bash) log "Add it, then open a new terminal so 'locai' works everywhere:"
+              log "  echo 'export PATH=\"$CLI_DIR:\$PATH\"' >> ~/.bashrc" ;;
+        *)    log "Add $CLI_DIR to your shell's PATH, then open a new terminal so 'locai' works everywhere." ;;
+    esac
 }
 
 footer() {
+    cli_path_warning
     log ""
-    log "Check it with 'locai status', or 'locai --help' for all commands."
+    log "Check it with '$LOCAI_CMD status', or '$LOCAI_CMD --help' for all commands."
     if [ "$(uname -s)" = "Linux" ]; then
         log "Service logs: journalctl --user -u $UNIT -f"
     else
         log "Service logs: $INSTALL_ROOT/logs/service.log"
     fi
-    log "To uninstall: locai uninstall"
+    log "To uninstall: $LOCAI_CMD uninstall"
 }
 
 # --- re-run handling: do not clobber an existing install -------------

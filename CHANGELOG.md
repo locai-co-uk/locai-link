@@ -6,12 +6,21 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
-## [Unreleased]
+## [1.3.2]
 
 - Fixed: a freshly installed headless device could fail to download its inference
   engines and so never start a deployed model. The engine download now trusts a
   certificate store the packaged build can always find, so it works out of the box
   on Linux, macOS, and Windows (and still honours a corporate certificate override).
+- Fixed: on macOS, starting Locai Link could fail with an "Input/output error" and
+  leave the device showing offline until a manual restart. Starting the service is
+  now reliable whether or not it was already loaded.
+- Fixed: on a macOS account without admin rights, the headless installer put the
+  `locai` command outside the default PATH, so it looked missing. The installer now
+  shows the one-line PATH fix and prints commands that run as-is.
+- Fixed: registering or re-enrolling a device while the service is already running
+  now takes effect immediately — the agent adopts the new identity and comes online
+  without a manual restart, instead of sitting offline until it was restarted.
 
 ## [1.3.0]
 

@@ -110,8 +110,12 @@ pub fn service_start(u: &ServiceUnit) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let plist = plist_path(u);
-        run_ok("launchctl", &["bootstrap", &format!("gui/{}", current_uid()), &plist])
+        // Usually already loaded (installer bootstrap + KeepAlive); re-bootstrapping
+        // a loaded label fails with EIO, so tolerate it, then kickstart to ensure the
+        // job runs (no -k: don't kill a healthy instance).
+        let uid = current_uid();
+        let _ = run_ok("launchctl", &["bootstrap", &format!("gui/{uid}"), &plist_path(u)]);
+        run_ok("launchctl", &["kickstart", &format!("gui/{uid}/{}", u.label)])
     }
     #[cfg(target_os = "windows")]
     {
