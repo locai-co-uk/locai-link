@@ -50,7 +50,6 @@ if [ -n "${LOCAI_FLEET_KEY:-}" ];        then REG_KIND="--fleet-key";        REG
 export LOCAI_REGISTRATION_KEY LOCAI_FLEET_KEY
 
 has_session() { for f in "$INSTALL_ROOT"/configs/session_*.json; do [ -f "$f" ] && return 0; done; return 1; }
-on_path()     { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
 
 detect_platform() {
     os="$(uname -s)"; machine="$(uname -m)"
@@ -97,10 +96,11 @@ link_cli() {
     if [ "$(uname -s)" = "Darwin" ] && [ -w /usr/local/bin ]; then CLI_DIR="/usr/local/bin"; else CLI_DIR="$HOME/.local/bin"; fi
     mkdir -p "$CLI_DIR"
     ln -sf "$BIN" "$CLI_DIR/locai"
-    # macOS non-admin falls back to ~/.local/bin, which the default PATH omits, so
-    # bare `locai` won't resolve. Flag it so the closing output shows the fix and
-    # prints runnable full-path hints instead of a soft, easy-to-miss note.
-    if on_path "$CLI_DIR"; then
+    # Use the bare `locai` in hints only when the shell resolves it to the binary
+    # we just linked; another `locai` earlier on PATH (or a CLI_DIR not on PATH)
+    # would otherwise make the hints target the wrong install. Else full path + flag
+    # so the closing output shows the PATH fix.
+    if [ "$(command -v locai 2>/dev/null)" = "$CLI_DIR/locai" ]; then
         CLI_OFF_PATH=0; LOCAI_CMD="locai"
     else
         CLI_OFF_PATH=1; LOCAI_CMD="$CLI_DIR/locai"
@@ -179,8 +179,13 @@ cli_path_warning() {
     [ "${CLI_OFF_PATH:-0}" = 1 ] || return 0
     log ""
     log "IMPORTANT: 'locai' was installed to $CLI_DIR, which is not on your PATH."
-    log "Add it (zsh), then open a new terminal so 'locai' works everywhere:"
-    log "  echo 'export PATH=\"$CLI_DIR:\$PATH\"' >> ~/.zshrc"
+    case "${SHELL##*/}" in
+        zsh)  log "Add it, then open a new terminal so 'locai' works everywhere:"
+              log "  echo 'export PATH=\"$CLI_DIR:\$PATH\"' >> ~/.zshrc" ;;
+        bash) log "Add it, then open a new terminal so 'locai' works everywhere:"
+              log "  echo 'export PATH=\"$CLI_DIR:\$PATH\"' >> ~/.bashrc" ;;
+        *)    log "Add $CLI_DIR to your shell's PATH, then open a new terminal so 'locai' works everywhere." ;;
+    esac
 }
 
 footer() {
