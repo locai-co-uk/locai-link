@@ -274,6 +274,13 @@ pub fn supervise_forever(control: SupervisorControl) {
         let mut command = Command::new(&runtime);
         command.arg("run").current_dir(&install_root);
         apply_baked_env(&mut command);
+        // Identity the child will load. A `register`/re-enrollment writes a newer
+        // session with a different identity, and the runtime can't hot-swap it, so
+        // respawn to adopt it rather than run the old one until a manual restart.
+        // Read just before spawn so it matches what the child loads; re-checked
+        // below at most once a second.
+        let spawned_identity =
+            crate::shared::read_identity(&install_root).map(|i| (i.device_id, i.api_key, i.api_url));
         let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -284,11 +291,6 @@ pub fn supervise_forever(control: SupervisorControl) {
             }
         };
         control.set_running(true);
-        // Credentials the runtime bound at startup. A `register`/re-enrollment
-        // writes a newer session with different credentials, and the runtime can't
-        // hot-swap identity, so respawn to adopt it rather than run the old one
-        // until a manual restart. Re-checked at most once a second.
-        let spawned_creds = crate::shared::read_identity(&install_root).map(|i| (i.device_id, i.api_key));
         let mut last_identity_check = std::time::Instant::now();
 
         // Interruptible wait: poll for exit while honouring Stop/Restart and a
@@ -300,10 +302,11 @@ pub fn supervise_forever(control: SupervisorControl) {
             }
             if last_identity_check.elapsed() >= Duration::from_secs(1) {
                 last_identity_check = std::time::Instant::now();
-                let current = crate::shared::read_identity(&install_root).map(|i| (i.device_id, i.api_key));
+                let current =
+                    crate::shared::read_identity(&install_root).map(|i| (i.device_id, i.api_key, i.api_url));
                 // Respawn only on a valid, different identity; a transient read miss
                 // (session mid-write) must not kill a healthy runtime.
-                if current.is_some() && current != spawned_creds {
+                if current.is_some() && current != spawned_identity {
                     eprintln!("[supervisor] device identity changed; respawning runtime to adopt it");
                     terminate_child(&mut child);
                     break Outcome::Interrupted;
