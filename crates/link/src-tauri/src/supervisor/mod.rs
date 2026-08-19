@@ -284,12 +284,30 @@ pub fn supervise_forever(control: SupervisorControl) {
             }
         };
         control.set_running(true);
+        // Credentials the runtime bound at startup. A `register`/re-enrollment
+        // writes a newer session with different credentials, and the runtime can't
+        // hot-swap identity, so respawn to adopt it rather than run the old one
+        // until a manual restart. Re-checked at most once a second.
+        let spawned_creds = crate::shared::read_identity(&install_root).map(|i| (i.device_id, i.api_key));
+        let mut last_identity_check = std::time::Instant::now();
 
-        // Interruptible wait: poll for exit while honouring Stop/Restart.
+        // Interruptible wait: poll for exit while honouring Stop/Restart and a
+        // changed device identity.
         let outcome = loop {
             if !control.want_running() || control.take_restart() {
                 terminate_child(&mut child);
                 break Outcome::Interrupted;
+            }
+            if last_identity_check.elapsed() >= Duration::from_secs(1) {
+                last_identity_check = std::time::Instant::now();
+                let current = crate::shared::read_identity(&install_root).map(|i| (i.device_id, i.api_key));
+                // Respawn only on a valid, different identity; a transient read miss
+                // (session mid-write) must not kill a healthy runtime.
+                if current.is_some() && current != spawned_creds {
+                    eprintln!("[supervisor] device identity changed; respawning runtime to adopt it");
+                    terminate_child(&mut child);
+                    break Outcome::Interrupted;
+                }
             }
             match child.try_wait() {
                 Ok(Some(st)) => break Outcome::Exited(st.code()),

@@ -1302,7 +1302,10 @@ def _run_admin_finish_macos(install_root: Path) -> None:
     every boot."""
     finisher = install_root / "current" / "finish-migration.sh"
     if not finisher.is_file():
-        logger.warning(f"migration finisher missing at {finisher}; skipping admin finish")
+        # finish-migration.sh ships only with desktop bundles; a headless install
+        # has none and nothing privileged to finish, so absence is a normal no-op,
+        # not a warning.
+        logger.debug(f"no migration finisher at {finisher}; nothing to finish (headless or already done)")
         return
     version = read_manifest(install_root).version
     marker = install_root / constants.STATE_SUBDIR / _MIGRATION_PROMPTED_MARKER

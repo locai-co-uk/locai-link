@@ -6,7 +6,7 @@ so write them for the reader of the release. Keep pending work under
 [Unreleased] and rename it to the version on release. Detail goes in the ###
 sections below the summary. -->
 
-## [Unreleased]
+## [1.3.2]
 
 - Fixed: a freshly installed headless device could fail to download its inference
   engines and so never start a deployed model. The engine download now trusts a
@@ -18,6 +18,9 @@ sections below the summary. -->
 - Fixed: on a macOS account without admin rights, the headless installer put the
   `locai` command outside the default PATH, so it looked missing. The installer now
   shows the one-line PATH fix and prints commands that run as-is.
+- Fixed: registering or re-enrolling a device while the service is already running
+  now takes effect immediately — the agent adopts the new identity and comes online
+  without a manual restart, instead of sitting offline until it was restarted.
 
 ## [1.3.0]
 
