@@ -12,6 +12,12 @@ sections below the summary. -->
   engines and so never start a deployed model. The engine download now trusts a
   certificate store the packaged build can always find, so it works out of the box
   on Linux, macOS, and Windows (and still honours a corporate certificate override).
+- Fixed: on macOS, starting Locai Link could fail with an "Input/output error" and
+  leave the device showing offline until a manual restart. Starting the service is
+  now reliable whether or not it was already loaded.
+- Fixed: on a macOS account without admin rights, the headless installer put the
+  `locai` command outside the default PATH, so it looked missing. The installer now
+  shows the one-line PATH fix and prints commands that run as-is.
 
 ## [1.3.0]
 
